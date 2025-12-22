@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ChangeEvent, type MouseEvent } from 'react'
 import {
   Box,
   Typography,
@@ -457,7 +457,7 @@ export default function ConfigurationPage() {
                 label={dataStatus ? '已启用' : '已禁用'}
                 color={dataStatus ? 'success' : 'default'}
                 size="small"
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e: MouseEvent) => e.stopPropagation()}
               />
             </Box>
           </AccordionSummary>
@@ -508,7 +508,7 @@ export default function ConfigurationPage() {
                 label={airplaneMode?.enabled ? '已开启' : '已关闭'}
                 color={airplaneMode?.enabled ? 'warning' : 'default'}
                 size="small"
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e: MouseEvent) => e.stopPropagation()}
               />
             </Box>
           </AccordionSummary>
@@ -583,7 +583,7 @@ export default function ConfigurationPage() {
                 label={usbMode?.current_mode_name || 'N/A'}
                 color="primary"
                 size="small"
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e: MouseEvent) => e.stopPropagation()}
               />
             </Box>
           </AccordionSummary>
@@ -607,7 +607,7 @@ export default function ConfigurationPage() {
                     <Box>
                       <Typography variant="body1">CDC-NCM (推荐)</Typography>
                       <Typography variant="caption" color="text.secondary">
-                        网络控制模型 - 性能最好，支持 Linux/Windows/macOS
+                        网络控制模型 - 性能最好，支持 Linux/macOS
                       </Typography>
                     </Box>
                   }
@@ -647,7 +647,7 @@ export default function ConfigurationPage() {
                 control={
                   <Switch
                     checked={useHotSwitch}
-                    onChange={(e) => setUseHotSwitch(e.target.checked)}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setUseHotSwitch(e.target.checked)}
                     color="warning"
                   />
                 }
@@ -656,7 +656,7 @@ export default function ConfigurationPage() {
                     <FlashOn color={useHotSwitch ? 'warning' : 'disabled'} />
                     <Box>
                       <Typography variant="body1" fontWeight={600}>
-                        热切换模式
+                        热切换模式(开发中...请勿使用)
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
                         立即切换 USB 模式，无需重启（可能导致短暂断连）
@@ -764,7 +764,7 @@ export default function ConfigurationPage() {
                 label={webhookConfig.enabled ? '已启用' : '已禁用'}
                 color={webhookConfig.enabled ? 'success' : 'default'}
                 size="small"
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e: MouseEvent) => e.stopPropagation()}
               />
             </Box>
           </AccordionSummary>
@@ -780,7 +780,7 @@ export default function ConfigurationPage() {
               control={
                 <Switch
                   checked={webhookConfig.enabled}
-                  onChange={(e) => setWebhookConfig({ ...webhookConfig, enabled: e.target.checked })}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, enabled: e.target.checked })}
                   color="success"
                 />
               }
@@ -802,7 +802,7 @@ export default function ConfigurationPage() {
               fullWidth
               label="Webhook URL"
               value={webhookConfig.url}
-              onChange={(e) => setWebhookConfig({ ...webhookConfig, url: e.target.value })}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, url: e.target.value })}
               placeholder="https://example.com/webhook"
               sx={{ mb: 2 }}
               disabled={!webhookConfig.enabled}
@@ -814,7 +814,7 @@ export default function ConfigurationPage() {
                 control={
                   <Switch
                     checked={webhookConfig.forward_sms}
-                    onChange={(e) => setWebhookConfig({ ...webhookConfig, forward_sms: e.target.checked })}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, forward_sms: e.target.checked })}
                     disabled={!webhookConfig.enabled}
                   />
                 }
@@ -824,7 +824,7 @@ export default function ConfigurationPage() {
                 control={
                   <Switch
                     checked={webhookConfig.forward_calls}
-                    onChange={(e) => setWebhookConfig({ ...webhookConfig, forward_calls: e.target.checked })}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, forward_calls: e.target.checked })}
                     disabled={!webhookConfig.enabled}
                   />
                 }
@@ -837,7 +837,7 @@ export default function ConfigurationPage() {
               fullWidth
               label="签名密钥 (可选)"
               value={webhookConfig.secret}
-              onChange={(e) => setWebhookConfig({ ...webhookConfig, secret: e.target.value })}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, secret: e.target.value })}
               placeholder="用于验证 Webhook 请求的密钥"
               type="password"
               sx={{ mb: 2 }}
@@ -852,7 +852,7 @@ export default function ConfigurationPage() {
                 size="small"
                 label="Header Key"
                 value={newHeaderKey}
-                onChange={(e) => setNewHeaderKey(e.target.value)}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setNewHeaderKey(e.target.value)}
                 disabled={!webhookConfig.enabled}
                 sx={{ flex: 1 }}
               />
@@ -860,7 +860,7 @@ export default function ConfigurationPage() {
                 size="small"
                 label="Header Value"
                 value={newHeaderValue}
-                onChange={(e) => setNewHeaderValue(e.target.value)}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setNewHeaderValue(e.target.value)}
                 disabled={!webhookConfig.enabled}
                 sx={{ flex: 1 }}
               />
@@ -908,7 +908,7 @@ export default function ConfigurationPage() {
               fullWidth
               label="短信通知模板"
               value={webhookConfig.sms_template}
-              onChange={(e) => setWebhookConfig({ ...webhookConfig, sms_template: e.target.value })}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, sms_template: e.target.value })}
               multiline
               rows={6}
               sx={{ mb: 2, fontFamily: 'monospace' }}
@@ -924,7 +924,7 @@ export default function ConfigurationPage() {
               fullWidth
               label="通话通知模板"
               value={webhookConfig.call_template}
-              onChange={(e) => setWebhookConfig({ ...webhookConfig, call_template: e.target.value })}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, call_template: e.target.value })}
               multiline
               rows={6}
               sx={{ mb: 2 }}

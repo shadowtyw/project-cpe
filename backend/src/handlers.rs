@@ -1321,12 +1321,6 @@ pub async fn get_band_lock_handler(State(conn): State<Arc<Connection>>) -> impl 
         Err(e) => (0, 0, Some(format!("Error: {}", e))),
     };
 
-    // 将位掩码转换为频段号列表
-    let lte_fdd_bands = bitmask_to_bands(lte_fdd_mask, 1); // LTE FDD: B1-B16
-    let lte_tdd_bands = bitmask_to_bands(lte_tdd_mask, 33); // LTE TDD: B33-B48
-    let nr_fdd_bands = bitmask_to_bands(nr_fdd_mask, 100); // NR FDD: 展锐特殊映射 (N1, N3, N28)
-    let nr_tdd_bands = bitmask_to_bands(nr_tdd_mask, 41); // NR TDD: 展锐特殊映射 (N41, N77, N78, N79)
-
     // UDX710 设备支持的全部频段掩码
     // LTE: FDD=149 (B1+B3+B5+B8), TDD=320 (B39+B41)
     // NR: FDD=517 (N1+N3+N28), TDD=912 (N41+N77+N78+N79)
@@ -1343,6 +1337,22 @@ pub async fn get_band_lock_handler(State(conn): State<Arc<Connection>>) -> impl 
     let nr_is_all_or_zero = (nr_fdd_mask == NR_FDD_ALL && nr_tdd_mask == NR_TDD_ALL)
                            || (nr_fdd_mask == 0 && nr_tdd_mask == 0);
     let locked = !(lte_is_all_or_zero && nr_is_all_or_zero);
+    
+    // 将位掩码转换为频段号列表
+    // 未锁定时返回空数组（前端显示为"未锁定模式"）
+    // 已锁定时返回具体频段列表（前端显示为"自定义锁定模式"）
+    let (lte_fdd_bands, lte_tdd_bands, nr_fdd_bands, nr_tdd_bands) = if !locked {
+        // 未锁定：返回空数组
+        (vec![], vec![], vec![], vec![])
+    } else {
+        // 已锁定：返回具体频段
+        (
+            bitmask_to_bands(lte_fdd_mask, 1),    // LTE FDD: B1-B16
+            bitmask_to_bands(lte_tdd_mask, 33),   // LTE TDD: B33-B48
+            bitmask_to_bands(nr_fdd_mask, 100),   // NR FDD: 展锐特殊映射
+            bitmask_to_bands(nr_tdd_mask, 41),    // NR TDD: 展锐特殊映射
+        )
+    };
 
     // 构建调试信息
     let raw_response = Some(format!(

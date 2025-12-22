@@ -8,7 +8,8 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { Box, Chip, Typography, Paper, alpha, useTheme } from '@mui/material'
+import { Box, Chip, Typography, Paper, useTheme, type Theme } from '@mui/material'
+import { alpha } from '@/utils/theme'
 import {
   SignalCellularAlt,
   WifiTethering,
@@ -38,7 +39,7 @@ export function StatusOverview({
   imsStatus,
   roaming,
 }: StatusOverviewProps) {
-  const theme = useTheme()
+  const theme = useTheme<Theme>()
 
   // 获取网络制式显示
   const getNetworkTech = () => {
@@ -59,8 +60,15 @@ export function StatusOverview({
         p: 2,
         mb: 2,
         borderRadius: 2,
-        background: `linear-gradient(135deg, ${alpha(theme.palette.primary.main, 0.08)} 0%, ${alpha(theme.palette.secondary.main, 0.03)} 100%)`,
-        border: `1px solid ${alpha(theme.palette.primary.main, 0.1)}`,
+        background: (() => {
+          const primaryMain = (theme.palette.primary as { main: string }).main
+          const secondaryMain = (theme.palette.secondary as { main: string }).main
+          return `linear-gradient(135deg, ${alpha(primaryMain, 0.08)} 0%, ${alpha(secondaryMain, 0.03)} 100%)`
+        })(),
+        border: (() => {
+          const primaryMain = (theme.palette.primary as { main: string }).main
+          return `1px solid ${alpha(primaryMain, 0.1)}`
+        })(),
       }}
     >
       <Box display="flex" flexWrap="wrap" alignItems="center" gap={2}>

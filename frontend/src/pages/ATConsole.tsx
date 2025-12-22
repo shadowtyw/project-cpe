@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, type ChangeEvent } from 'react'
 import {
   Box,
   Typography,
@@ -21,6 +21,7 @@ import {
   IconButton,
   Tooltip,
   Collapse,
+  type Theme,
 } from '@mui/material'
 import {
   Computer,
@@ -210,7 +211,7 @@ export default function ATConsolePage() {
               display: 'flex', 
               alignItems: 'center', 
               justifyContent: 'center',
-              bgcolor: (theme) => theme.palette.mode === 'dark' ? '#1e1e1e' : '#f8f9fa',
+              bgcolor: (theme: Theme) => theme.palette.mode === 'dark' ? '#1e1e1e' : '#f8f9fa',
             }}
           >
             <Typography variant="body2" color="text.secondary">
@@ -222,7 +223,7 @@ export default function ATConsolePage() {
             sx={{
               flex: 1,
               overflowY: 'auto',
-              backgroundColor: (theme) => theme.palette.mode === 'dark' ? '#1e1e1e' : '#1a1a2e',
+              backgroundColor: (theme: Theme) => theme.palette.mode === 'dark' ? '#1e1e1e' : '#1a1a2e',
               p: 1.5,
             }}
           >
@@ -353,7 +354,7 @@ export default function ATConsolePage() {
               <TextField
                 label="IMEI"
                 value={currentImei}
-                onChange={(e) => {
+                onChange={(e: ChangeEvent<HTMLInputElement>) => {
                   const value = e.target.value.replace(/\D/g, '').slice(0, 15)
                   setCurrentImei(value)
                 }}
@@ -394,7 +395,7 @@ export default function ATConsolePage() {
           <TextField
             fullWidth
             value={command}
-            onChange={(e) => setCommand(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setCommand(e.target.value)}
             onKeyDown={handleKeyPress}
             placeholder="输入 AT 指令，如: AT+CGSN (Ctrl+Enter 发送)"
             disabled={loading}

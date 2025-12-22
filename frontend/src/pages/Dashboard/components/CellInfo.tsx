@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useState } from 'react'
+import { useState, type MouseEvent } from 'react'
 import {
   Box,
   Card,
@@ -23,10 +23,11 @@ import {
   TableCell,
   TableContainer,
   TableHead,
+  type Theme,
   TableRow,
   Paper,
-  alpha,
 } from '@mui/material'
+import { alpha } from '@/utils/theme'
 import { CellTower, Visibility, VisibilityOff, ExpandMore, ExpandLess, Info } from '@mui/icons-material'
 import { getSensitiveStyle, formatSignalValue, getSignalChipColor } from '../utils'
 import type { CellsResponse } from '@/api/types'
@@ -58,7 +59,7 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
           <Tooltip title={showInfo ? '隐藏敏感信息' : '显示完整信息'}>
             <IconButton
               size="small"
-              onClick={(e) => {
+              onClick={(e: MouseEvent) => {
                 e.stopPropagation()
                 setShowInfo(!showInfo)
               }}
@@ -120,7 +121,10 @@ export function CellInfo({ cellsInfo }: CellInfoProps) {
                       key={idx} 
                       sx={{ 
                         bgcolor: cell.is_serving 
-                          ? (theme) => alpha(theme.palette.success.main, theme.palette.mode === 'dark' ? 0.15 : 0.08)
+                          ? (theme: Theme) => {
+                              const successMain = (theme.palette.success as { main: string }).main
+                              return alpha(successMain, theme.palette.mode === 'dark' ? 0.15 : 0.08)
+                            }
                           : 'inherit',
                       }}
                     >

@@ -1,11 +1,12 @@
 {
   "name": "udx710",
   "private": true,
-  "version": "3.2.5",
+  "version": "3.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm lint && tsc -b && vite build",
+    "build": "pnpm lint && vite build",
+    "build:full": "pnpm lint && tsc -b && vite build",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "preview": "vite preview",

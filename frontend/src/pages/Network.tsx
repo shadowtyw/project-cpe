@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ChangeEvent } from 'react'
 import {
   Box,
   Typography,
@@ -47,6 +47,7 @@ import {
   FormControl,
   InputLabel,
 } from '@mui/material'
+import type { Theme } from '@mui/material/styles'
 import {
   CellTower,
   Business,
@@ -125,11 +126,12 @@ export default function NetworkPage() {
   
   // 频段锁定状态
   const [currentRadioMode, setCurrentRadioMode] = useState<RadioMode>('auto')
+  const [lockMode, setLockMode] = useState<'unlocked' | 'custom'>('unlocked') // 锁定模式
   const [lteFddBands, setLteFddBands] = useState<number[]>([])
   const [lteTddBands, setLteTddBands] = useState<number[]>([])
   const [nrFddBands, setNrFddBands] = useState<number[]>([])
   const [nrTddBands, setNrTddBands] = useState<number[]>([])
-  const [bandLockStatus, setBandLockStatus] = useState<BandLockStatus | null>(null)
+  const [_bandLockStatus, setBandLockStatus] = useState<BandLockStatus | null>(null)
   const [modeLoading, setModeLoading] = useState(false)
   const [bandLoading, setBandLoading] = useState(false)
   
@@ -167,10 +169,30 @@ export default function NetworkPage() {
       
       if (bandLockRes.data) {
         setBandLockStatus(bandLockRes.data)
-        setLteFddBands(bandLockRes.data.lte_fdd_bands)
-        setLteTddBands(bandLockRes.data.lte_tdd_bands)
-        setNrFddBands(bandLockRes.data.nr_fdd_bands)
-        setNrTddBands(bandLockRes.data.nr_tdd_bands)
+        
+        // 根据后端返回判断锁定模式
+        // 后端逻辑：未锁定时返回空数组，已锁定时返回具体频段
+        const isLocked = bandLockRes.data.locked
+        const hasAnyBands = bandLockRes.data.lte_fdd_bands.length > 0 
+                         || bandLockRes.data.lte_tdd_bands.length > 0
+                         || bandLockRes.data.nr_fdd_bands.length > 0
+                         || bandLockRes.data.nr_tdd_bands.length > 0
+        
+        if (!isLocked || !hasAnyBands) {
+          // 未锁定模式
+          setLockMode('unlocked')
+          setLteFddBands([])
+          setLteTddBands([])
+          setNrFddBands([])
+          setNrTddBands([])
+        } else {
+          // 自定义锁定模式
+          setLockMode('custom')
+          setLteFddBands(bandLockRes.data.lte_fdd_bands)
+          setLteTddBands(bandLockRes.data.lte_tdd_bands)
+          setNrFddBands(bandLockRes.data.nr_fdd_bands)
+          setNrTddBands(bandLockRes.data.nr_tdd_bands)
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -407,16 +429,28 @@ export default function NetworkPage() {
   const handleApplyBandLock = async () => {
     setBandLoading(true)
     setError(null)
-    const request: BandLockRequest = {
-      lte_fdd_bands: lteFddBands,
-      lte_tdd_bands: lteTddBands,
-      nr_fdd_bands: nrFddBands,
-      nr_tdd_bands: nrTddBands,
-    }
+    
+    // 根据锁定模式构造请求
+    const request: BandLockRequest = lockMode === 'unlocked' 
+      ? {
+          // 未锁定模式：发送空数组，解除所有限制
+          lte_fdd_bands: [],
+          lte_tdd_bands: [],
+          nr_fdd_bands: [],
+          nr_tdd_bands: [],
+        }
+      : {
+          // 自定义锁定模式：发送用户选择的频段
+          lte_fdd_bands: lteFddBands,
+          lte_tdd_bands: lteTddBands,
+          nr_fdd_bands: nrFddBands,
+          nr_tdd_bands: nrTddBands,
+        }
+    
     try {
       const response = await api.setBandLock(request)
       setSuccess(response.message || '频段锁定配置已应用')
-      // 1秒后刷新频段锁定状态（只读显示）
+      // 1秒后刷新频段锁定状态
       setTimeout(() => void loadBandLockConfig(), 1000)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -863,9 +897,9 @@ export default function NetworkPage() {
                         key={idx} 
                         sx={{ 
                           bgcolor: isLocked 
-                            ? (theme) => theme.palette.mode === 'dark' ? 'rgba(237, 108, 2, 0.15)' : 'warning.light'
+                            ? (theme: Theme) => theme.palette.mode === 'dark' ? 'rgba(237, 108, 2, 0.15)' : 'warning.light'
                             : cell.is_serving 
-                              ? (theme) => theme.palette.mode === 'dark' ? 'rgba(102, 187, 106, 0.15)' : 'rgba(102, 187, 106, 0.08)'
+                              ? (theme: Theme) => theme.palette.mode === 'dark' ? 'rgba(102, 187, 106, 0.15)' : 'rgba(102, 187, 106, 0.08)'
                               : 'inherit',
                         }}
                       >
@@ -1001,20 +1035,35 @@ export default function NetworkPage() {
 
             <Divider sx={{ my: 1.5 }} />
 
-            {bandLockStatus && (
-              <Box sx={{ mb: 1.5 }}>
-                <Chip 
-                  label={bandLockStatus.locked ? '频段已限制' : '全部频段可用'} 
-                  size="small" 
-                  color={bandLockStatus.locked ? 'warning' : 'success'} 
-                  variant="outlined"
+            {/* 锁定模式选择 */}
+            <Box mb={2}>
+              <Typography variant="caption" color="text.secondary" gutterBottom display="block">
+                锁定模式
+              </Typography>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Chip
+                  label="未锁定（使用所有频段）"
+                  size="small"
+                  color={lockMode === 'unlocked' ? 'success' : 'default'}
+                  onClick={() => setLockMode('unlocked')}
+                  disabled={bandLoading}
+                  icon={lockMode === 'unlocked' ? <LockOpen /> : undefined}
                 />
-                <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                  {bandLockStatus.locked ? '仅勾选的频段可用' : '设备使用所有支持的频段'}
-                </Typography>
-              </Box>
-            )}
+                <Chip
+                  label="自定义锁定（选择允许的频段）"
+                  size="small"
+                  color={lockMode === 'custom' ? 'warning' : 'default'}
+                  onClick={() => setLockMode('custom')}
+                  disabled={bandLoading}
+                  icon={lockMode === 'custom' ? <Lock /> : undefined}
+                />
+              </Stack>
+            </Box>
 
+            <Divider sx={{ my: 1.5 }} />
+
+            {/* 频段选择区域 - 只在自定义锁定模式下显示 */}
+            {lockMode === 'custom' && (
             <Grid container spacing={1.5}>
               {/* LTE FDD 频段 */}
               <Grid size={{ xs: 6, sm: 3 }}>
@@ -1104,6 +1153,33 @@ export default function NetworkPage() {
                 </Box>
               </Grid>
             </Grid>
+            )}
+
+            {/* 未锁定模式提示 */}
+            {lockMode === 'unlocked' && (
+              <Alert severity="success" sx={{ mb: 2 }}>
+                当前模式：<strong>未锁定</strong><br />
+                设备将使用所有支持的频段（B1, B3, B5, B8, B39, B41, N1, N3, N28, N41, N77, N78, N79）
+              </Alert>
+            )}
+
+            {/* 自定义锁定模式提示 */}
+            {lockMode === 'custom' && (
+              <Alert severity="info" sx={{ mt: 1.5, mb: 1.5 }}>
+                <Typography variant="caption" display="block" gutterBottom>
+                  💡 <strong>提示</strong>：
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • 勾选的频段表示允许使用
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • 5G 频段：用于 5G 网络连接
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • 4G 频段：用于 4G 网络连接，以及 5G 信号弱时的回退
+                </Typography>
+              </Alert>
+            )}
 
             {/* 操作按钮 */}
             <Box sx={{ mt: 1.5, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
@@ -1199,7 +1275,7 @@ export default function NetworkPage() {
               control={
                 <Switch
                   checked={showIpAddresses}
-                  onChange={(e) => setShowIpAddresses(e.target.checked)}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setShowIpAddresses(e.target.checked)}
                   size="small"
                 />
               }
@@ -1209,7 +1285,7 @@ export default function NetworkPage() {
               control={
                 <Switch
                   checked={showDownInterfaces}
-                  onChange={(e) => setShowDownInterfaces(e.target.checked)}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setShowDownInterfaces(e.target.checked)}
                   size="small"
                 />
               }
@@ -1389,7 +1465,7 @@ export default function NetworkPage() {
                     <TextField
                       label="APN 名称"
                       value={apnForm.apn}
-                      onChange={(e) => setApnForm({ ...apnForm, apn: e.target.value })}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setApnForm({ ...apnForm, apn: e.target.value })}
                       fullWidth
                       placeholder="例如: cbnet, cmnet, 3gnet"
                       helperText="运营商提供的接入点名称"
@@ -1415,7 +1491,7 @@ export default function NetworkPage() {
                         <TextField
                           label="用户名"
                           value={apnForm.username}
-                          onChange={(e) => setApnForm({ ...apnForm, username: e.target.value })}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => setApnForm({ ...apnForm, username: e.target.value })}
                           fullWidth
                           placeholder="可选"
                         />
@@ -1425,7 +1501,7 @@ export default function NetworkPage() {
                           label="密码"
                           type="password"
                           value={apnForm.password}
-                          onChange={(e) => setApnForm({ ...apnForm, password: e.target.value })}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => setApnForm({ ...apnForm, password: e.target.value })}
                           fullWidth
                           placeholder="可选"
                         />

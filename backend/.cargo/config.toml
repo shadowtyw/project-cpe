@@ -1,4 +1,5 @@
 [target.aarch64-unknown-linux-musl]
+linker = "aarch64-unknown-linux-musl-gcc"
 rustflags = ["-C", "target-feature=+crt-static"]
 
 # 为构建脚本配置本地编译器

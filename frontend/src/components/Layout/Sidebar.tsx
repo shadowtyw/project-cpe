@@ -60,7 +60,7 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
   const navigate = useNavigate()
   const location = useLocation()
 
-  const handleNavigation = (path: string) => {
+  const handleNavigation = (path: string): void => {
     void navigate(path)
     if (isMobile) {
       onClose()

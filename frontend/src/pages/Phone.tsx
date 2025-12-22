@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, type ChangeEvent } from 'react'
 import {
   Box,
   Card,
@@ -499,7 +499,7 @@ export default function PhonePage() {
                 fullWidth
                 variant="standard"
                 value={dialNumber}
-                onChange={(e) => setDialNumber(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDialNumber(e.target.value)}
                 placeholder="输入电话号码"
                 slotProps={{
                   input: {
@@ -690,7 +690,7 @@ export default function PhonePage() {
                     <Typography sx={{ minWidth: 40 }}>{micVolume}%</Typography>
                   </Box>
                   <FormControlLabel
-                    control={<Switch checked={muted} onChange={(e) => setMuted(e.target.checked)} color="error" />}
+                    control={<Switch checked={muted} onChange={(e: ChangeEvent<HTMLInputElement>) => setMuted(e.target.checked)} color="error" />}
                     label={<Box display="flex" alignItems="center"><MicOff sx={{ mr: 1 }} />静音</Box>}
                   />
                 </Box>
@@ -754,7 +754,7 @@ export default function PhonePage() {
                       fullWidth
                       label="转移号码"
                       value={forwardNumber}
-                      onChange={(e) => setForwardNumber(e.target.value)}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setForwardNumber(e.target.value)}
                       placeholder="留空则禁用"
                       sx={{ mb: 2 }}
                     />

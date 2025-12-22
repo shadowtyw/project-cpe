@@ -10,7 +10,7 @@
  */
 import { useState } from 'react'
 import { Outlet } from 'react-router-dom'
-import { Box, useMediaQuery, useTheme } from '@mui/material'
+import { Box, useMediaQuery, useTheme, type Theme } from '@mui/material'
 import Sidebar from './Sidebar'
 import TopBar from './TopBar'
 import { RefreshContext } from '../../contexts/RefreshContext'
@@ -18,7 +18,7 @@ import { RefreshContext } from '../../contexts/RefreshContext'
 const DRAWER_WIDTH = 240
 
 export default function MainLayout() {
-  const theme = useTheme()
+  const theme = useTheme<Theme>()
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'))
   const [mobileOpen, setMobileOpen] = useState(false)
   const [desktopOpen, setDesktopOpen] = useState(true) // 桌面端侧边栏状态，默认展开

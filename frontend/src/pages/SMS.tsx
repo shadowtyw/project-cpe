@@ -8,7 +8,7 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, type ChangeEvent, type KeyboardEvent } from 'react'
 import {
   Box,
   Card,
@@ -32,10 +32,10 @@ import {
   Badge,
   Avatar,
   Snackbar,
-  useTheme,
   useMediaQuery,
   InputAdornment,
 } from '@mui/material'
+import type { Theme } from '@mui/material/styles'
 import {
   Sms as SmsIcon,
   Send,
@@ -55,8 +55,7 @@ interface ConversationGroup {
 }
 
 export default function SMSPage() {
-  const theme = useTheme()
-  const isMobile = useMediaQuery(theme.breakpoints.down('md'))
+  const isMobile = useMediaQuery<Theme>((theme: Theme) => theme.breakpoints.down('md'))
   
   const [messages, setMessages] = useState<SmsMessage[]>([])
   const [stats, setStats] = useState<SmsStats | null>(null)
@@ -411,7 +410,7 @@ export default function SMSPage() {
           flex: 1, 
           overflow: 'auto', 
           p: 2,
-          bgcolor: (theme) => theme.palette.mode === 'dark' ? 'grey.900' : 'grey.50',
+          bgcolor: (theme: Theme) => theme.palette.mode === 'dark' ? 'grey.900' : 'grey.50',
         }}
       >
         {conversationLoading ? (
@@ -436,7 +435,7 @@ export default function SMSPage() {
                     maxWidth: '75%',
                     bgcolor: msg.direction === 'outgoing' 
                       ? 'primary.main' 
-                      : (theme) => theme.palette.mode === 'dark' ? 'grey.800' : 'white',
+                      : (theme: Theme) => theme.palette.mode === 'dark' ? 'grey.800' : 'white',
                     color: msg.direction === 'outgoing' 
                       ? 'white' 
                       : 'text.primary',
@@ -485,12 +484,12 @@ export default function SMSPage() {
           multiline
           maxRows={4}
           value={content}
-          onChange={(e) => setContent(e.target.value)}
+          onChange={(e: ChangeEvent<HTMLInputElement>) => setContent(e.target.value)}
           placeholder="输入短信内容..."
           disabled={sendLoading}
           onFocus={() => { inputFocusedRef.current = true }}
           onBlur={() => { inputFocusedRef.current = false }}
-          onKeyDown={(e) => {
+          onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               void handleSend()
@@ -599,10 +598,10 @@ export default function SMSPage() {
             fullWidth
             label="电话号码"
             value={newChatNumber}
-            onChange={(e) => setNewChatNumber(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setNewChatNumber(e.target.value)}
             placeholder="输入收件人电话号码"
             sx={{ mt: 1 }}
-            onKeyDown={(e) => {
+            onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
               if (e.key === 'Enter') {
                 handleStartNewChat()
               }

@@ -8,7 +8,8 @@
  * 
  * Copyright (c) 2025 by 1orz, All Rights Reserved. 
  */
-import { Box, Card, CardContent, Typography, Stack, Chip, Paper, alpha, useTheme } from '@mui/material'
+import { Box, Card, CardContent, Typography, Stack, Chip, Paper, useTheme, type Theme } from '@mui/material'
+import { alpha } from '@/utils/theme'
 import { Speed, ArrowDownward, ArrowUpward } from '@mui/icons-material'
 import { SparkLineChart } from '@mui/x-charts/SparkLineChart'
 import { formatBytes, formatSpeed } from '../utils'
@@ -21,7 +22,7 @@ interface NetworkSpeedProps {
 }
 
 export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
-  const theme = useTheme()
+  const theme = useTheme<Theme>()
 
   return (
     <Card sx={{ height: '100%', overflow: 'hidden' }}>
@@ -51,7 +52,10 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                   sx={{ 
                     p: 2, 
                     overflow: 'hidden',
-                    background: alpha(theme.palette.background.paper, 0.6),
+                    background: (() => {
+                      const paperColor = (theme.palette.background as { paper: string }).paper
+                      return alpha(paperColor, 0.6)
+                    })(),
                   }}
                 >
                   {/* 接口名称和总流量 */}
@@ -71,14 +75,14 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                   <Box mb={1.5}>
                     <Box display="flex" alignItems="center" justifyContent="space-between" mb={0.5}>
                       <Box display="flex" alignItems="center" gap={0.5}>
-                        <ArrowDownward fontSize="small" sx={{ color: theme.palette.success.main }} />
+                        <ArrowDownward fontSize="small" sx={{ color: (theme.palette.success as { main: string }).main }} />
                         <Typography variant="caption" color="text.secondary">下载</Typography>
                       </Box>
                       <Typography 
                         variant="body1" 
                         fontWeight="bold" 
                         sx={{ 
-                          color: theme.palette.success.main,
+                          color: (theme.palette.success as { main: string }).main,
                           fontFamily: 'monospace',
                           minWidth: 90,
                           textAlign: 'right',
@@ -94,7 +98,7 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                           height={40}
                           area
                           curve="natural"
-                          color={theme.palette.success.main}
+                          color={(theme.palette.success as { main: string }).main}
                           yAxis={{ min: 0, max: maxSpeed * 1.1 }}
                           margin={{ top: 2, bottom: 2, left: 0, right: 0 }}
                         />
@@ -106,14 +110,14 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                   <Box>
                     <Box display="flex" alignItems="center" justifyContent="space-between" mb={0.5}>
                       <Box display="flex" alignItems="center" gap={0.5}>
-                        <ArrowUpward fontSize="small" sx={{ color: theme.palette.primary.main }} />
+                        <ArrowUpward fontSize="small" sx={{ color: (theme.palette.primary as { main: string }).main }} />
                         <Typography variant="caption" color="text.secondary">上传</Typography>
                       </Box>
                       <Typography 
                         variant="body1" 
                         fontWeight="bold" 
                         sx={{ 
-                          color: theme.palette.primary.main,
+                          color: (theme.palette.primary as { main: string }).main,
                           fontFamily: 'monospace',
                           minWidth: 90,
                           textAlign: 'right',
@@ -129,7 +133,7 @@ export function NetworkSpeed({ systemStats, speedHistory }: NetworkSpeedProps) {
                           height={40}
                           area
                           curve="natural"
-                          color={theme.palette.primary.main}
+                          color={(theme.palette.primary as { main: string }).main}
                           yAxis={{ min: 0, max: maxSpeed * 1.1 }}
                           margin={{ top: 2, bottom: 2, left: 0, right: 0 }}
                         />

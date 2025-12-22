@@ -28,6 +28,8 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
+    // 确保只使用一个 React 副本，避免 "Invalid hook call" 错误
+    dedupe: ['react', 'react-dom'],
   },
 
   define: {
