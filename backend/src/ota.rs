@@ -163,8 +163,8 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
     // 前端目录存在即可（MD5 跨平台难以保持一致）
     let frontend_md5_match = true; // 跳过前端 MD5 验证
 
-    // 检查架构
-    let arch_match = meta.arch == "aarch64-unknown-linux-gnu" || meta.arch == "aarch64-unknown-linux-musl";
+    // 检查架构（只接受 musl）
+    let arch_match = meta.arch == "aarch64-unknown-linux-musl";
 
     // 比较版本
     let is_newer = compare_versions(&meta.version, CURRENT_VERSION);
@@ -179,7 +179,7 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
             errors.push(format!("Binary MD5 mismatch: expected={}, actual={}", meta.binary_md5, binary_md5));
         }
         if !arch_match {
-            errors.push(format!("Arch mismatch: expected=aarch64-unknown-linux-gnu, actual={}", meta.arch));
+            errors.push(format!("Arch mismatch: expected=aarch64-unknown-linux-musl, actual={}", meta.arch));
         }
         Some(errors.join("; "))
     } else {

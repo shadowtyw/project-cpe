@@ -85,12 +85,12 @@ fi
 echo ""
 
 # 添加交叉编译目标
-echo "🎯 添加 aarch64-unknown-linux-gnu 目标..."
-if rustup target list --installed | grep -q "aarch64-unknown-linux-gnu"; then
+echo "🎯 添加 aarch64-unknown-linux-musl 目标..."
+if rustup target list --installed | grep -q "aarch64-unknown-linux-musl"; then
     echo "⚠️  目标已安装，跳过"
 else
-    rustup target add aarch64-unknown-linux-gnu
-    echo "✅ aarch64-unknown-linux-gnu 目标已添加"
+    rustup target add aarch64-unknown-linux-musl
+    echo "✅ aarch64-unknown-linux-musl 目标已添加"
 fi
 echo ""
 
@@ -105,12 +105,12 @@ fi
 echo ""
 
 # 安装交叉编译工具链
-echo "🔗 安装 aarch64-unknown-linux-gnu 工具链..."
-if brew list aarch64-unknown-linux-gnu &>/dev/null; then
+echo "🔗 安装 aarch64-unknown-linux-musl 工具链..."
+if brew list aarch64-unknown-linux-musl &>/dev/null; then
     echo "⚠️  工具链已安装，跳过"
 else
-    brew install aarch64-unknown-linux-gnu
-    echo "✅ aarch64-unknown-linux-gnu 工具链已安装"
+    brew install aarch64-unknown-linux-musl
+    echo "✅ aarch64-unknown-linux-musl 工具链已安装"
 fi
 echo ""
 
@@ -133,11 +133,11 @@ rustup target list --installed
 echo ""
 
 echo "📝 交叉编译链接器:"
-if command -v aarch64-unknown-linux-gnu-gcc &> /dev/null; then
-    echo "✅ $(which aarch64-unknown-linux-gnu-gcc)"
-    aarch64-unknown-linux-gnu-gcc --version | head -n 1
+if command -v aarch64-unknown-linux-musl-gcc &> /dev/null; then
+    echo "✅ $(which aarch64-unknown-linux-musl-gcc)"
+    aarch64-unknown-linux-musl-gcc --version | head -n 1
 else
-    echo "❌ 未找到 aarch64-unknown-linux-gnu-gcc"
+    echo "❌ 未找到 aarch64-unknown-linux-musl-gcc"
 fi
 echo ""
 

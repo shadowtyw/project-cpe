@@ -42,10 +42,10 @@ fi
 BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # 目标架构
-ARCH="aarch64-unknown-linux-gnu"
+ARCH="aarch64-unknown-linux-musl"
 
 # 检查构建产物
-BINARY_PATH="backend/target/aarch64-unknown-linux-gnu/release/udx710"
+BINARY_PATH="backend/target/aarch64-unknown-linux-musl/release/udx710"
 FRONTEND_DIR="frontend/dist"
 
 if [ ! -f "$BINARY_PATH" ]; then

@@ -212,13 +212,10 @@ pub async fn start_sms_listener(conn: Connection, db: Arc<Database>, webhook: Ar
     // Subscribe to D-Bus signals via proxy
     let dbus_proxy = Proxy::new(&conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").await?;
     
-    // Add signal match rules - listen to MessagePDU signal
-    let rule1 = "type='signal',sender='org.ofono',interface='org.ofono.MessageManager',member='MessagePDU'";
-    dbus_proxy.call::<_, _, ()>("AddMatch", &(rule1,)).await?;
-    
-    // Also listen to IncomingMessage signal (some devices use this)
-    let rule2 = "type='signal',sender='org.ofono',interface='org.ofono.MessageManager',member='IncomingMessage'";
-    dbus_proxy.call::<_, _, ()>("AddMatch", &(rule2,)).await?;
+    // Only listen to IncomingMessage signal (ofono auto-assembles long SMS)
+    // Note: MessagePDU is not monitored to avoid duplicate SMS notifications
+    let rule = "type='signal',sender='org.ofono',interface='org.ofono.MessageManager',member='IncomingMessage'";
+    dbus_proxy.call::<_, _, ()>("AddMatch", &(rule,)).await?;
     
     // Create message stream
     let mut stream = MessageStream::from(&conn);
@@ -233,73 +230,33 @@ pub async fn start_sms_listener(conn: Connection, db: Arc<Database>, webhook: Ar
         
         // Check if it's a signal message
         if let Some(member) = msg.header().member() {
-            let member_str = member.as_str();
-            
-            match member_str {
-                "MessagePDU" => {
-                    // MessagePDU signal - for debugging only
-                    // Actual storage uses IncomingMessage signal (ofono auto-assembles long SMS)
-                    let pdu_data = if let Ok(pdu) = msg.body().deserialize::<String>() {
-                        Some(pdu)
-                    } else if let Ok(body) = msg.body().deserialize::<(String, OwnedValue)>() {
-                        Some(body.0)
-                    } else {
-                        None
-                    };
+            if member.as_str() == "IncomingMessage" {
+                // Parse IncomingMessage format (text format)
+                if let Ok((content, props)) = msg.body().deserialize::<(String, std::collections::HashMap<String, OwnedValue>)>() {
+                    // Extract sender from properties
+                    let sender = props.get("Sender")
+                        .and_then(|v| v.downcast_ref::<zbus::zvariant::Str>().ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
                     
-                    if let Some(pdu) = pdu_data {
-                        // Only store single SMS (some devices may not send IncomingMessage)
-                        if let Some(result) = decode_pdu_full(&pdu) {
-                            if !result.is_multipart {
-                                if let Ok(id) = db.insert_sms("incoming", &result.sender, &result.content, "received", Some(&pdu)) {
-                                    // Forward to webhook
-                                    let sms = SmsMessage {
-                                        id,
-                                        direction: "incoming".to_string(),
-                                        phone_number: result.sender,
-                                        content: result.content,
-                                        timestamp: chrono::Utc::now().to_rfc3339(),
-                                        status: "received".to_string(),
-                                        pdu: Some(pdu),
-                                    };
-                                    let webhook_clone = Arc::clone(&webhook);
-                                    tokio::spawn(async move {
-                                        let _ = webhook_clone.forward_sms(&sms).await;
-                                    });
-                                }
-                            }
-                        }
+                    // Store to database
+                    if let Ok(id) = db.insert_sms("incoming", &sender, &content, "received", None) {
+                        // Forward to webhook
+                        let sms = SmsMessage {
+                            id,
+                            direction: "incoming".to_string(),
+                            phone_number: sender,
+                            content,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            status: "received".to_string(),
+                            pdu: None,
+                        };
+                        let webhook_clone = Arc::clone(&webhook);
+                        tokio::spawn(async move {
+                            let _ = webhook_clone.forward_sms(&sms).await;
+                        });
                     }
                 }
-                "IncomingMessage" => {
-                    // Parse IncomingMessage format (text format)
-                    if let Ok((content, props)) = msg.body().deserialize::<(String, std::collections::HashMap<String, OwnedValue>)>() {
-                        // Extract sender from properties
-                        let sender = props.get("Sender")
-                            .and_then(|v| v.downcast_ref::<zbus::zvariant::Str>().ok())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "Unknown".to_string());
-                        
-                        // Store to database
-                        if let Ok(id) = db.insert_sms("incoming", &sender, &content, "received", None) {
-                            // Forward to webhook
-                            let sms = SmsMessage {
-                                id,
-                                direction: "incoming".to_string(),
-                                phone_number: sender,
-                                content,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                                status: "received".to_string(),
-                                pdu: None,
-                            };
-                            let webhook_clone = Arc::clone(&webhook);
-                            tokio::spawn(async move {
-                                let _ = webhook_clone.forward_sms(&sms).await;
-                            });
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }

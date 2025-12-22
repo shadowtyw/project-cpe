@@ -15,16 +15,8 @@ env:
 
 jobs:
   build-ota:
-    name: Build OTA Package - ${{ matrix.libc }}
+    name: Build OTA Package
     runs-on: ubuntu-24.04-arm
-    strategy:
-      matrix:
-        libc: [glibc, musl]
-        include:
-          - libc: glibc
-            target: aarch64-unknown-linux-gnu
-          - libc: musl
-            target: aarch64-unknown-linux-musl
     
     steps:
       - name: Checkout repository
@@ -43,18 +35,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-unknown-linux-musl
       
       # ==================== 安装交叉编译工具链 ====================
       - name: Install cross-compilation toolchain
         run: |
           sudo apt-get update
-          if [ "${{ matrix.libc }}" = "musl" ]; then
-            # 安装 musl 工具链
-            sudo apt-get install -y musl-tools
-          fi
-          # 验证安装
-          gcc --version
+          sudo apt-get install -y musl-tools
+          musl-gcc --version
       
       # ==================== 安装 UPX (可选) ====================
       - name: Install UPX
@@ -73,9 +61,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             backend/target/
-          key: ${{ runner.os }}-${{ matrix.libc }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-musl-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.libc }}-cargo-
+            ${{ runner.os }}-musl-cargo-
       
       # ==================== 同步版本号 ====================
       - name: Sync version numbers
@@ -92,29 +80,21 @@ jobs:
           echo "✅ 版本号同步完成"
       
       # ==================== 构建后端 ====================
-      - name: Build backend (${{ matrix.target }})
+      - name: Build backend (aarch64-unknown-linux-musl)
         working-directory: backend
         run: |
-          echo "🦀 构建后端 (${{ matrix.target }})..."
+          echo "🦀 构建后端 (aarch64-unknown-linux-musl)..."
           
           # 设置交叉编译环境变量
-          TARGET_TRIPLE="${{ matrix.target }}"
-          TARGET_UPPER=$(echo "$TARGET_TRIPLE" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-          
-          if [ "${{ matrix.libc }}" = "musl" ]; then
-            export CC_${TARGET_UPPER}=musl-gcc
-            export CARGO_TARGET_${TARGET_UPPER}_LINKER=musl-gcc
-          else
-            export CC_${TARGET_UPPER}=gcc
-            export CARGO_TARGET_${TARGET_UPPER}_LINKER=gcc
-          fi
+          export CC_AARCH64_UNKNOWN_LINUX_MUSL=musl-gcc
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           export SQLITE3_STATIC=1
           export LIBSQLITE3_SYS_USE_PKG_CONFIG=0
           
           # 构建
-          cargo build --release --target "$TARGET_TRIPLE"
+          cargo build --release --target aarch64-unknown-linux-musl
           
-          BINARY_PATH="target/$TARGET_TRIPLE/release/udx710"
+          BINARY_PATH="target/aarch64-unknown-linux-musl/release/udx710"
           
           echo "✅ 后端构建完成！"
           ls -lh "$BINARY_PATH"
@@ -124,7 +104,7 @@ jobs:
       - name: Compress binary with UPX
         if: inputs.use_upx == true
         run: |
-          BINARY_PATH="backend/target/${{ matrix.target }}/release/udx710"
+          BINARY_PATH="backend/target/aarch64-unknown-linux-musl/release/udx710"
           
           echo "🗜️  UPX 压缩中..."
           BEFORE_SIZE=$(stat -c%s "$BINARY_PATH")
@@ -176,17 +156,16 @@ jobs:
       - name: Package OTA
         run: |
           echo "=========================================="
-          echo "  生成 OTA 更新包 (${{ matrix.libc }})"
+          echo "  生成 OTA 更新包"
           echo "=========================================="
           echo ""
           
           VERSION="${{ steps.version.outputs.version }}"
           COMMIT=$(git rev-parse --short HEAD)
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          ARCH="${{ matrix.target }}"
-          LIBC="${{ matrix.libc }}"
+          ARCH="aarch64-unknown-linux-musl"
           
-          BINARY_PATH="backend/target/${{ matrix.target }}/release/udx710"
+          BINARY_PATH="backend/target/aarch64-unknown-linux-musl/release/udx710"
           FRONTEND_DIR="frontend/dist"
           
           # 检查构建产物
@@ -248,7 +227,7 @@ jobs:
           mkdir -p release
           
           # 打包
-          OTA_FILE="release/udx710-ota-${VERSION}-${LIBC}.tar.gz"
+          OTA_FILE="release/udx710-ota-${VERSION}.tar.gz"
           echo "📦 打包 OTA 更新包..."
           cd "$OTA_TMP"
           tar -czf "$GITHUB_WORKSPACE/$OTA_FILE" meta.json udx710 www
@@ -281,8 +260,8 @@ jobs:
       - name: Upload OTA package
         uses: actions/upload-artifact@v4
         with:
-          name: udx710-ota-${{ steps.version.outputs.version }}-${{ matrix.libc }}
-          path: release/udx710-ota-${{ steps.version.outputs.version }}-${{ matrix.libc }}.tar.gz
+          name: udx710-ota-${{ steps.version.outputs.version }}
+          path: release/udx710-ota-${{ steps.version.outputs.version }}.tar.gz
           retention-days: 90
           if-no-files-found: error
       
@@ -291,7 +270,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
-          files: release/udx710-ota-${{ steps.version.outputs.version }}-${{ matrix.libc }}.tar.gz
+          files: release/udx710-ota-${{ steps.version.outputs.version }}.tar.gz
           body: |
             ## OTA 更新包
             
@@ -317,13 +296,13 @@ jobs:
       # ==================== 构建摘要 ====================
       - name: Build Summary
         run: |
-          echo "## 🎉 OTA 包构建完成 (${{ matrix.libc }})" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎉 OTA 包构建完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| 版本 | ${{ steps.version.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 架构 | ${{ matrix.target }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 架构 | aarch64-unknown-linux-musl |" >> $GITHUB_STEP_SUMMARY
           echo "| UPX 压缩 | ${{ inputs.use_upx }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📦 产物" >> $GITHUB_STEP_SUMMARY

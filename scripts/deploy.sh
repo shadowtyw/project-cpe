@@ -64,7 +64,7 @@ for arg in "$@"; do
     esac
 done
 
-BACKEND_BIN="backend/target/aarch64-unknown-linux-gnu/release/udx710"
+BACKEND_BIN="backend/target/aarch64-unknown-linux-musl/release/udx710"
 FRONTEND_DIR="frontend/dist"
 
 echo "🚀 通过 ADB 部署到 ${TARGET_PATH}"

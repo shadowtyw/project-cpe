@@ -140,7 +140,7 @@ if [ "$SKIP_COPY" = false ]; then
     echo "复制构建产物到 userdata..."
     echo ""
     
-    BACKEND_BIN="backend/target/aarch64-unknown-linux-gnu/release/udx710"
+    BACKEND_BIN="backend/target/aarch64-unknown-linux-musl/release/udx710"
     FRONTEND_DIR="frontend/dist"
     TARGET_ROOT="$USERDATA_DIR/home/root"
     TARGET_WWW="$TARGET_ROOT/www"

@@ -6,6 +6,8 @@
 
 powered by Cursor Claude Opus 4.5 & Sonnet 4.5 & OpenAI GPT-5.1/5.2
 
+欢迎pr 和 issue 看到后会尽快处理。
+
 ## 免责声明
 
 本项目仅供技术交流和学习使用，不得用于任何非法用途。任何使用本项目造成的任何后果，均与本项目无关，由使用者自行承担。
@@ -79,15 +81,15 @@ cd frontend && npm run build
 # 1. 安装 Rust
 brew install rust rustup
 rustup default stable
-rustup target add aarch64-unknown-linux-gnu
+rustup target add aarch64-unknown-linux-musl
 
 # 2. 安装交叉编译工具链
 brew tap messense/macos-cross-toolchains
-brew install aarch64-unknown-linux-gnu
+brew install aarch64-unknown-linux-musl
 
 # 3. 验证
 rustup target list --installed
-which aarch64-unknown-linux-gnu-gcc
+which aarch64-unknown-linux-musl-gcc
 ```
 
 ---

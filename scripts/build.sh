@@ -129,34 +129,34 @@ fi
 
 # ==================== 构建后端 ====================
 if [ "$BUILD_BACKEND" = true ]; then
-    echo "🦀 构建后端 (aarch64-unknown-linux-gnu)..."
-echo ""
+    echo "🦀 构建后端 (aarch64-unknown-linux-musl)..."
+    echo ""
 
     # 检查交叉编译器
-if ! command -v aarch64-unknown-linux-gnu-gcc &> /dev/null; then
-    echo "❌ 错误: 未找到 aarch64-unknown-linux-gnu-gcc"
-    echo ""
-    echo "请安装交叉编译工具链:"
-    echo "  brew tap messense/macos-cross-toolchains"
-    echo "  brew install aarch64-unknown-linux-gnu"
-    exit 1
-fi
+    if ! command -v aarch64-unknown-linux-musl-gcc &> /dev/null; then
+        echo "❌ 错误: 未找到 aarch64-unknown-linux-musl-gcc"
+        echo ""
+        echo "请安装交叉编译工具链:"
+        echo "  brew tap messense/macos-cross-toolchains"
+        echo "  brew install aarch64-unknown-linux-musl"
+        exit 1
+    fi
     
     cd backend
 
-# 设置交叉编译环境变量
-export CC_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-gcc
-export CXX_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-g++
-export AR_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-ar
-export SQLITE3_STATIC=1
-export LIBSQLITE3_SYS_USE_PKG_CONFIG=0
+    # 设置交叉编译环境变量
+    export CC_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-gcc
+    export CXX_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-g++
+    export AR_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-ar
+    export SQLITE3_STATIC=1
+    export LIBSQLITE3_SYS_USE_PKG_CONFIG=0
 
-# 构建
-cargo build --release --target aarch64-unknown-linux-gnu
+    # 构建
+    cargo build --release --target aarch64-unknown-linux-musl
 
     cd ..
 
-    BINARY_PATH="backend/target/aarch64-unknown-linux-gnu/release/udx710"
+    BINARY_PATH="backend/target/aarch64-unknown-linux-musl/release/udx710"
 
     echo ""
     echo "✅ 后端构建完成！"
@@ -209,7 +209,7 @@ if [ "$COPY_TO_USERDATA" = true ]; then
     mkdir -p "$USERDATA_WWW"
     
     # 复制后端二进制
-    BACKEND_BIN="backend/target/aarch64-unknown-linux-gnu/release/udx710"
+    BACKEND_BIN="backend/target/aarch64-unknown-linux-musl/release/udx710"
     if [ -f "$BACKEND_BIN" ]; then
         echo "复制后端: $BACKEND_BIN"
         cp "$BACKEND_BIN" "$USERDATA_ROOT/udx710"
@@ -287,7 +287,7 @@ if [ "$SKIP_OTA" = false ] && [ "$BUILD_BACKEND" = true ] && [ "$BUILD_FRONTEND"
     echo "=========================================="
     echo ""
     
-    BINARY_PATH="backend/target/aarch64-unknown-linux-gnu/release/udx710"
+    BINARY_PATH="backend/target/aarch64-unknown-linux-musl/release/udx710"
     FRONTEND_DIR="frontend/dist"
     
     # 检查构建产物
@@ -307,7 +307,7 @@ if [ "$SKIP_OTA" = false ] && [ "$BUILD_BACKEND" = true ] && [ "$BUILD_FRONTEND"
         BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         
         # 目标架构
-        ARCH="aarch64-unknown-linux-gnu"
+        ARCH="aarch64-unknown-linux-musl"
         
         # 创建临时目录
         OTA_TMP=$(mktemp -d)
