@@ -326,18 +326,34 @@ pub struct NetworkSpeedResponse {
 /// 内存信息响应
 #[derive(Debug, Serialize, Default)]
 pub struct MemoryInfo {
-    /// 总内存 (字节)
+    /// 总内存 (MemTotal，字节)
     pub total_bytes: u64,
-    /// 可用内存 (字节)
+    /// 可用内存 (MemAvailable 或兼容回退值，字节)
     pub available_bytes: u64,
-    /// 已使用内存 (字节)
+    /// 非立即可用内存 (total - available，保留用于兼容旧客户端)
     pub used_bytes: u64,
-    /// 内存使用率 (百分比 0-100)
+    /// 非立即可用内存百分比 (保留用于兼容旧客户端)
     pub used_percent: f64,
-    /// 缓存内存 (字节)
+    /// 内核报告的原始文件缓存 (Cached，字节)
     pub cached_bytes: u64,
-    /// 缓冲区内存 (字节)
+    /// 块设备缓冲区 (Buffers，字节)
     pub buffers_bytes: u64,
+    /// 可用内存百分比，建议作为 Dashboard 主指标
+    pub available_percent: f64,
+    /// 原始空闲内存 (MemFree，字节)
+    pub free_bytes: u64,
+    /// 可回收缓存：max(Cached - Shmem, 0) + SReclaimable
+    pub reclaimable_bytes: u64,
+    /// 类似 free 工具中的 buff/cache：Buffers + reclaimable
+    pub buff_cache_bytes: u64,
+    /// 共享内存 / tmpfs (Shmem，字节)
+    pub shared_bytes: u64,
+    /// 进程及不可回收内核占用的近似值，不等同于精确 RSS
+    pub process_non_reclaimable_used_bytes: u64,
+    /// 可用内存是否由兼容公式估算而来
+    pub available_estimated: bool,
+    /// 可用内存来源：kernel 或 simple_estimate
+    pub available_source: String,
 }
 
 /// 系统运行时间响应

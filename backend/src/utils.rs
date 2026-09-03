@@ -353,39 +353,139 @@ pub fn parse_neighbor_cells(tech: &str, parsed_data: &[Vec<String>]) -> Vec<Cell
     result
 }
 
-/// 从 /proc/meminfo 读取内存信息
+/// 从 /proc/meminfo 读取内存信息。
 ///
-/// # Returns
-/// (total, available, cached, buffers) in bytes
-pub fn read_memory_info() -> Result<(u64, u64, u64, u64), String> {
-    use std::fs;
-    
-    let content = fs::read_to_string("/proc/meminfo")
+/// `MemAvailable` 是 Linux 对可分配内存的最佳估算，适合作为低内存判断。
+/// 对缺少该字段的旧内核，会使用 MemFree、Buffers、文件缓存和可回收 slab
+/// 的保守兼容估算，并在结果中标记来源。
+pub fn read_memory_info() -> Result<crate::models::MemoryInfo, String> {
+    let content = std::fs::read_to_string("/proc/meminfo")
         .map_err(|e| format!("Failed to read /proc/meminfo: {}", e))?;
-    
-    let mut total = 0u64;
-    let mut available = 0u64;
-    let mut cached = 0u64;
-    let mut buffers = 0u64;
-    
+    parse_memory_info(&content)
+}
+
+fn parse_memory_info(content: &str) -> Result<crate::models::MemoryInfo, String> {
+    let mut values = HashMap::new();
     for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        
-        let value = parts[1].parse::<u64>().unwrap_or(0) * 1024; // Convert KB to bytes
-        
-        match parts[0] {
-            "MemTotal:" => total = value,
-            "MemAvailable:" => available = value,
-            "Cached:" => cached = value,
-            "Buffers:" => buffers = value,
-            _ => {}
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else { continue };
+        let Some(value) = parts.next() else { continue };
+        if let Ok(kib) = value.parse::<u64>() {
+            values.insert(key.trim_end_matches(':'), kib.saturating_mul(1024));
         }
     }
-    
-    Ok((total, available, cached, buffers))
+
+    let total_bytes = values.get("MemTotal").copied().unwrap_or(0);
+    if total_bytes == 0 {
+        return Err("MemTotal is missing or zero in /proc/meminfo".to_string());
+    }
+
+    let free_bytes = values.get("MemFree").copied().unwrap_or(0);
+    let cached_bytes = values.get("Cached").copied().unwrap_or(0);
+    let buffers_bytes = values.get("Buffers").copied().unwrap_or(0);
+    let shared_bytes = values.get("Shmem").copied().unwrap_or(0);
+    let sreclaimable_bytes = values.get("SReclaimable").copied().unwrap_or(0);
+    let file_cache_without_shared = cached_bytes.saturating_sub(shared_bytes);
+    let reclaimable_bytes = file_cache_without_shared.saturating_add(sreclaimable_bytes);
+    let buff_cache_bytes = buffers_bytes.saturating_add(reclaimable_bytes);
+
+    let (available_bytes, available_estimated, available_source) = match values.get("MemAvailable") {
+        Some(available_bytes) => (*available_bytes, false, "kernel".to_string()),
+        None => (
+            free_bytes
+                .saturating_add(buff_cache_bytes)
+                .min(total_bytes),
+            true,
+            "simple_estimate".to_string(),
+        ),
+    };
+    let available_bytes = available_bytes.min(total_bytes);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+    let used_percent = (used_bytes as f64 / total_bytes as f64) * 100.0;
+    let available_percent = (available_bytes as f64 / total_bytes as f64) * 100.0;
+    let process_non_reclaimable_used_bytes = total_bytes
+        .saturating_sub(free_bytes)
+        .saturating_sub(buffers_bytes)
+        .saturating_sub(file_cache_without_shared)
+        .saturating_sub(sreclaimable_bytes);
+
+    Ok(crate::models::MemoryInfo {
+        total_bytes,
+        available_bytes,
+        used_bytes,
+        used_percent,
+        cached_bytes,
+        buffers_bytes,
+        available_percent,
+        free_bytes,
+        reclaimable_bytes,
+        buff_cache_bytes,
+        shared_bytes,
+        process_non_reclaimable_used_bytes,
+        available_estimated,
+        available_source,
+    })
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::parse_memory_info;
+
+    #[test]
+    fn prefers_kernel_mem_available_and_separates_reclaimable_cache() {
+        let memory = parse_memory_info(
+            "MemTotal:       1048576 kB\n\
+             MemFree:         102400 kB\n\
+             MemAvailable:    409600 kB\n\
+             Buffers:          10240 kB\n\
+             Cached:          307200 kB\n\
+             SReclaimable:     51200 kB\n\
+             Shmem:             20480 kB\n",
+        )
+        .unwrap();
+
+        assert_eq!(memory.total_bytes, 1024 * 1024 * 1024);
+        assert_eq!(memory.available_bytes, 400 * 1024 * 1024);
+        assert!(!memory.available_estimated);
+        assert_eq!(memory.available_source, "kernel");
+        assert_eq!(memory.reclaimable_bytes, 330 * 1024 * 1024);
+        assert_eq!(memory.buff_cache_bytes, 340 * 1024 * 1024);
+        assert_eq!(memory.available_percent, 39.0625);
+    }
+
+    #[test]
+    fn estimates_available_memory_when_mem_available_is_missing() {
+        let memory = parse_memory_info(
+            "MemTotal:       1048576 kB\n\
+             MemFree:         102400 kB\n\
+             Buffers:          10240 kB\n\
+             Cached:          307200 kB\n\
+             SReclaimable:     51200 kB\n\
+             Shmem:             20480 kB\n",
+        )
+        .unwrap();
+
+        assert!(memory.available_estimated);
+        assert_eq!(memory.available_source, "simple_estimate");
+        assert_eq!(memory.available_bytes, 440 * 1024 * 1024);
+        assert_eq!(memory.used_bytes, 584 * 1024 * 1024);
+    }
+
+    #[test]
+    fn shared_memory_never_causes_cache_underflow() {
+        let memory = parse_memory_info(
+            "MemTotal:       1024 kB\n\
+             MemFree:          100 kB\n\
+             MemAvailable:     200 kB\n\
+             Cached:             10 kB\n\
+             SReclaimable:       5 kB\n\
+             Shmem:              50 kB\n",
+        )
+        .unwrap();
+
+        assert_eq!(memory.reclaimable_bytes, 5 * 1024);
+        assert!(memory.process_non_reclaimable_used_bytes <= memory.total_bytes);
+    }
 }
 
 /// 读取磁盘/分区使用情况

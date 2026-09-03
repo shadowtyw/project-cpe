@@ -71,18 +71,22 @@ pub async fn restart_watchdog(config_manager: Arc<ConfigManager>) {
             continue;
         }
 
-        let (total_bytes, available_bytes, _, _) = match read_memory_info() {
+        let memory = match read_memory_info() {
             Ok(memory) => memory,
             Err(error) => {
                 warn!(error = %error, "Restart watchdog could not read memory information");
                 continue;
             }
         };
-        if total_bytes == 0 {
+        if memory.total_bytes == 0 {
             continue;
         }
+        if memory.available_estimated {
+            warn!(source = %memory.available_source, "Low-memory watchdog is using an estimated available-memory value");
+        }
 
-        let available_percent = available_bytes.saturating_mul(100) / total_bytes;
+        // Keep integer floor semantics: a value exactly at the configured threshold does not trigger.
+        let available_percent = memory.available_bytes.saturating_mul(100) / memory.total_bytes;
         if available_percent < u64::from(config.low_memory_threshold_percent) {
             consecutive_low_memory_checks = consecutive_low_memory_checks.saturating_add(1);
         } else {

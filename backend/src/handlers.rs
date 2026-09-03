@@ -894,14 +894,8 @@ pub async fn get_system_stats() -> impl IntoResponse {
             }
         }
         
-        // 获取内存信息
-        let (total, available, cached, buffers) = read_memory_info()?;
-        let used = total.saturating_sub(available);
-        let used_percent = if total > 0 {
-            (used as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
+        // 获取内存信息。可用率以 MemAvailable 为主，并兼容旧内核回退。
+        let memory = read_memory_info()?;
         
         // 获取磁盘信息
         let disk = read_disk_info();
@@ -938,14 +932,7 @@ pub async fn get_system_stats() -> impl IntoResponse {
                 interfaces: speed_data,
                 interval_seconds: elapsed,
             },
-            memory: MemoryInfo {
-                total_bytes: total,
-                available_bytes: available,
-                used_bytes: used,
-                used_percent,
-                cached_bytes: cached,
-                buffers_bytes: buffers,
-            },
+            memory,
             disk,
             cpu_load,
             uptime: UptimeInfo {

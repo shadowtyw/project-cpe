@@ -179,6 +179,14 @@ export interface MemoryInfo {
   used_percent: number
   cached_bytes: number
   buffers_bytes: number
+  available_percent?: number
+  free_bytes?: number
+  reclaimable_bytes?: number
+  buff_cache_bytes?: number
+  shared_bytes?: number
+  process_non_reclaimable_used_bytes?: number
+  available_estimated?: boolean
+  available_source?: 'kernel' | 'simple_estimate'
 }
 
 // 运行时间信息
