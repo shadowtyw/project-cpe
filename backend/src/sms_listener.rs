@@ -230,8 +230,14 @@ pub async fn start_sms_listener(
     loop {
         let msg = match stream.next().await {
             Some(Ok(msg)) => msg,
-            Some(Err(_)) => continue,
-            None => continue,
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "D-Bus listener stopped after stream error");
+                return Ok(());
+            }
+            None => {
+                tracing::warn!("D-Bus listener stopped because the stream ended");
+                return Ok(());
+            }
         };
         
         // Check if it's a signal message
@@ -306,8 +312,14 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
     loop {
         let msg = match stream.next().await {
             Some(Ok(msg)) => msg,
-            Some(Err(_)) => continue,
-            None => continue,
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "D-Bus listener stopped after stream error");
+                return Ok(());
+            }
+            None => {
+                tracing::warn!("D-Bus listener stopped because the stream ended");
+                return Ok(());
+            }
         };
         
         // Process call-related signals

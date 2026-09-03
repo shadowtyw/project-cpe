@@ -115,8 +115,8 @@ const SLOG_TRANSPORT_PATH: &str = "/sys/module/slog_bridge/parameters/log_transp
 /// AT 指令设备路径
 const AT_DEVICE_PATH: &str = "/dev/stty_lte30";
 
-/// 默认 USB 网络接口 IP 地址
-const USB_INTERFACE_IP: &str = "192.168.66.1";
+/// USB 热切换的回退管理地址；优先保留当前 usb0 地址或 UDX710_USB_IP。
+const DEFAULT_USB_INTERFACE_IP: &str = "192.168.67.1";
 const USB_INTERFACE_MAC: &str = "CC:E8:AC:C0:00:00";
 
 /// 默认 UDC 名称
@@ -389,6 +389,9 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
     let config = UsbModeConfig::get(mode)
         .ok_or_else(|| format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS, 4=NCM(no ADB)", mode))?;
     
+    // 在禁用 gadget 前捕获现有地址，避免重新枚举后丢失用户的管理网段。
+    let usb_interface_ip = resolve_usb_interface_ip();
+
     // **********************************************************
     // 提前读取 UDC 名称，避免禁用后 list 为空
     let udc_name_cached = get_udc_name();
@@ -536,8 +539,8 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
     // 19. 等待 USB 设备被主机识别
     std::thread::sleep(std::time::Duration::from_millis(1000));
     
-    // 20. 配置网络接口
-    configure_usb_network()?;
+    // 20. 配置网络接口，优先保留设备当前的 USB 管理地址。
+    configure_usb_network(&usb_interface_ip)?;
     
     Ok(())
 }
@@ -621,6 +624,42 @@ fn stop_adbd() -> io::Result<()> {
     Ok(())
 }
 
+/// 读取当前 USB 网络地址。保留设备现有地址优先于环境变量和默认值。
+fn resolve_usb_interface_ip() -> String {
+    if let Ok(output) = Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "dev", "usb0"])
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(address) = text
+                .split_whitespace()
+                .skip_while(|part| *part != "inet")
+                .nth(1)
+                .and_then(|cidr| cidr.split('/').next())
+                .filter(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
+            {
+                return address.to_string();
+            }
+        }
+    }
+
+    std::env::var("UDX710_USB_IP")
+        .ok()
+        .filter(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
+        .unwrap_or_else(|| DEFAULT_USB_INTERFACE_IP.to_string())
+}
+
+/// 根据设备 USB 网络地址推导主机侧默认路由地址。
+fn host_gateway_for_usb_ip(usb_ip: &str) -> String {
+    let mut octets = usb_ip
+        .parse::<std::net::Ipv4Addr>()
+        .map(|address| address.octets())
+        .unwrap_or_else(|_| [192, 168, 67, 1]);
+    octets[3] = 2;
+    std::net::Ipv4Addr::from(octets).to_string()
+}
+
 /// 配置 USB 网络接口
 /// 
 /// 此函数实现完整的 USB 网络初始化，参考 /etc/route_test.sh 脚本。
@@ -632,7 +671,7 @@ fn stop_adbd() -> io::Result<()> {
 /// 4. 启用 SFP 硬件转发加速
 /// 5. 配置 iptables 防火墙规则
 /// 6. 标记配置完成
-fn configure_usb_network() -> Result<(), String> {
+fn configure_usb_network(usb_interface_ip: &str) -> Result<(), String> {
     // 等待接口出现
     std::thread::sleep(std::time::Duration::from_millis(500));
     
@@ -674,7 +713,7 @@ fn configure_usb_network() -> Result<(), String> {
         
         if let Ok(output) = check {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            if output_str.contains("usb0") || output_str.contains(USB_INTERFACE_IP) {
+            if output_str.contains("usb0") || output_str.contains(usb_interface_ip) {
                 break;
             }
         }
@@ -682,7 +721,7 @@ fn configure_usb_network() -> Result<(), String> {
         if retry < max_retries - 1 {
             // 尝试添加 IP 地址
             let _ = Command::new("ifconfig")
-                .args(["usb0", "add", USB_INTERFACE_IP])
+                .args(["usb0", "add", usb_interface_ip])
                 .output();
             
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -691,7 +730,7 @@ fn configure_usb_network() -> Result<(), String> {
     
     // 设置 IP 地址和子网掩码
     let _ = Command::new("ifconfig")
-        .args(["usb0", USB_INTERFACE_IP, "netmask", "255.255.255.0"])
+        .args(["usb0", usb_interface_ip, "netmask", "255.255.255.0"])
         .output();
     
     // 设置 MAC 地址
@@ -705,8 +744,9 @@ fn configure_usb_network() -> Result<(), String> {
         .output();
     
     // 添加默认路由（用于主机端访问）
+    let host_gateway = host_gateway_for_usb_ip(usb_interface_ip);
     let _ = Command::new("ip")
-        .args(["route", "add", "default", "via", "192.168.66.2"])
+        .args(["route", "add", "default", "via", host_gateway.as_str()])
         .output();
     
     // 3. 关闭 sipa_usb0 接口（IPA USB 接口，避免冲突）

@@ -23,14 +23,13 @@ use std::sync::Arc;
 use zbus::Connection;
 
 use crate::{
-    config::{ConfigManager, RefreshConfig},
+    config::{ConfigManager, RefreshConfig, RestartConfig},
     dbus::{
         get_airplane_mode, get_all_apn_contexts, get_data_connection_status, get_device_info_data,
         get_network_info_data, get_qos_info_data, get_radio_mode, get_roaming_status, get_serving_cell_info,
         get_sim_info_data, send_at_command, set_airplane_mode, set_apn_properties, set_data_connection,
         set_radio_mode, set_roaming_allowed,
     },
-    iptables::flush_iptables,
     models::*,
     usb_switch,
     utils::{
@@ -62,9 +61,19 @@ pub async fn post_at_command(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<AtCommandRequest>,
 ) -> impl IntoResponse {
-    let (status, body_text) = match send_at_command(&conn, &payload.cmd).await {
+    let command = payload.cmd.trim();
+    if command.is_empty() || command.len() > 512 || !command.is_ascii() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        return (StatusCode::BAD_REQUEST, headers, "AT command must be 1-512 ASCII characters".to_string());
+    }
+
+    let (status, body_text) = match send_at_command(&conn, command).await {
         Ok(result) => (StatusCode::OK, result),
-        Err(e) => (StatusCode::OK, format!("Error: {}", e)),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("Error: {}", e)),
     };
 
     let mut headers = HeaderMap::new();
@@ -232,19 +241,11 @@ pub async fn get_device_info(State(conn): State<Arc<Connection>>) -> impl IntoRe
 /// }
 /// ```
 ///
-/// # 说明
-/// 每次切换数据连接状态时，会自动清空 iptables 规则（flush），
-/// 以确保网络配置处于干净状态
 pub async fn set_data_status(
     State(conn): State<Arc<Connection>>,
     Json(payload): Json<DataConnectionRequest>,
 ) -> impl IntoResponse {
-    // 1. 先清空 iptables 规则
-    if let Err(_e) = flush_iptables().await {
-        // 清空规则失败不应阻止数据连接操作，静默处理
-    }
-
-    // 2. 设置数据连接状态
+    // Do not clear the system firewall here. Other services may own its rules.
     match set_data_connection(&conn, payload.active).await {
         Ok(_) => {
             
@@ -1378,6 +1379,54 @@ pub async fn get_band_lock_handler(State(conn): State<Arc<Connection>>) -> impl 
     )
 }
 
+/// GET /api/restart/config - 获取自动重启策略
+pub async fn get_restart_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> (StatusCode, Json<ApiResponse<RestartConfigResponse>>) {
+    let restart = config_manager.get_restart();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "Success",
+            RestartConfigResponse {
+                schedule_enabled: restart.schedule_enabled,
+                schedule_interval_days: restart.schedule_interval_days,
+                low_memory_enabled: restart.low_memory_enabled,
+                low_memory_threshold_percent: restart.low_memory_threshold_percent,
+            },
+        )),
+    )
+}
+
+/// POST /api/restart/config - 保存自动重启策略
+pub async fn set_restart_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    Json(restart): Json<RestartConfig>,
+) -> (StatusCode, Json<ApiResponse<RestartConfigResponse>>) {
+    let restart = restart.sanitize();
+    match config_manager.set_restart(restart.clone()) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(
+                "Restart configuration updated",
+                RestartConfigResponse {
+                    schedule_enabled: restart.schedule_enabled,
+                    schedule_interval_days: restart.schedule_interval_days,
+                    low_memory_enabled: restart.low_memory_enabled,
+                    low_memory_threshold_percent: restart.low_memory_threshold_percent,
+                },
+            )),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(format!(
+                "Failed to update restart configuration: {}",
+                error
+            ))),
+        ),
+    }
+}
+
 /// POST /api/system/reboot - 系统重启
 ///
 /// # Request body（可选）
@@ -1398,16 +1447,16 @@ pub async fn system_reboot(
     Json(payload): Json<Option<SystemRebootRequest>>,
 ) -> impl IntoResponse {
     let delay = payload.map(|p| p.delay_seconds).unwrap_or(3);
-    
-    // 使用 tokio 异步执行重启命令
-    tokio::spawn(async move {
-        // 等待指定的延迟时间
-        tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
-        
-        // 执行重启命令
-        let _ = Command::new("reboot").output();
-    });
-    
+
+    if !crate::restart::schedule_reboot("manual", u64::from(delay)) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<serde_json::Value>::error(
+                "A system reboot is already pending",
+            )),
+        );
+    }
+
     (
         StatusCode::OK,
         Json(ApiResponse::success_with_message(
@@ -2053,7 +2102,9 @@ pub async fn get_sms_list_handler(
     State(db): State<Arc<Database>>,
     axum::extract::Query(req): axum::extract::Query<SmsListRequest>,
 ) -> (StatusCode, Json<ApiResponse<Vec<crate::db::SmsMessage>>>) {
-    match db.get_sms_messages(req.limit, req.offset) {
+    let limit = req.limit.clamp(1, 200);
+    let offset = req.offset.max(0);
+    match db.get_sms_messages(limit, offset) {
         Ok(messages) => (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
@@ -2073,7 +2124,14 @@ pub async fn get_sms_conversation_handler(
     State(db): State<Arc<Database>>,
     axum::extract::Query(req): axum::extract::Query<SmsConversationRequest>,
 ) -> (StatusCode, Json<ApiResponse<Vec<crate::db::SmsMessage>>>) {
-    match db.get_sms_conversation(&req.phone_number, req.limit) {
+    if req.phone_number.trim().is_empty() || req.phone_number.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("phone_number must be 1-64 characters")),
+        );
+    }
+    let limit = req.limit.clamp(1, 200);
+    match db.get_sms_conversation(req.phone_number.trim(), limit) {
         Ok(messages) => (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
@@ -2426,13 +2484,19 @@ pub async fn get_apn_list_handler(
     State(conn): State<Arc<Connection>>,
 ) -> (StatusCode, Json<ApiResponse<ApnListResponse>>) {
     match get_all_apn_contexts(&conn).await {
-        Ok(contexts) => (
-            StatusCode::OK,
-            Json(ApiResponse::success_with_message(
-                "Success",
-                ApnListResponse { contexts },
-            )),
-        ),
+        Ok(mut contexts) => {
+            // APN passwords are needed only when explicitly updated; never expose them over GET.
+            for context in &mut contexts {
+                context.password.clear();
+            }
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Success",
+                    ApnListResponse { contexts },
+                )),
+            )
+        }
         Err(e) => (
             StatusCode::OK,
             Json(ApiResponse::error(format!("Failed to get APN list: {}", e))),
@@ -2465,6 +2529,34 @@ pub async fn set_apn_handler(
         );
     }
     
+    // Validate the D-Bus object path before it is passed to zbus.
+    if !req.context_path.starts_with("/ril_0/context")
+        || req.context_path.len() > 128
+        || req.context_path.contains("..")
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("context_path must reference a /ril_0/context entry")),
+        );
+    }
+    if req.apn.as_deref().is_some_and(|value| value.len() > 100)
+        || req.username.as_deref().is_some_and(|value| value.len() > 100)
+        || req.password.as_deref().is_some_and(|value| value.len() > 256)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("APN fields exceed their maximum length")),
+        );
+    }
+    if req.protocol.as_deref().is_some_and(|value| !matches!(value, "ip" | "ipv6" | "dual"))
+        || req.auth_method.as_deref().is_some_and(|value| !matches!(value, "none" | "pap" | "chap"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Unsupported APN protocol or authentication method")),
+        );
+    }
+
     // 调用 D-Bus 设置 APN 属性
     match set_apn_properties(
         &conn,
@@ -2479,11 +2571,15 @@ pub async fn set_apn_handler(
             // 获取更新后的 APN 配置
             match get_all_apn_contexts(&conn).await {
                 Ok(contexts) => {
-                    // 找到刚刚修改的 context
+                    // Do not return the stored password after an update.
                     let updated_context = contexts
                         .iter()
                         .find(|c| c.path == req.context_path)
-                        .cloned();
+                        .cloned()
+                        .map(|mut context| {
+                            context.password.clear();
+                            context
+                        });
                     
                     (
                         StatusCode::OK,
@@ -2603,8 +2699,8 @@ pub async fn get_call_history_handler(
     State(db): State<Arc<Database>>,
     Query(params): Query<crate::models::CallHistoryRequest>,
 ) -> (StatusCode, Json<ApiResponse<crate::models::CallHistoryResponse>>) {
-    let limit = if params.limit > 0 { params.limit } else { 50 };
-    let offset = if params.offset >= 0 { params.offset } else { 0 };
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
     
     match db.get_call_history(limit, offset) {
         Ok(records) => {
@@ -2702,7 +2798,7 @@ pub async fn set_init_script_handler(
 pub async fn get_webhook_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
 ) -> (StatusCode, Json<ApiResponse<crate::config::WebhookConfig>>) {
-    let config = config_manager.get_webhook();
+    let config = config_manager.get_webhook_for_response();
     (
         StatusCode::OK,
         Json(ApiResponse::success_with_message("Success", config)),
@@ -2758,7 +2854,7 @@ pub async fn test_webhook_handler(
 pub async fn get_sms_push_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
 ) -> (StatusCode, Json<ApiResponse<crate::config::SmsPushConfig>>) {
-    let config = config_manager.get_sms_push();
+    let config = config_manager.get_sms_push_for_response();
     (
         StatusCode::OK,
         Json(ApiResponse::success_with_message("Success", config)),
@@ -2898,8 +2994,10 @@ pub async fn get_ota_status_handler() -> impl IntoResponse {
 pub async fn upload_ota_handler(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    match crate::ota::handle_ota_upload(&body) {
-        Ok(response) => {
+    let result = tokio::task::spawn_blocking(move || crate::ota::handle_ota_upload(&body)).await;
+
+    match result {
+        Ok(Ok(response)) => {
             let message = if response.validation.valid {
                 "OTA package uploaded and validated"
             } else {
@@ -2910,10 +3008,17 @@ pub async fn upload_ota_handler(
                 Json(ApiResponse::success_with_message(message, response)),
             )
         }
-        Err(e) => (
-            StatusCode::OK,
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
             Json(ApiResponse::<crate::models::OtaUploadResponse>::error(format!(
                 "Failed to process OTA package: {}",
+                e
+            ))),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<crate::models::OtaUploadResponse>::error(format!(
+                "OTA processing task failed: {}",
                 e
             ))),
         ),
@@ -2924,15 +3029,55 @@ pub async fn upload_ota_handler(
 pub async fn apply_ota_handler(
     Json(req): Json<crate::models::OtaApplyRequest>,
 ) -> impl IntoResponse {
-    match crate::ota::apply_ota_update(req.restart_now) {
-        Ok(message) => (
+    let result = tokio::task::spawn_blocking(move || {
+        crate::ota::apply_ota_update(req.restart_now, req.allow_downgrade)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(message)) => (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(&message, json!({ "applied": true }))),
         ),
-        Err(e) => (
-            StatusCode::OK,
+        Ok(Err(e)) => (
+            StatusCode::CONFLICT,
             Json(ApiResponse::<serde_json::Value>::error(format!(
                 "Failed to apply OTA update: {}",
+                e
+            ))),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<serde_json::Value>::error(format!(
+                "OTA apply task failed: {}",
+                e
+            ))),
+        ),
+    }
+}
+
+/// POST /api/ota/rollback - 恢复到设备保留的上一版本
+pub async fn rollback_ota_handler(
+    Json(req): Json<crate::models::OtaRollbackRequest>,
+) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || crate::ota::rollback_ota_update(req.restart_now)).await;
+
+    match result {
+        Ok(Ok(message)) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message(&message, json!({ "rolled_back": true }))),
+        ),
+        Ok(Err(e)) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<serde_json::Value>::error(format!(
+                "Failed to roll back OTA update: {}",
+                e
+            ))),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<serde_json::Value>::error(format!(
+                "OTA rollback task failed: {}",
                 e
             ))),
         ),

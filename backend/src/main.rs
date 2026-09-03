@@ -21,17 +21,18 @@
 
 use anyhow::Result;
 use axum::{
-    routing::get, 
-    routing::post, 
+    routing::get,
+    routing::post,
     Router,
     response::{IntoResponse, Response},
     http::{StatusCode, Uri},
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, Request},
+    middleware::{self, Next},
 };
 use clap::Parser;
 use std::sync::Arc;
-use std::path::PathBuf;
-use tower_http::cors::{CorsLayer, Any};
+use std::path::{Component, PathBuf};
+use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use zbus::Connection;
@@ -43,6 +44,7 @@ mod handlers;
 mod iptables;
 mod models;
 mod ota;
+mod restart;
 mod serial;
 mod sms_push;
 mod sms_listener;
@@ -73,11 +75,49 @@ fn get_www_dir() -> PathBuf {
     exe_dir.join("www")
 }
 
+/// Protect management APIs when UDX710_API_TOKEN is configured.
+/// Keeping the token optional preserves compatibility for existing devices; production
+/// deployments should always set it in the service environment.
+async fn api_auth(
+    expected_token: Option<String>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/api/")
+        || path == "/api/health"
+        || request.method() == axum::http::Method::OPTIONS
+    {
+        return next.run(request).await;
+    }
+
+    match expected_token {
+        Some(token) => {
+            let authorized = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.strip_prefix("Bearer ") == Some(token.as_str()));
+            if authorized {
+                next.run(request).await
+            } else {
+                (StatusCode::UNAUTHORIZED, "Missing or invalid API token").into_response()
+            }
+        }
+        None => next.run(request).await,
+    }
+}
+
 /// SPA fallback handler - 对于所有前端路由返回 index.html
 async fn spa_fallback(uri: Uri) -> Response {
     let path = uri.path();
-    
-    // 如果是 API 路由，返回 404（不应该走到这里，但作为保险）
+    if PathBuf::from(path)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
+
     if path.starts_with("/api/") {
         return (StatusCode::NOT_FOUND, "API endpoint not found").into_response();
     }
@@ -130,7 +170,7 @@ async fn spa_fallback(uri: Uri) -> Response {
     }
 }
 
-/// R106 Backend Service - UDX710 5G/LTE 模块管理服务
+/// UDX710 Backend Service - UDX710 5G/LTE 模块管理服务
 #[derive(Parser, Debug)]
 #[command(name = "udx710")]
 #[command(author, version, about, long_about = None)]
@@ -197,22 +237,53 @@ async fn main() -> Result<()> {
     
     // 启动 SMS 监听线程
     {
-        let conn_clone = Connection::system().await?;
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
         let sms_push_clone = Arc::clone(&sms_push_sender);
         tokio::spawn(async move {
-            let _ = sms_listener::start_sms_listener(conn_clone, db_clone, webhook_clone, sms_push_clone).await;
+            loop {
+                match Connection::system().await {
+                    Ok(conn) => {
+                        if let Err(error) = sms_listener::start_sms_listener(
+                            conn,
+                            Arc::clone(&db_clone),
+                            Arc::clone(&webhook_clone),
+                            Arc::clone(&sms_push_clone),
+                        )
+                        .await
+                        {
+                            warn!(error = %error, "SMS listener stopped");
+                        }
+                    }
+                    Err(error) => warn!(error = %error, "Failed to connect SMS listener to system D-Bus"),
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
         });
     }
     
     // 启动电话监听线程（包括通话记录存储）
     {
-        let conn_clone = Connection::system().await?;
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
         tokio::spawn(async move {
-            let _ = sms_listener::start_call_listener(conn_clone, db_clone, webhook_clone).await;
+            loop {
+                match Connection::system().await {
+                    Ok(conn) => {
+                        if let Err(error) = sms_listener::start_call_listener(
+                            conn,
+                            Arc::clone(&db_clone),
+                            Arc::clone(&webhook_clone),
+                        )
+                        .await
+                        {
+                            warn!(error = %error, "Call listener stopped");
+                        }
+                    }
+                    Err(error) => warn!(error = %error, "Failed to connect call listener to system D-Bus"),
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
         });
     }
     
@@ -240,11 +311,19 @@ async fn main() -> Result<()> {
         });
     }
 
-    // CORS 配置：允许前端开发服务器跨域访问
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // 自动重启策略默认关闭；任务只在服务启动时创建一次。
+    {
+        let config_manager = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            restart::restart_watchdog(config_manager).await;
+        });
+    }
+
+    // Static frontend and API share one origin in production. Cross-origin access
+    // is disabled unless the deployment explicitly adds an origin policy.
+    let cors = CorsLayer::new();
+
+    let api_token = std::env::var("UDX710_API_TOKEN").ok().filter(|token| !token.trim().is_empty());
 
     // 创建统一的应用状态
     let app_state = AppState::new(
@@ -321,6 +400,7 @@ async fn main() -> Result<()> {
         .route("/api/stats/cpu", get(get_cpu_info).options(options_handler))
         .route("/api/connectivity", get(get_connectivity_check).options(options_handler))
         .route("/api/system/reboot", post(system_reboot).options(options_handler))
+        .route("/api/restart/config", get(get_restart_config_handler).post(set_restart_config_handler).options(options_handler))
         .route("/api/health", get(health_check))
         // ========== init.sh 管理接口 ==========
         .route("/api/init-script", get(get_init_script_handler).post(set_init_script_handler).options(options_handler))
@@ -337,9 +417,11 @@ async fn main() -> Result<()> {
         .route("/api/ota/upload", post(upload_ota_handler).options(options_handler)
             .layer(DefaultBodyLimit::max(50 * 1024 * 1024))) // 50MB 限制
         .route("/api/ota/apply", post(apply_ota_handler).options(options_handler))
+        .route("/api/ota/rollback", post(rollback_ota_handler).options(options_handler))
         .route("/api/ota/cancel", post(cancel_ota_handler).options(options_handler))
         // ========== 统一状态和中间件 ==========
         .with_state(app_state)
+        .layer(middleware::from_fn(move |request, next| api_auth(api_token.clone(), request, next)))
         .layer(cors)
         .fallback(spa_fallback);
 

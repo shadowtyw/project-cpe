@@ -695,6 +695,13 @@ export const DEFAULT_SMS_PUSH_BODY_TEMPLATE = `时间: {{timestamp}}
 
 {{content}}`
 
+export interface RestartConfig {
+  schedule_enabled: boolean
+  schedule_interval_days: number
+  low_memory_enabled: boolean
+  low_memory_threshold_percent: number
+}
+
 // ========== OTA 更新类型 ==========
 
 // OTA 元数据
@@ -723,6 +730,8 @@ export interface OtaValidation {
   binary_md5_match: boolean
   frontend_md5_match: boolean
   arch_match: boolean
+  version_relation: 'upgrade' | 'same' | 'downgrade' | 'unknown'
+  min_version_match: boolean
   error?: string
 }
 
@@ -732,6 +741,9 @@ export interface OtaStatusResponse {
   current_commit: string
   pending_update: boolean
   pending_meta?: OtaMeta
+  pending_validation?: OtaValidation
+  rollback_available: boolean
+  rollback_meta?: OtaMeta
 }
 
 // OTA 上传响应
@@ -742,6 +754,11 @@ export interface OtaUploadResponse {
 
 // OTA 应用请求
 export interface OtaApplyRequest {
+  restart_now: boolean
+  allow_downgrade?: boolean
+}
+
+export interface OtaRollbackRequest {
   restart_now: boolean
 }
 

@@ -73,6 +73,21 @@ cd frontend && npm run build
 ./scripts/deploy.sh
 ```
 
+### GitHub OTA 发布与设备升级
+
+GitHub Actions 会在手动触发或推送 `v*` tag 时构建并发布
+`udx710-ota-<version>.tar.gz`。工作流会检查版本一致性、运行 Rust
+测试、构建 aarch64-musl 二进制和前端，并自检 OTA 包的结构、ELF 架构与摘要。
+
+从已构建的 `3.4.1` 设备升级本次自动重启和 USB 地址兼容修复时，请使用 GitHub 生成的 `3.4.2` 包：在设备管理页面选择 **OTA 更新**，上传 `.tar.gz`，确认验证结果为“通过”，然后选择“应用并重启”。请继续保留当前可用的 `3.4.1` GitHub OTA 包，以便需要时手动上传恢复。
+
+升级到新版本后，OTA 仅接受 GitHub/`scripts/pack-ota.sh` 生成的 `.tar.gz` 包。较新版本可直接应用；同版本或旧版本包在完整性校验通过后，必须在 OTA 页面明确勾选确认才能作为恢复包应用。`min_version` 仍是不可绕过的兼容性边界。
+
+**恢复说明**：从不支持本机快照的旧后端首次升级到 `3.4.1` 前，必须自行保留旧 GitHub OTA 包。`3.4.1` 之后每次成功 OTA 都会自动保存上一版本，页面会显示“恢复上一版本”按钮。恢复会保留当前版本为下一次可恢复版本。若新版本重启后完全无法启动，Web API 无法到达，请使用保留的 OTA 包通过现有恢复手段处理；自动启动失败回滚将在真机验证 loader 后单独引入。
+
+如需启用管理 API 认证，在设备服务环境中设置 `UDX710_API_TOKEN`；然后在“系统配置 → 管理 API 认证”输入相同 token。未设置此环境变量时，为兼容旧设备，API 认证不会启用。
+
+
 ---
 
 ## 🔧 环境配置 (macOS)
@@ -276,6 +291,7 @@ AT+SPLBAND=2,0,0,0,0
 | `/api/stats/cpu` | GET | CPU 信息 |
 | `/api/connectivity` | GET | 网络连通性检查 |
 | `/api/system/reboot` | POST | 重启系统 |
+| `/api/restart/config` | GET/POST | 自动重启策略（默认关闭） |
 | `/api/at` | POST | 执行 AT 指令 |
 
 ### Webhook 配置
@@ -289,8 +305,18 @@ AT+SPLBAND=2,0,0,0,0
 |------|------|------|
 | `/api/ota/status` | GET | OTA 更新状态 |
 | `/api/ota/upload` | POST | 上传 OTA 包 (最大 50MB) |
-| `/api/ota/apply` | POST | 应用 OTA 更新 |
+| `/api/ota/apply` | POST | 应用 OTA 更新（同/低版本需要 `allow_downgrade: true`） |
+| `/api/ota/rollback` | POST | 恢复设备自动保存的上一版本 |
 | `/api/ota/cancel` | POST | 取消 OTA 更新 |
+
+### 自动重启策略
+
+自动重启默认关闭，配置存入 `/data/config.json`，不会被 OTA 覆盖。可在“系统配置 → 自动重启”中分别启用：
+
+- **周期重启**：按设备从上次开机起的连续运行天数计算，范围为 1–365 天；不依赖设备日历时间。
+- **低内存重启**：依据 Linux `MemAvailable / MemTotal` 的可用内存百分比，范围为 5%–50%。只有连续 3 次低于阈值才会触发；启动后的前 10 分钟不会触发，且 24 小时内最多自动重启一次。
+
+重启会中断网络、USB 和通话，请只在可接受的维护策略下开启。
 
 ---
 

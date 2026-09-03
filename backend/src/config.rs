@@ -193,6 +193,46 @@ fn sanitize_refresh_interval_ms(interval_ms: u64) -> u64 {
     }
 }
 
+/// 自动重启配置。所有策略默认关闭，避免升级后改变既有设备行为。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartConfig {
+    #[serde(default)]
+    pub schedule_enabled: bool,
+    #[serde(default = "default_schedule_interval_days")]
+    pub schedule_interval_days: u32,
+    #[serde(default)]
+    pub low_memory_enabled: bool,
+    #[serde(default = "default_low_memory_threshold_percent")]
+    pub low_memory_threshold_percent: u8,
+}
+
+fn default_schedule_interval_days() -> u32 {
+    7
+}
+
+fn default_low_memory_threshold_percent() -> u8 {
+    10
+}
+
+impl Default for RestartConfig {
+    fn default() -> Self {
+        Self {
+            schedule_enabled: false,
+            schedule_interval_days: default_schedule_interval_days(),
+            low_memory_enabled: false,
+            low_memory_threshold_percent: default_low_memory_threshold_percent(),
+        }
+    }
+}
+
+impl RestartConfig {
+    pub fn sanitize(mut self) -> Self {
+        self.schedule_interval_days = self.schedule_interval_days.clamp(1, 365);
+        self.low_memory_threshold_percent = self.low_memory_threshold_percent.clamp(5, 50);
+        self
+    }
+}
+
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -202,6 +242,8 @@ pub struct AppConfig {
     pub sms_push: SmsPushConfig,
     #[serde(default)]
     pub refresh: RefreshConfig,
+    #[serde(default)]
+    pub restart: RestartConfig,
 }
 
 
@@ -220,6 +262,7 @@ impl ConfigManager {
                     match serde_json::from_str::<AppConfig>(&content) {
                         Ok(cfg) => AppConfig {
                             refresh: cfg.refresh.sanitize(),
+                            restart: cfg.restart.sanitize(),
                             ..cfg
                         },
                         Err(e) => {
@@ -262,10 +305,20 @@ impl ConfigManager {
         self.config.read().unwrap().webhook.clone()
     }
     
-    /// 更新 Webhook 配置
-    pub fn set_webhook(&self, webhook: WebhookConfig) -> Result<(), String> {
+    pub fn get_webhook_for_response(&self) -> WebhookConfig {
+        let mut webhook = self.get_webhook();
+        webhook.secret.clear();
+        webhook
+    }
+
+    /// Empty secret means "keep the existing secret" so a masked GET response
+    /// can be saved again without accidentally erasing credentials.
+    pub fn set_webhook(&self, mut webhook: WebhookConfig) -> Result<(), String> {
         {
             let mut config = self.config.write().unwrap();
+            if webhook.secret.is_empty() {
+                webhook.secret = config.webhook.secret.clone();
+            }
             config.webhook = webhook;
         }
         self.save()
@@ -275,9 +328,18 @@ impl ConfigManager {
         self.config.read().unwrap().sms_push.clone()
     }
 
-    pub fn set_sms_push(&self, sms_push: SmsPushConfig) -> Result<(), String> {
+    pub fn get_sms_push_for_response(&self) -> SmsPushConfig {
+        let mut sms_push = self.get_sms_push();
+        sms_push.credential.clear();
+        sms_push
+    }
+
+    pub fn set_sms_push(&self, mut sms_push: SmsPushConfig) -> Result<(), String> {
         {
             let mut config = self.config.write().unwrap();
+            if sms_push.credential.is_empty() {
+                sms_push.credential = config.sms_push.credential.clone();
+            }
             config.sms_push = sms_push;
         }
         self.save()
@@ -295,12 +357,25 @@ impl ConfigManager {
         self.save()
     }
 
+    pub fn get_restart(&self) -> RestartConfig {
+        self.config.read().unwrap().restart.clone().sanitize()
+    }
+
+    pub fn set_restart(&self, restart: RestartConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap();
+            config.restart = restart.sanitize();
+        }
+        self.save()
+    }
+
     #[allow(dead_code)]
     pub fn set(&self, config: AppConfig) -> Result<(), String> {
         {
             let mut current = self.config.write().unwrap();
             *current = AppConfig {
                 refresh: config.refresh.sanitize(),
+                restart: config.restart.sanitize(),
                 ..config
             };
         }
@@ -321,7 +396,8 @@ impl ConfigManager {
         
         fs::write(&self.config_path, content)
             .map_err(|e| format!("Failed to write config file: {}", e))?;
-        
+        set_private_file_permissions(&self.config_path)?;
+
         Ok(())
     }
     
@@ -342,6 +418,7 @@ impl ConfigManager {
             let mut config = self.config.write().unwrap();
             *config = AppConfig {
                 refresh: new_config.refresh.sanitize(),
+                restart: new_config.restart.sanitize(),
                 ..new_config
             };
         }
@@ -365,6 +442,21 @@ pub fn get_persistent_root_dir() -> PathBuf {
 
 pub fn get_default_config_path() -> PathBuf {
     get_persistent_root_dir().join("config.json")
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .map_err(|e| format!("Failed to protect {}: {}", path.display(), e))?;
+    }
+    Ok(())
 }
 
 fn normalize_newlines(content: &str) -> String {
@@ -575,6 +667,8 @@ mod tests {
         loader_contains_init_command,
         loader_contains_ota_command,
         remove_ota_command_from_loader,
+        AppConfig,
+        RestartConfig,
         INIT_SCRIPT_LOADER_COMMAND,
     };
 
@@ -617,5 +711,27 @@ mod tests {
 
         assert!(!loader_contains_ota_command(&updated));
         assert!(updated.contains("/home/root/udx710 -p 80 &"));
+    }
+
+    #[test]
+    fn restart_config_sanitizes_values() {
+        let sanitized = RestartConfig {
+            schedule_enabled: true,
+            schedule_interval_days: 0,
+            low_memory_enabled: true,
+            low_memory_threshold_percent: 100,
+        }
+        .sanitize();
+
+        assert_eq!(sanitized.schedule_interval_days, 1);
+        assert_eq!(sanitized.low_memory_threshold_percent, 50);
+    }
+
+    #[test]
+    fn legacy_config_defaults_restart_policies_to_disabled() {
+        let config: AppConfig = serde_json::from_str(r#"{"refresh":{"interval_ms":5000}}"#).unwrap();
+
+        assert!(!config.restart.schedule_enabled);
+        assert!(!config.restart.low_memory_enabled);
     }
 }

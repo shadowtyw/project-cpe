@@ -1120,6 +1120,15 @@ pub struct RefreshConfigResponse {
     pub frontend_connected: bool,
 }
 
+/// 自动重启策略配置响应。周期按设备连续运行天数计算。
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct RestartConfigResponse {
+    pub schedule_enabled: bool,
+    pub schedule_interval_days: u32,
+    pub low_memory_enabled: bool,
+    pub low_memory_threshold_percent: u8,
+}
+
 // ============ OTA 更新模型 ============
 
 /// OTA 更新包元数据（meta.json 格式）
@@ -1154,6 +1163,14 @@ pub struct OtaStatusResponse {
     /// 待安装的更新信息
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_meta: Option<OtaMeta>,
+    /// 待安装更新的完整性与版本关系检查结果
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_validation: Option<OtaValidation>,
+    /// 是否存在可恢复的上一版本快照
+    pub rollback_available: bool,
+    /// 可恢复版本的元数据
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_meta: Option<OtaMeta>,
 }
 
 /// OTA 上传响应
@@ -1178,6 +1195,10 @@ pub struct OtaValidation {
     pub frontend_md5_match: bool,
     /// 架构是否匹配
     pub arch_match: bool,
+    /// 版本关系：upgrade、same 或 downgrade
+    pub version_relation: String,
+    /// 当前版本是否满足包声明的最低兼容版本
+    pub min_version_match: bool,
     /// 错误消息（如果验证失败）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1187,6 +1208,16 @@ pub struct OtaValidation {
 #[derive(Debug, Deserialize)]
 pub struct OtaApplyRequest {
     /// 是否立即重启
+    #[serde(default)]
+    pub restart_now: bool,
+    /// 明确授权应用同版本或低版本恢复包
+    #[serde(default)]
+    pub allow_downgrade: bool,
+}
+
+/// 回滚到设备保留的上一版本快照
+#[derive(Debug, Deserialize)]
+pub struct OtaRollbackRequest {
     #[serde(default)]
     pub restart_now: bool,
 }
