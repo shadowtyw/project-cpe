@@ -41,6 +41,7 @@ use crate::{
         read_uptime, sample_cpu_usage,
     },
 };
+use crate::process_monitor::read_top_memory_processes;
 use crate::state::FrontendRuntime;
 use std::process::Command;
 
@@ -833,6 +834,27 @@ pub async fn get_cpu_info() -> impl IntoResponse {
     }
 }
 
+/// GET /api/system/memory-processes - 获取内存占用最高的进程
+pub async fn get_memory_processes() -> impl IntoResponse {
+    match tokio::task::spawn_blocking(read_top_memory_processes).await {
+        Ok(Ok(data)) => (
+            StatusCode::OK,
+            Json(ApiResponse::success_with_message("Success", data)),
+        ),
+        Ok(Err(error)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::<MemoryProcessesResponse>::error(error)),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<MemoryProcessesResponse>::error(format!(
+                "Memory process task failed: {}",
+                error
+            ))),
+        ),
+    }
+}
+
 /// GET /api/stats/system - 获取综合系统状态（包括网速、内存、运行时间）
 ///
 /// 一次性获取所有系统监控信息，适合仪表板使用
@@ -1433,7 +1455,9 @@ pub async fn set_restart_config_handler(
 pub async fn system_reboot(
     Json(payload): Json<Option<SystemRebootRequest>>,
 ) -> impl IntoResponse {
-    let delay = payload.map(|p| p.delay_seconds).unwrap_or(3);
+    let delay = payload
+        .map(|p| p.delay_seconds.clamp(1, 60))
+        .unwrap_or(3);
 
     if !crate::restart::schedule_reboot("manual", u64::from(delay)) {
         return (

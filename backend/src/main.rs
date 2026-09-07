@@ -44,6 +44,7 @@ mod handlers;
 mod iptables;
 mod models;
 mod ota;
+mod process_monitor;
 mod restart;
 mod serial;
 mod sms_push;
@@ -229,6 +230,15 @@ async fn main() -> Result<()> {
     if let Err(err) = ensure_loader_hooks_init() {
         warn!(error = %err, "Failed to ensure loader bootstrap");
     }
+    // route_test.sh adds the rule after its five-second boot delay. Remove only this
+    // known USB-to-cellular DROP rule twice after startup; do not flush firewall tables.
+    usb_switch::remove_usb_uplink_drop_rules();
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
+        usb_switch::remove_usb_uplink_drop_rules();
+        tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
+        usb_switch::remove_usb_uplink_drop_rules();
+    });
     
     // 初始化 Webhook 发送器
     let webhook_sender = Arc::new(WebhookSender::new(Arc::clone(&config_manager)));
@@ -397,6 +407,7 @@ async fn main() -> Result<()> {
         .route("/api/usb-advance", post(set_usb_mode_advanced).options(options_handler))
         // ========== 系统接口 ==========
         .route("/api/stats", get(get_system_stats).options(options_handler))
+        .route("/api/system/memory-processes", get(get_memory_processes).options(options_handler))
         .route("/api/stats/cpu", get(get_cpu_info).options(options_handler))
         .route("/api/connectivity", get(get_connectivity_check).options(options_handler))
         .route("/api/system/reboot", post(system_reboot).options(options_handler))

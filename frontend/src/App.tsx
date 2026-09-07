@@ -26,6 +26,7 @@ const Configuration = lazy(() => import('./pages/Configuration'))
 const InitScript = lazy(() => import('./pages/InitScript'))
 const ATConsole = lazy(() => import('./pages/ATConsole'))
 const Terminal = lazy(() => import('./pages/Terminal'))
+const MemoryProcesses = lazy(() => import('./pages/MemoryProcesses'))
 const OtaUpdate = lazy(() => import('./pages/OtaUpdate'))
 
 // 页面加载中的 fallback
@@ -54,6 +55,7 @@ const appRoutes: AppRouteConfig[] = [
   { path: 'config', component: Configuration },
   { path: 'init-script', component: InitScript },
   { path: 'ota', component: OtaUpdate },
+  { path: 'memory-processes', component: MemoryProcesses },
   { path: 'at-console', component: ATConsole },
   { path: 'terminal', component: Terminal },
 ]

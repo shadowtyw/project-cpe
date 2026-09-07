@@ -70,6 +70,7 @@ import type {
   WebhookConfig,
   WebhookTestResponse,
   SmsPushConfig,
+  MemoryProcessesResponse,
   RestartConfig,
   RefreshConfigResponse,
   OtaStatusResponse,
@@ -246,6 +247,11 @@ class UDX710API {
       body: JSON.stringify(body),
       returnText: true,
     })
+  }
+
+  // 获取内存占用最高的进程
+  async getMemoryProcesses() {
+    return request<ApiResponse<MemoryProcessesResponse>>('/system/memory-processes')
   }
 
   // 获取实时网速信息

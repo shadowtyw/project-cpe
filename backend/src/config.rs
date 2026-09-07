@@ -617,6 +617,15 @@ pub fn ensure_loader_hooks_init() -> Result<(), String> {
         .map_err(|e| format!("Failed to write loader.sh: {}", e))?;
     set_executable_permissions(&loader_path)?;
 
+    // The loader always calls init.sh. Create a harmless executable placeholder when
+    // a device has never saved an init script, avoiding a noisy boot-time shell error.
+    let init_path = PathBuf::from(INIT_SCRIPT_PATH);
+    if !init_path.exists() {
+        fs::write(&init_path, "#!/bin/sh\n")
+            .map_err(|e| format!("Failed to create default init.sh: {}", e))?;
+        set_executable_permissions(&init_path)?;
+    }
+
     let _ = fs::remove_file("/home/root/ota.sh");
 
     Ok(())

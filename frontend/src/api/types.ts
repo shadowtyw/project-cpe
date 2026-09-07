@@ -189,6 +189,23 @@ export interface MemoryInfo {
   available_source?: 'kernel' | 'simple_estimate'
 }
 
+export interface MemoryProcess {
+  pid: number
+  name: string
+  command: string
+  rss_bytes: number
+  virtual_bytes: number
+  memory_percent: number
+  threads: number
+}
+
+export interface MemoryProcessesResponse {
+  sampled_at: string
+  total_processes: number
+  total_memory_bytes: number
+  processes: MemoryProcess[]
+}
+
 // 运行时间信息
 export interface UptimeInfo {
   uptime_seconds: number

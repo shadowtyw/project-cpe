@@ -407,6 +407,7 @@ dbus-monitor --system "interface='org.ofono.MessageManager'"
 | 接口 | 方法 | 说明 |
 |---|---|---|
 | `/api/stats` | GET | 网速、准确内存、磁盘、CPU、温度、运行时间与 USB 状态 |
+| `/api/system/memory-processes` | GET | 只读返回 RSS 占用最高的 10 个进程 |
 | `/api/stats/cpu` | GET | CPU 信息 |
 | `/api/system/reboot` | POST | 手动重启系统 |
 | `/api/restart/config` | GET/POST | 自动重启策略；默认关闭 |

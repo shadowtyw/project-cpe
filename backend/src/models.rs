@@ -323,6 +323,27 @@ pub struct NetworkSpeedResponse {
     pub interval_seconds: f64,
 }
 
+/// 单个进程的内存占用信息
+#[derive(Debug, Serialize, Clone)]
+pub struct MemoryProcess {
+    pub pid: u32,
+    pub name: String,
+    pub command: String,
+    pub rss_bytes: u64,
+    pub virtual_bytes: u64,
+    pub memory_percent: f64,
+    pub threads: u64,
+}
+
+/// 内存占用最高的进程响应
+#[derive(Debug, Serialize)]
+pub struct MemoryProcessesResponse {
+    pub sampled_at: String,
+    pub total_processes: usize,
+    pub total_memory_bytes: u64,
+    pub processes: Vec<MemoryProcess>,
+}
+
 /// 内存信息响应
 #[derive(Debug, Serialize, Default)]
 pub struct MemoryInfo {

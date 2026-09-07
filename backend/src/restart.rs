@@ -58,63 +58,68 @@ pub async fn restart_watchdog(config_manager: Arc<ConfigManager>) {
             }
         };
 
+        let low_memory_ready = config.low_memory_enabled && uptime_seconds >= STARTUP_GRACE_SECONDS;
+        let low_memory_triggered = if low_memory_ready {
+            let memory = match read_memory_info() {
+                Ok(memory) => memory,
+                Err(error) => {
+                    warn!(error = %error, "Restart watchdog could not read memory information");
+                    continue;
+                }
+            };
+            if memory.total_bytes == 0 {
+                continue;
+            }
+            if memory.available_estimated {
+                warn!(source = %memory.available_source, "Low-memory watchdog is using an estimated available-memory value");
+            }
+
+            // A value exactly at the configured threshold does not trigger.
+            let available_percent = memory.available_bytes.saturating_mul(100) / memory.total_bytes;
+            if available_percent < u64::from(config.low_memory_threshold_percent) {
+                consecutive_low_memory_checks = consecutive_low_memory_checks.saturating_add(1);
+            } else {
+                consecutive_low_memory_checks = 0;
+            }
+
+            if consecutive_low_memory_checks >= LOW_MEMORY_CONSECUTIVE_CHECKS {
+                if low_memory_restart_limit_reached() {
+                    warn!(
+                        available_percent,
+                        threshold = config.low_memory_threshold_percent,
+                        "Low-memory restart suppressed because the daily limit was reached"
+                    );
+                    consecutive_low_memory_checks = 0;
+                    false
+                } else {
+                    record_low_memory_restart();
+                    info!(
+                        available_percent,
+                        threshold = config.low_memory_threshold_percent,
+                        "Low-memory restart threshold reached"
+                    );
+                    consecutive_low_memory_checks = 0;
+                    schedule_reboot("low_memory", 3)
+                }
+            } else {
+                false
+            }
+        } else {
+            consecutive_low_memory_checks = 0;
+            false
+        };
+
+        // Low memory has priority when both conditions are true in one check.
+        if low_memory_triggered {
+            continue;
+        }
+
         if config.schedule_enabled
             && uptime_seconds >= u64::from(config.schedule_interval_days) * 24 * 60 * 60
         {
             info!(days = config.schedule_interval_days, "Scheduled restart interval reached");
             schedule_reboot("scheduled", 3);
-            continue;
         }
-
-        if !config.low_memory_enabled || uptime_seconds < STARTUP_GRACE_SECONDS {
-            consecutive_low_memory_checks = 0;
-            continue;
-        }
-
-        let memory = match read_memory_info() {
-            Ok(memory) => memory,
-            Err(error) => {
-                warn!(error = %error, "Restart watchdog could not read memory information");
-                continue;
-            }
-        };
-        if memory.total_bytes == 0 {
-            continue;
-        }
-        if memory.available_estimated {
-            warn!(source = %memory.available_source, "Low-memory watchdog is using an estimated available-memory value");
-        }
-
-        // Keep integer floor semantics: a value exactly at the configured threshold does not trigger.
-        let available_percent = memory.available_bytes.saturating_mul(100) / memory.total_bytes;
-        if available_percent < u64::from(config.low_memory_threshold_percent) {
-            consecutive_low_memory_checks = consecutive_low_memory_checks.saturating_add(1);
-        } else {
-            consecutive_low_memory_checks = 0;
-        }
-
-        if consecutive_low_memory_checks < LOW_MEMORY_CONSECUTIVE_CHECKS {
-            continue;
-        }
-
-        if low_memory_restart_limit_reached() {
-            warn!(
-                available_percent,
-                threshold = config.low_memory_threshold_percent,
-                "Low-memory restart suppressed because the daily limit was reached"
-            );
-            consecutive_low_memory_checks = 0;
-            continue;
-        }
-
-        record_low_memory_restart();
-        info!(
-            available_percent,
-            threshold = config.low_memory_threshold_percent,
-            "Low-memory restart threshold reached"
-        );
-        schedule_reboot("low_memory", 3);
-        consecutive_low_memory_checks = 0;
     }
 }
 

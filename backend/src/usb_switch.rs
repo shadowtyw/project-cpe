@@ -650,14 +650,13 @@ fn resolve_usb_interface_ip() -> String {
         .unwrap_or_else(|| DEFAULT_USB_INTERFACE_IP.to_string())
 }
 
-/// 根据设备 USB 网络地址推导主机侧默认路由地址。
-fn host_gateway_for_usb_ip(usb_ip: &str) -> String {
-    let mut octets = usb_ip
-        .parse::<std::net::Ipv4Addr>()
-        .map(|address| address.octets())
-        .unwrap_or_else(|_| [192, 168, 67, 1]);
-    octets[3] = 2;
-    std::net::Ipv4Addr::from(octets).to_string()
+/// 仅删除 route_test.sh 已知的 USB 到蜂窝错误阻断规则。
+pub fn remove_usb_uplink_drop_rules() {
+    for command in ["iptables", "ip6tables"] {
+        let _ = Command::new(command)
+            .args(["-D", "FORWARD", "-i", "usb0", "-o", "sipa_eth0", "-j", "DROP"])
+            .output();
+    }
 }
 
 /// 配置 USB 网络接口
@@ -743,12 +742,12 @@ fn configure_usb_network(usb_interface_ip: &str) -> Result<(), String> {
         .args(["link", "set", "dev", "usb0", "up"])
         .output();
     
-    // 添加默认路由（用于主机端访问）
-    let host_gateway = host_gateway_for_usb_ip(usb_interface_ip);
-    let _ = Command::new("ip")
-        .args(["route", "add", "default", "via", host_gateway.as_str()])
-        .output();
-    
+    // USB 子网只用于管理和转发，不能写入主路由表 default route；
+    // CPE 的蜂窝默认路由必须继续由 connman/ofono 管理。
+
+    // 只删除本项目已知的错误 USB 转发阻断规则，不清空其他系统防火墙规则。
+    remove_usb_uplink_drop_rules();
+
     // 3. 关闭 sipa_usb0 接口（IPA USB 接口，避免冲突）
     let _ = Command::new("ifconfig")
         .args(["sipa_usb0", "down"])
