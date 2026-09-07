@@ -336,7 +336,7 @@ pub struct MemoryProcess {
 }
 
 /// 内存占用最高的进程响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct MemoryProcessesResponse {
     pub sampled_at: String,
     pub total_processes: usize,
