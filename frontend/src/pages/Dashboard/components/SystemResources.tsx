@@ -10,7 +10,7 @@
  */
 import { Box, Card, CardContent, Typography, Stack, LinearProgress, Chip, Tooltip } from '@mui/material'
 import { Speed, Memory, Storage, Thermostat, Usb, Info } from '@mui/icons-material'
-import { formatBytes, getCpuColor, getMemoryColor, getTempColor } from '../utils'
+import { formatBytes, getAvailableMemoryColor, getCpuColor, getMemoryColor, getTempColor } from '../utils'
 import type { SystemStatsResponse } from '@/api/types'
 
 interface SystemResourcesProps {
@@ -27,6 +27,22 @@ export function SystemResources({ systemStats }: SystemResourcesProps) {
   }
 
   const mainTemp = getMainTemp()
+  const memory = systemStats?.memory
+  const availablePercent = memory
+    ? Math.max(
+        0,
+        Math.min(
+          100,
+          memory.available_percent
+            ?? (memory.total_bytes > 0
+              ? (memory.available_bytes / memory.total_bytes) * 100
+              : 100 - memory.used_percent)
+        )
+      )
+    : 0
+  const processUsedBytes = memory?.process_non_reclaimable_used_bytes ?? memory?.used_bytes ?? 0
+  const reclaimableBytes = memory?.reclaimable_bytes
+    ?? ((memory?.cached_bytes ?? 0) + (memory?.buffers_bytes ?? 0))
 
   return (
     <Card sx={{ height: '100%' }}>
@@ -66,21 +82,34 @@ export function SystemResources({ systemStats }: SystemResourcesProps) {
                 <Typography variant="caption" color="text.secondary">
                   内存
                 </Typography>
-                {systemStats?.memory && (
-                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem', ml: 0.5 }}>
-                    已用 {formatBytes(systemStats.memory.used_bytes)} / 可用 {formatBytes(systemStats.memory.available_bytes)} / 缓存{' '}
-                    {formatBytes(systemStats.memory.cached_bytes)}
-                  </Typography>
+                {memory && (
+                  <Box sx={{ ml: 0.5 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem', display: 'block' }}>
+                      占用 {formatBytes(processUsedBytes)} / 可用 {formatBytes(memory.available_bytes)}
+                    </Typography>
+                    <Tooltip title="可回收缓存由文件缓存、可回收 slab 和缓冲区组成；Linux 在需要内存时通常可以回收它，因此不能与占用或可用内存简单相加。">
+                      <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
+                        可回收缓存 {formatBytes(reclaimableBytes)}
+                      </Typography>
+                    </Tooltip>
+                  </Box>
                 )}
               </Box>
-              <Typography variant="caption" fontWeight="medium">
-                {systemStats?.memory ? `${systemStats.memory.used_percent.toFixed(0)}%` : '-'}
-              </Typography>
+              <Box display="flex" alignItems="center" gap={0.5}>
+                <Typography variant="caption" fontWeight="medium">
+                  {memory ? `可用 ${availablePercent.toFixed(0)}%` : '-'}
+                </Typography>
+                {memory?.available_estimated && (
+                  <Tooltip title="此设备内核未提供 MemAvailable，当前可用内存由 MemFree、缓存和缓冲区估算。">
+                    <Info fontSize="small" color="warning" />
+                  </Tooltip>
+                )}
+              </Box>
             </Box>
             <LinearProgress
               variant="determinate"
-              value={systemStats?.memory?.used_percent || 0}
-              color={getMemoryColor(systemStats?.memory?.used_percent || 0)}
+              value={availablePercent}
+              color={getAvailableMemoryColor(availablePercent)}
               sx={{ height: 4, borderRadius: 2 }}
             />
           </Box>

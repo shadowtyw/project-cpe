@@ -69,7 +69,7 @@ for arg in "$@"; do
             echo "选项:"
             echo "  --skip-copy       跳过复制构建产物到 userdata"
             echo "  --info            显示 UBIFS 参数信息后退出"
-            echo "  --output=FILE     指定输出文件名 (默认: img-0_vol-userdata.ubifs)"
+            echo "  --output=FILE     指定输出文件名 (默认: $OUTPUT_FILE)"
             echo "  --min-io=SIZE     最小 I/O 单元大小 (默认: $MIN_IO_SIZE)"
             echo "  --leb-size=SIZE   逻辑擦除块大小 (默认: $LEB_SIZE)"
             echo "  --max-leb=COUNT   最大逻辑擦除块数量 (默认: $MAX_LEB_CNT)"

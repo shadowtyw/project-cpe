@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use zbus::{proxy, zvariant::OwnedValue, Connection, Proxy};
 
 use crate::config::ConfigManager;
@@ -731,11 +731,8 @@ pub async fn data_connection_watchdog(
     config_manager: Arc<ConfigManager>,
     frontend_runtime: Arc<FrontendRuntime>,
 ) {
-    use crate::iptables::{flush_iptables, get_iptables_rule_count};
-    
     let mut last_data_log = String::new();
-    let mut last_iptables_action = false; // 上次是否清空了 iptables
-    
+
     loop {
         let refresh = config_manager.get_refresh();
         let heartbeat_timeout = Duration::from_millis(refresh.heartbeat_timeout_ms());
@@ -747,36 +744,7 @@ pub async fn data_connection_watchdog(
 
         tokio::time::sleep(interval).await;
         
-        // 1. 检查并清空 iptables 规则
-        match get_iptables_rule_count().await {
-            Ok(count) => {
-                if count.has_rules() {
-                    // 有规则，执行清空
-                    if let Err(e) = flush_iptables().await {
-                        warn!(error = %e, "Watchdog: iptables flush failed");
-                    } else {
-                        if !last_iptables_action {
-                            // 只在首次清空时打印日志
-                            info!(
-                                total = count.total(),
-                                ipv4 = count.ipv4_rules,
-                                ipv6 = count.ipv6_rules,
-                                "Watchdog: iptables flushed"
-                            );
-                        }
-                        last_iptables_action = true;
-                    }
-                } else {
-                    // 无规则，重置标志
-                    last_iptables_action = false;
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "Watchdog: iptables check failed");
-            }
-        }
-        
-        // 2. 检查并恢复数据连接
+        // 检查并恢复数据连接
         let result = check_and_restore_data_connection(&conn).await;
         
         // 只在状态变化时打印日志，避免刷屏

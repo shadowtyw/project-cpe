@@ -49,11 +49,12 @@ import {
   Sms,
   Add,
   PlayArrow,
+  RestartAlt,
 } from '@mui/icons-material'
-import { api } from '../api'
+import { api, getApiToken, setApiToken } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
 import { useRefreshInterval } from '../contexts/RefreshContext'
-import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider } from '../api/types'
+import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider, RestartConfig } from '../api/types'
 import { DEFAULT_SMS_TEMPLATE, DEFAULT_CALL_TEMPLATE, DEFAULT_SMS_PUSH_TITLE_TEMPLATE, DEFAULT_SMS_PUSH_BODY_TEMPLATE } from '../api/types'
 
 interface HealthStatus {
@@ -161,6 +162,8 @@ export default function ConfigurationPage() {
   const [useHotSwitch, setUseHotSwitch] = useState<boolean>(false)
   const [rebooting, setRebooting] = useState(false)
   const [hotSwitching, setHotSwitching] = useState(false)
+  const [apiToken, setApiTokenValue] = useState(() => getApiToken())
+  const [apiTokenSaved, setApiTokenSaved] = useState(Boolean(getApiToken()))
   
   // 飞行模式状态
   const [airplaneMode, setAirplaneMode] = useState<AirplaneModeResponse | null>(null)
@@ -191,6 +194,14 @@ export default function ConfigurationPage() {
   const [smsPushLoading, setSmsPushLoading] = useState(false)
   const [smsPushTesting, setSmsPushTesting] = useState(false)
 
+  const [restartConfig, setRestartConfig] = useState<RestartConfig>({
+    schedule_enabled: false,
+    schedule_interval_days: 7,
+    low_memory_enabled: false,
+    low_memory_threshold_percent: 10,
+  })
+  const [restartConfigLoading, setRestartConfigLoading] = useState(false)
+
   const checkHealth = useCallback(async () => {
     setHealthLoading(true)
     try {
@@ -214,12 +225,13 @@ export default function ConfigurationPage() {
     setError(null)
     
     try {
-      const [dataRes, usbRes, airplaneModeRes, webhookRes, smsPushRes] = await Promise.all([
+      const [dataRes, usbRes, airplaneModeRes, webhookRes, smsPushRes, restartRes] = await Promise.all([
         api.getDataStatus(),
         api.getUsbMode(),
         api.getAirplaneMode(),
         api.getWebhookConfig(),
         api.getSmsPushConfig(),
+        api.getRestartConfig(),
       ])
       
       if (dataRes.data) setDataStatus(dataRes.data.active)
@@ -230,6 +242,7 @@ export default function ConfigurationPage() {
       if (airplaneModeRes.data) setAirplaneMode(airplaneModeRes.data)
       if (webhookRes.data) setWebhookConfig(webhookRes.data)
       if (smsPushRes.data) setSmsPushConfig(normalizeSmsPushConfig(smsPushRes.data))
+      if (restartRes.data) setRestartConfig(restartRes.data)
 
       // 加载健康检查
       await checkHealth()
@@ -483,6 +496,36 @@ export default function ConfigurationPage() {
     }
   }
 
+  const handleApiTokenSave = () => {
+    setApiToken(apiToken)
+    setApiTokenValue(getApiToken())
+    setApiTokenSaved(Boolean(getApiToken()))
+    setSuccess(apiToken.trim() ? '管理 API Token 已保存在当前浏览器' : '已清除管理 API Token')
+  }
+
+  const handleApiTokenClear = () => {
+    setApiToken('')
+    setApiTokenValue('')
+    setApiTokenSaved(false)
+    setSuccess('已清除管理 API Token')
+  }
+
+  const handleSaveRestartConfig = async () => {
+    setRestartConfigLoading(true)
+    setError(null)
+    try {
+      const response = await api.setRestartConfig(restartConfig)
+      if (response.data) {
+        setRestartConfig(response.data)
+        setSuccess('自动重启配置已保存')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRestartConfigLoading(false)
+    }
+  }
+
   const currentSmsPushProvider = getSmsPushProviderOption(smsPushConfig.provider)
   const smsPushCanTest = smsPushConfig.enabled
     && (!currentSmsPushProvider.credentialRequired || !!smsPushConfig.credential.trim())
@@ -607,6 +650,38 @@ export default function ConfigurationPage() {
 
       {/* 配置面板 */}
       <Box>
+        {/* 管理 API 认证 */}
+        <Accordion
+          expanded={expanded === 'apiAuth'}
+          onChange={handleAccordionChange('apiAuth')}
+        >
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Box display="flex" alignItems="center" gap={1} width="100%">
+              <HealthAndSafety color="primary" />
+              <Typography fontWeight={600}>管理 API 认证</Typography>
+              <Box flexGrow={1} />
+              <Chip label={apiTokenSaved ? 'Token 已保存' : '未配置'} color={apiTokenSaved ? 'success' : 'default'} size="small" />
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              当设备服务使用 UDX710_API_TOKEN 启动时，在此输入同一 Token。Token 只保存在当前浏览器，不会发送到设备保存。
+            </Typography>
+            <TextField
+              fullWidth
+              type="password"
+              label="管理 API Token"
+              value={apiToken}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setApiTokenValue(event.target.value)}
+              autoComplete="off"
+            />
+            <Box display="flex" gap={1} mt={2}>
+              <Button variant="contained" onClick={handleApiTokenSave}>保存 Token</Button>
+              <Button variant="outlined" color="error" onClick={handleApiTokenClear} disabled={!apiTokenSaved && !apiToken}>清除</Button>
+            </Box>
+          </AccordionDetails>
+        </Accordion>
+
         {/* 数据连接配置 */}
         <Accordion
           expanded={expanded === 'dataConnection'}
@@ -730,6 +805,87 @@ export default function ConfigurationPage() {
             <Alert severity="warning" sx={{ mt: 2 }}>
               注意：飞行模式通过设置 Modem 的 Online 属性来控制射频，与手机的飞行模式效果相同。
             </Alert>
+          </AccordionDetails>
+        </Accordion>
+
+        {/* 自动重启配置 */}
+        <Accordion
+          expanded={expanded === 'restartConfig'}
+          onChange={handleAccordionChange('restartConfig')}
+        >
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Box display="flex" alignItems="center" gap={1} width="100%">
+              <RestartAlt color={(restartConfig.schedule_enabled || restartConfig.low_memory_enabled) ? 'warning' : 'primary'} />
+              <Typography fontWeight={600}>自动重启</Typography>
+              <Box flexGrow={1} />
+              <Chip
+                label={(restartConfig.schedule_enabled || restartConfig.low_memory_enabled) ? '已启用' : '已关闭'}
+                color={(restartConfig.schedule_enabled || restartConfig.low_memory_enabled) ? 'warning' : 'default'}
+                size="small"
+                onClick={(event: MouseEvent) => event.stopPropagation()}
+              />
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              自动重启会中断当前网络、通话和 USB 连接。所有策略默认关闭；周期按设备连续运行天数计算，而非固定日历时间。
+            </Alert>
+
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={restartConfig.schedule_enabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, schedule_enabled: event.target.checked })}
+                  color="warning"
+                />
+              )}
+              label="按连续运行天数自动重启"
+            />
+            <TextField
+              fullWidth
+              type="number"
+              label="重启间隔（天）"
+              value={restartConfig.schedule_interval_days}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, schedule_interval_days: Number(event.target.value) })}
+              disabled={!restartConfig.schedule_enabled}
+              inputProps={{ min: 1, max: 365 }}
+              helperText="范围 1–365 天；达到间隔后，设备会在下一次检查时重启。"
+              sx={{ mt: 1, mb: 2 }}
+            />
+
+            <Divider sx={{ my: 2 }} />
+
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={restartConfig.low_memory_enabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, low_memory_enabled: event.target.checked })}
+                  color="warning"
+                />
+              )}
+              label="可用内存过低时自动重启"
+            />
+            <TextField
+              fullWidth
+              type="number"
+              label="可用内存阈值（%）"
+              value={restartConfig.low_memory_threshold_percent}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, low_memory_threshold_percent: Number(event.target.value) })}
+              disabled={!restartConfig.low_memory_enabled}
+              inputProps={{ min: 5, max: 50 }}
+              helperText="范围 5–50%。仅当 MemAvailable 连续 3 次低于此值才会重启；启动后前 10 分钟不触发，24 小时内最多自动重启一次。"
+              sx={{ mt: 1, mb: 2 }}
+            />
+
+            <Button
+              variant="contained"
+              color="warning"
+              onClick={() => void handleSaveRestartConfig()}
+              disabled={restartConfigLoading}
+              startIcon={restartConfigLoading ? <CircularProgress size={20} /> : <RestartAlt />}
+            >
+              {restartConfigLoading ? '保存中...' : '保存自动重启配置'}
+            </Button>
           </AccordionDetails>
         </Accordion>
 

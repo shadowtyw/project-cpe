@@ -77,14 +77,19 @@
 - **get_ota_status.bru** - 获取 OTA 更新状态（当前版本、待安装更新）
 - **post_ota_apply.bru** - 应用 OTA 更新（不重启）
 - **post_ota_apply_restart.bru** - 应用 OTA 更新并立即重启
+- **post_ota_rollback.bru** - 恢复设备自动保存的上一版本
+- **get_restart_config.bru** - 获取自动重启配置
+- **set_restart_config.bru** - 保存自动重启配置
 - **post_ota_cancel.bru** - 取消待安装的 OTA 更新
 
 **OTA 更新说明**：
-- 支持 `.tar.gz` 和 `.zip` 两种格式（推荐 tar.gz，能保留 Linux 文件权限）
-- 上传大小限制：50MB
-- OTA 包结构：`meta.json`（元数据） + `udx710`（二进制） + `www/`（前端）
-- 自动验证：二进制 MD5、架构匹配、版本号比较
-- ZIP 格式会自动修复文件权限（二进制 755，前端文件 644）
+- 官方 OTA 仅接受 `.tar.gz` 格式；请上传 GitHub Actions artifact 或 release 中的 `udx710-ota-<version>.tar.gz`
+- 上传大小限制：50MB；解压后还会限制文件数量、层级和总大小
+- OTA 包结构：`meta.json`（元数据） + `udx710`（aarch64 二进制） + `www/`（前端）
+- 自动验证：二进制/前端 MD5、实际 ELF 架构、版本关系以及可选 `min_version`
+- 新版本包可直接应用；同版本/低版本包在完整性校验通过后必须在应用请求中显式提供 `allow_downgrade: true`
+- 每次由支持回滚的版本成功安装后会保存上一版本，可通过 `/api/ota/rollback` 恢复；首次从旧版本升级到支持回滚的版本前，请自行保留旧 GitHub OTA 包
+- 更新采用临时安装目录与备份/恢复流程；验证或安装失败不会保留待安装包
 - 上传接口 `/api/ota/upload` 使用 `application/octet-stream`，直接发送 OTA 压缩包二进制内容
 
 ### 电话功能接口
@@ -142,7 +147,7 @@
    - 选择 `udx710-api` 文件夹
 
 3. **修改 IP 地址**
-   - 所有请求默认使用 `http://192.168.66.1:3000`
+   - 所有请求默认使用 `http://192.168.67.1`
    - 如需修改，可在 Bruno 中批量替换或使用环境变量
 
 4. **发送请求**
@@ -180,9 +185,11 @@
 | GET | `/api/band-lock` | 频段锁定状态 |
 | POST | `/api/band-lock` | 设置频段锁定 |
 | POST | `/api/system/reboot` | 系统重启 |
+| GET/POST | `/api/restart/config` | 自动重启配置 |
 | GET | `/api/ota/status` | 获取 OTA 更新状态 |
 | POST | `/api/ota/upload` | 上传 OTA 更新包（50MB 限制） |
-| POST | `/api/ota/apply` | 应用 OTA 更新 |
+| POST | `/api/ota/apply` | 应用 OTA 更新（同/低版本需 `allow_downgrade: true`） |
+| POST | `/api/ota/rollback` | 恢复设备自动保存的上一版本 |
 | POST | `/api/ota/cancel` | 取消待安装的更新 |
 | GET | `/api/calls` | 获取当前通话列表 |
 | POST | `/api/call/dial` | 拨打电话 |
@@ -330,7 +337,7 @@
 
 1. 创建环境（如 "Development", "Production"）
 2. 设置变量：
-   - `base_url`: `http://192.168.66.1:3000`
+   - `base_url`: `http://192.168.67.1`
 3. 在请求中使用：`{{base_url}}/api/health`
 
 ## 响应格式

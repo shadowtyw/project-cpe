@@ -10,7 +10,7 @@
  # Copyright (c) 2025 by 1orz, All Rights Reserved. 
 ### 
 # 
-# R106 项目环境自动配置脚本
+# UDX710 项目环境自动配置脚本
 # 适用于 macOS (Apple Silicon 或 Intel)
 #
 # 使用方法: ./setup-env.sh
@@ -19,7 +19,7 @@
 set -e
 
 echo "=========================================="
-echo "  R106 交叉编译环境配置脚本"
+echo "  UDX710 交叉编译环境配置脚本"
 echo "=========================================="
 echo ""
 
@@ -158,7 +158,7 @@ echo ""
 echo "📌 下一步："
 echo "   1. 重新打开终端或运行: source ~/.zshrc"
 echo "   2. 进入项目目录: cd $(pwd)"
-echo "   3. 构建项目: ./build-aarch64.sh"
+echo "   3. 构建项目: ./scripts/build.sh"
 echo ""
 echo "📖 详细文档请查看: README.md"
 echo ""

@@ -2,21 +2,11 @@
  * @Author: 1orz cloudorzi@gmail.com
  * @Date: 2025-11-22 10:30:41
  * @LastEditors: 1orz cloudorzi@gmail.com
- * @LastEditTime: 2025-12-13 12:43:28
- * @FilePath: /udx710-backend/frontend/src/components/Layout/TopBar.tsx
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
- */
-/*
- * @Author: 1orz cloudorzi@gmail.com
- * @Date: 2025-11-22 10:30:41
- * @LastEditors: 1orz cloudorzi@gmail.com
  * @LastEditTime: 2025-12-13 12:43:22
  * @FilePath: /udx710-backend/frontend/src/components/Layout/TopBar.tsx
- * @Description: 
- * 
- * Copyright (c) 2025 by 1orz, All Rights Reserved. 
+ * @Description:
+ *
+ * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
 import { useState } from 'react'
 import {
@@ -30,6 +20,14 @@ import {
   ListItemIcon,
   ListItemText,
   Divider,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  CircularProgress,
+  Alert,
 } from '@mui/material'
 import {
   Menu as MenuIcon,
@@ -38,7 +36,9 @@ import {
   Brightness4 as DarkModeIcon,
   Brightness7 as LightModeIcon,
   Speed as SpeedIcon,
+  RestartAlt as RestartAltIcon,
 } from '@mui/icons-material'
+import { api } from '../../api'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useRefreshInterval } from '../../contexts/RefreshContext'
 
@@ -59,6 +59,9 @@ export default function TopBar({
   const { triggerRefresh } = useRefreshInterval()
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
   const [refreshMenuAnchor, setRefreshMenuAnchor] = useState<null | HTMLElement>(null)
+  const [rebootDialogOpen, setRebootDialogOpen] = useState(false)
+  const [rebooting, setRebooting] = useState(false)
+  const [rebootError, setRebootError] = useState<string | null>(null)
 
   const handleMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setAnchorEl(event.currentTarget)
@@ -90,6 +93,19 @@ export default function TopBar({
     handleMenuClose()
   }
 
+  const handleReboot = async () => {
+    setRebooting(true)
+    setRebootError(null)
+    try {
+      await api.systemReboot(3)
+      setRebootDialogOpen(false)
+    } catch (error) {
+      setRebootError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRebooting(false)
+    }
+  }
+
   const getRefreshLabel = () => {
     if (refreshInterval === 0) return '手动'
     if (refreshInterval === 1000) return '1秒'
@@ -108,7 +124,6 @@ export default function TopBar({
       }}
     >
       <Toolbar sx={{ minHeight: { xs: 56, sm: 64 } }}>
-        {/* 菜单折叠按钮 - 所有屏幕尺寸都可见 */}
         <IconButton
           color="inherit"
           aria-label="切换侧边栏"
@@ -119,7 +134,6 @@ export default function TopBar({
           <MenuIcon />
         </IconButton>
 
-        {/* 标题 */}
         <Typography
           variant="h6"
           noWrap
@@ -132,9 +146,27 @@ export default function TopBar({
           控制面板
         </Typography>
 
-        {/* 右侧按钮组 */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 0.5, sm: 1 } }}>
-          {/* 刷新按钮 - 始终显示 */}
+          <Button
+            color="inherit"
+            size="small"
+            startIcon={<RestartAltIcon />}
+            onClick={() => setRebootDialogOpen(true)}
+            disabled={rebooting}
+            sx={{ display: { xs: 'none', sm: 'inline-flex' } }}
+          >
+            重启设备
+          </Button>
+          <IconButton
+            color="inherit"
+            aria-label="重启设备"
+            onClick={() => setRebootDialogOpen(true)}
+            disabled={rebooting}
+            title="重启设备"
+            sx={{ display: { xs: 'inline-flex', sm: 'none' } }}
+          >
+            <RestartAltIcon />
+          </IconButton>
           <IconButton
             color="inherit"
             onClick={handleRefresh}
@@ -143,8 +175,6 @@ export default function TopBar({
           >
             <RefreshIcon />
           </IconButton>
-
-          {/* 更多选项按钮 - 折叠其他功能 */}
           <IconButton
             color="inherit"
             onClick={handleMenuOpen}
@@ -155,100 +185,59 @@ export default function TopBar({
           </IconButton>
         </Box>
 
-        {/* 更多选项菜单 */}
         <Menu
           anchorEl={anchorEl}
           open={Boolean(anchorEl)}
           onClose={handleMenuClose}
-          anchorOrigin={{
-            vertical: 'bottom',
-            horizontal: 'right',
-          }}
-          transformOrigin={{
-            vertical: 'top',
-            horizontal: 'right',
-          }}
-          PaperProps={{
-            sx: {
-              minWidth: 200,
-              mt: 1,
-            },
-          }}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          PaperProps={{ sx: { minWidth: 200, mt: 1 } }}
         >
-          {/* 主题切换 */}
           <MenuItem onClick={handleThemeToggle}>
             <ListItemIcon>
               {mode === 'dark' ? <LightModeIcon fontSize="small" /> : <DarkModeIcon fontSize="small" />}
             </ListItemIcon>
             <ListItemText>{mode === 'dark' ? '浅色模式' : '深色模式'}</ListItemText>
           </MenuItem>
-
           <Divider />
-
-          {/* 刷新频率 */}
           <MenuItem onClick={handleRefreshMenuOpen}>
-            <ListItemIcon>
-              <SpeedIcon fontSize="small" />
-            </ListItemIcon>
-            <ListItemText
-              primary="刷新频率"
-              secondary={getRefreshLabel()}
-              secondaryTypographyProps={{ variant: 'caption' }}
-            />
+            <ListItemIcon><SpeedIcon fontSize="small" /></ListItemIcon>
+            <ListItemText primary="刷新频率" secondary={getRefreshLabel()} secondaryTypographyProps={{ variant: 'caption' }} />
           </MenuItem>
         </Menu>
 
-        {/* 刷新频率子菜单 */}
         <Menu
           anchorEl={refreshMenuAnchor}
           open={Boolean(refreshMenuAnchor)}
           onClose={handleRefreshMenuClose}
-          anchorOrigin={{
-            vertical: 'top',
-            horizontal: 'left',
-          }}
-          transformOrigin={{
-            vertical: 'top',
-            horizontal: 'right',
-          }}
-          PaperProps={{
-            sx: {
-              minWidth: 150,
-            },
-          }}
+          anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          PaperProps={{ sx: { minWidth: 150 } }}
         >
-          <MenuItem
-            selected={refreshInterval === 1000}
-            onClick={() => handleRefreshIntervalChange(1000)}
-          >
-            1秒/次
-          </MenuItem>
-          <MenuItem
-            selected={refreshInterval === 3000}
-            onClick={() => handleRefreshIntervalChange(3000)}
-          >
-            3秒/次
-          </MenuItem>
-          <MenuItem
-            selected={refreshInterval === 5000}
-            onClick={() => handleRefreshIntervalChange(5000)}
-          >
-            5秒/次
-          </MenuItem>
-          <MenuItem
-            selected={refreshInterval === 10000}
-            onClick={() => handleRefreshIntervalChange(10000)}
-          >
-            10秒/次
-          </MenuItem>
+          {[1000, 3000, 5000, 10000].map((interval) => (
+            <MenuItem key={interval} selected={refreshInterval === interval} onClick={() => handleRefreshIntervalChange(interval)}>
+              {interval / 1000}秒/次
+            </MenuItem>
+          ))}
           <Divider />
-          <MenuItem
-            selected={refreshInterval === 0}
-            onClick={() => handleRefreshIntervalChange(0)}
-          >
-            手动刷新
-          </MenuItem>
+          <MenuItem selected={refreshInterval === 0} onClick={() => handleRefreshIntervalChange(0)}>手动刷新</MenuItem>
         </Menu>
+
+        <Dialog open={rebootDialogOpen} onClose={() => !rebooting && setRebootDialogOpen(false)}>
+          <DialogTitle>确认重启设备</DialogTitle>
+          <DialogContent>
+            {rebootError && <Alert severity="error" sx={{ mb: 2 }}>{rebootError}</Alert>}
+            <DialogContentText>
+              设备将在约 3 秒后重启。当前蜂窝数据、USB 网络、通话和后台管理连接都会暂时中断。
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setRebootDialogOpen(false)} disabled={rebooting}>取消</Button>
+            <Button onClick={() => void handleReboot()} variant="contained" color="warning" startIcon={rebooting ? <CircularProgress size={18} /> : <RestartAltIcon />} disabled={rebooting}>
+              {rebooting ? '正在安排…' : '确认重启'}
+            </Button>
+          </DialogActions>
+        </Dialog>
       </Toolbar>
     </AppBar>
   )

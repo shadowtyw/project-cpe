@@ -5,14 +5,15 @@ meta {
 }
 
 post {
-  url: http://192.168.66.1:3000/api/ota/apply
+  url: http://192.168.67.1/api/ota/apply
   body: json
   auth: inherit
 }
 
 body:json {
   {
-    "restart_now": true
+    "restart_now": true,
+    "allow_downgrade": false
   }
 }
 
@@ -25,6 +26,7 @@ docs {
   
   参数：
   - restart_now: true（立即重启）
+  - allow_downgrade: false（同版本或低版本恢复包需要明确设为 true）
   
   警告：
   - 执行此操作后，服务会在 1 秒后自动重启
