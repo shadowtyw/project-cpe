@@ -70,6 +70,14 @@ pub fn info(module: &str, message: impl Into<String>) {
     push("info", module, message.into());
 }
 
+/// 供 tracing 转发 Layer 调用：按等级字符串写入缓冲。
+///
+/// 常规运行日志走 `tracing`（`info!`/`warn!` 等），由 main.rs 注册的 Layer 转发到此处，
+/// 这样“系统日志”页面才能看到与进程实际输出一致的运行日志。
+pub fn record(level: &str, module: &str, message: String) {
+    push(level, module, message);
+}
+
 /// 记录一条 warn 日志
 pub fn warn(module: &str, message: impl Into<String>) {
     push("warn", module, message.into());
@@ -116,6 +124,71 @@ pub fn clear() {
         Err(poisoned) => poisoned.into_inner(),
     };
     buffer.clear();
+}
+
+/// tracing Layer：把进程的 tracing 日志转发到内存环形缓冲，供“系统日志”页面查看。
+///
+/// 使用 `with_target(false)` 后 `target` 为空；这里从事件元数据的 `target` 提取模块名，
+/// 并格式化 message 字段作为日志正文。等级字符串取自 `Level`（小写，与页面约定一致）。
+pub struct LogBufferLayer;
+
+impl<S> tracing_subscriber::Layer<S> for LogBufferLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let metadata = event.metadata();
+        let level = metadata.level().as_str().to_lowercase();
+
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+
+        // 模块名取 target 的最后一段（如 "udx710::dbus" -> "dbus"），既保证页面可读，
+        // 又兼容 RUST_LOG 开启后 target 为空的场景。
+        let module = metadata
+            .target()
+            .rsplit("::")
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("app")
+            .to_string();
+
+        push(&level, &module, visitor.message);
+    }
+}
+
+/// 简单字段访问器：采集 `message` 字段，缺省时回退到 `log.message` 或按 Debug 覆盖剩余字段。
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" || field.name() == "log.message" {
+            self.message = format!("{:?}", value);
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" || field.name() == "log.message" {
+            self.message = value.to_string();
+        }
+    }
+
+    fn record_error(
+        &mut self,
+        field: &tracing::field::Field,
+        value: &(dyn std::error::Error + 'static),
+    ) {
+        if field.name() == "message" || field.name() == "log.message" {
+            self.message = value.to_string();
+        }
+    }
 }
 
 /// 记录一条日志的便捷宏。

@@ -214,7 +214,6 @@ pub async fn start_sms_listener(
     db: Arc<Database>,
     webhook: Arc<WebhookSender>,
     sms_push: Arc<SmsPushSender>,
-    config_manager: Arc<crate::config::ConfigManager>,
 ) -> zbus::Result<()> {
     // Subscribe to D-Bus signals via proxy
     let dbus_proxy = Proxy::new(&conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").await?;
@@ -268,19 +267,7 @@ pub async fn start_sms_listener(
                             let webhook_clone = Arc::clone(&webhook);
                             let sms_push_clone = Arc::clone(&sms_push);
 
-                            // 短信远程控制：先尝试执行，再并行转发 webhook / 推送
-                            let remote_conn = conn.clone();
-                            let remote_config = Arc::clone(&config_manager);
-                            let remote_sms = sms.clone();
-                            tokio::spawn(async move {
-                                crate::remote_control::handle_incoming(
-                                    &remote_conn,
-                                    &remote_config,
-                                    &remote_sms,
-                                )
-                                .await;
-                            });
-
+                            // 并行转发 webhook / 推送（短信遥控已移除，短信仅做转发与入库）
                             tokio::spawn(async move {
                                 let _ = webhook_clone.forward_sms(&sms).await;
                                 let _ = sms_push_clone.forward_sms(&sms).await;
@@ -315,7 +302,12 @@ lazy_static::lazy_static! {
 }
 
 /// Start call status listener with call history recording and webhook support
-pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: Arc<WebhookSender>) -> zbus::Result<()> {
+pub async fn start_call_listener(
+    conn: Connection,
+    db: Arc<Database>,
+    webhook: Arc<WebhookSender>,
+    config_manager: Arc<crate::config::ConfigManager>,
+) -> zbus::Result<()> {
     // Subscribe to D-Bus signals via proxy
     let dbus_proxy = Proxy::new(&conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").await?;
     
@@ -375,7 +367,7 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
                         let answered = state == "active";
                         if let Ok(db_id) = db.insert_call(direction, &phone_number, answered) {
                             let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
-                            active_calls.insert(path_str, ActiveCall {
+                            active_calls.insert(path_str.clone(), ActiveCall {
                                 db_id,
                                 phone_number,
                                 direction: direction.to_string(),
@@ -383,13 +375,28 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
                                 answered,
                             });
                         }
+
+                        // 通话遥控：来电命中白名单时自动接听并开始计时。
+                        if direction == "incoming" {
+                            let config = config_manager.get_call_control();
+                            let _ = crate::call_control::on_incoming_call(
+                                &conn,
+                                &config,
+                                &path_str,
+                                &phone_number,
+                            )
+                            .await;
+                        }
                     }
                 }
                 "CallRemoved" => {
                     // Parse CallRemoved signal: object_path
                     if let Ok(path) = msg.body().deserialize::<zbus::zvariant::ObjectPath>() {
                         let path_str = path.to_string();
-                        
+
+                        // 通话遥控：清理该通话的计时器。
+                        crate::call_control::on_call_removed(&path_str);
+
                         let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
                         if let Some(call) = active_calls.remove(&path_str) {
                             // Calculate duration

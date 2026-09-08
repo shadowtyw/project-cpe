@@ -282,24 +282,41 @@ fn default_schedule_tolerance_min() -> u8 {
     1
 }
 
-/// 短信远程控制配置。默认关闭；启用后以口令前缀识别控制短信。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RemoteControlConfig {
+/// 通话远程控制配置。默认关闭；启用后，指定号码来电自动接听，接通后
+/// 保持通话达到 `hold_seconds` 秒即执行配置的动作（默认重启）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallControlConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// 命令前缀（如 "/cmd"），短信内容以该前缀开头才被识别
+    /// 白名单号码。来电号码经规范化（去空格/连字符）后，只要以任一白名单号码结尾即匹配，
+    /// 从而兼容来电显示带 "+86" 或国家码前缀的情况。
     #[serde(default)]
-    pub command_prefix: String,
-    /// 口令（可选）；非空时命令必须携带相同口令
-    #[serde(default)]
-    pub passcode: String,
-    /// 是否执行后回复一条确认短信
-    #[serde(default = "default_remote_reply")]
-    pub reply: bool,
+    pub numbers: Vec<String>,
+    /// 接通后需要保持通话的秒数，达到后执行动作。
+    #[serde(default = "default_call_hold_seconds")]
+    pub hold_seconds: u64,
+    /// 达到保持时长后执行的动作。
+    #[serde(default = "default_call_action")]
+    pub action: ScheduleAction,
 }
 
-fn default_remote_reply() -> bool {
-    true
+fn default_call_hold_seconds() -> u64 {
+    15
+}
+
+fn default_call_action() -> ScheduleAction {
+    ScheduleAction::Reboot
+}
+
+impl Default for CallControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            numbers: Vec::new(),
+            hold_seconds: default_call_hold_seconds(),
+            action: default_call_action(),
+        }
+    }
 }
 
 /// 流量用量预警配置。默认关闭。
@@ -340,13 +357,17 @@ fn valid_schedule_time(time: &str) -> bool {
     hour <= 23 && minute <= 59
 }
 
-impl RemoteControlConfig {
+impl CallControlConfig {
     pub fn sanitize(mut self) -> Self {
-        // 命令前缀必须非空；为空时回退到默认 "/cmd"
-        if self.command_prefix.trim().is_empty() {
-            self.command_prefix = "/cmd".to_string();
-        }
-        self.command_prefix = self.command_prefix.trim().to_string();
+        self.hold_seconds = self.hold_seconds.clamp(5, 3600);
+        // 号码去空白、去连字符，过滤空项并去重。
+        let mut seen = std::collections::HashSet::new();
+        self.numbers = self
+            .numbers
+            .into_iter()
+            .map(|number| normalize_phone_number(&number))
+            .filter(|number| !number.is_empty() && seen.insert(number.clone()))
+            .collect();
         self
     }
 }
@@ -355,6 +376,14 @@ impl TrafficAlertConfig {
     pub fn sanitize(self) -> Self {
         Self { ..self }
     }
+}
+
+/// 规范化电话号码：去掉空白与连字符，统一用于来电号码匹配。
+pub fn normalize_phone_number(number: &str) -> String {
+    number
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '(' && *c != ')')
+        .collect()
 }
 
 /// 应用配置
@@ -371,7 +400,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub schedule: ScheduleConfig,
     #[serde(default)]
-    pub remote_control: RemoteControlConfig,
+    pub call_control: CallControlConfig,
     #[serde(default)]
     pub traffic_alert: TrafficAlertConfig,
 }
@@ -511,14 +540,14 @@ impl ConfigManager {
         self.save()
     }
 
-    pub fn get_remote_control(&self) -> RemoteControlConfig {
-        self.config.read().unwrap_or_else(|p| p.into_inner()).remote_control.clone()
+    pub fn get_call_control(&self) -> CallControlConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).call_control.clone()
     }
 
-    pub fn set_remote_control(&self, remote_control: RemoteControlConfig) -> Result<(), String> {
+    pub fn set_call_control(&self, call_control: CallControlConfig) -> Result<(), String> {
         {
             let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
-            config.remote_control = remote_control.sanitize();
+            config.call_control = call_control.sanitize();
         }
         self.save()
     }

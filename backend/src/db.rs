@@ -490,6 +490,9 @@ impl Database {
     }
 
     /// 读取今日累计 (rx_bytes, tx_bytes)
+    ///
+    /// 当日尚无采样记录时返回 (0, 0)，而不是报错，避免流量统计页在设备刚启动
+    /// 或当天还没有产生任何流量时出现 "Query returned no rows"。
     pub fn get_todays_traffic(&self) -> Result<(u64, u64)> {
         let conn = self.lock_conn();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -497,21 +500,32 @@ impl Database {
             "SELECT rx_bytes, tx_bytes FROM traffic_daily WHERE date = ?1",
             params![today],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        Ok((row.0.max(0) as u64, row.1.max(0) as u64))
+        );
+
+        match row {
+            Ok((rx, tx)) => Ok((rx.max(0) as u64, tx.max(0) as u64)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, 0)),
+            Err(e) => Err(e),
+        }
     }
 
     /// 读取本月累计 (rx_bytes, tx_bytes)
     pub fn get_months_traffic(&self) -> Result<(u64, u64)> {
         let conn = self.lock_conn();
         let month_prefix = chrono::Local::now().format("%Y-%m").to_string();
+        // SUM 聚合在没有匹配行时返回一行 NULL，COALESCE 后为 0，不会触发 no rows。
         let row = conn.query_row(
             "SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
              FROM traffic_daily WHERE date LIKE ?1",
             params![format!("{}%", month_prefix)],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        Ok((row.0.max(0) as u64, row.1.max(0) as u64))
+        );
+
+        match row {
+            Ok((rx, tx)) => Ok((rx.max(0) as u64, tx.max(0) as u64)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, 0)),
+            Err(e) => Err(e),
+        }
     }
 
     /// 读取最近的流量历史（最近 N 天，按日期升序）

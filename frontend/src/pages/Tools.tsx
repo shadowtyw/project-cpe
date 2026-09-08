@@ -30,7 +30,6 @@ import {
   Upload,
   Schedule as ScheduleIcon,
   DataUsage,
-  Sms,
   Storage,
 } from '@mui/icons-material'
 import { api } from '../api'
@@ -41,8 +40,6 @@ import type {
   ScheduleConfig,
   ScheduleEntry,
   ScheduleAction,
-  RemoteControlConfig,
-  RemoteControlTrigger,
   DiagnosticReport,
 } from '../api/types'
 
@@ -276,96 +273,6 @@ function SchedulePanel() {
   )
 }
 
-// ============ 短信遥控 ============
-
-function RemoteControlPanel() {
-  const { refreshInterval, refreshKey } = useRefreshInterval()
-  const [config, setConfig] = useState<RemoteControlConfig | null>(null)
-  const [trigger, setTrigger] = useState<RemoteControlTrigger | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
-
-  const load = useCallback(async () => {
-    try {
-      const [configRes, statusRes] = await Promise.all([
-        api.getRemoteControlConfig(),
-        api.getRemoteControlStatus(),
-      ])
-      if (configRes.data) setConfig(configRes.data)
-      if (statusRes.data) setTrigger(statusRes.data)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [])
-
-  useAdaptivePolling({
-    refreshInterval: refreshInterval > 0 ? Math.max(refreshInterval, 15_000) : 0,
-    refreshKey,
-    onTick: load,
-    immediate: true,
-    hiddenMinInterval: 60_000,
-  })
-
-  const save = async () => {
-    if (!config) return
-    setSaving(true)
-    try {
-      await api.setRemoteControlConfig(config)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Box>
-      <Typography variant="body2" color="text.secondary" mb={2}>
-        收到以指定前缀开头（且口令正确）的短信时执行对应管理指令，适合无网环境远程管理。
-      </Typography>
-      {config && (
-        <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-          <FormControlLabel
-            control={<Switch checked={config.enabled} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} />}
-            label="启用短信遥控"
-          />
-          <Box display="flex" gap={1.5} mt={1.5} flexWrap="wrap">
-            <TextField
-              label="命令前缀"
-              size="small"
-              value={config.command_prefix}
-              onChange={(e) => setConfig({ ...config, command_prefix: e.target.value })}
-            />
-            <FormControlLabel
-              control={<Switch checked={config.reply} onChange={(e) => setConfig({ ...config, reply: e.target.checked })} />}
-              label="执行后回复确认短信"
-            />
-          </Box>
-          <Box mt={1.5}>
-            <Button variant="contained" size="small" onClick={() => void save()} disabled={saving}>
-              {saving ? <CircularProgress size={18} /> : '保存'}
-            </Button>
-          </Box>
-        </Paper>
-      )}
-
-      <Typography variant="caption" color="text.secondary">
-        支持命令：reboot / airplane / airplane-off / data-on / data-off / status。口令需在配置文件中设置。
-      </Typography>
-      {trigger?.triggered_at && (
-        <Box display="flex" gap={1} mt={2} flexWrap="wrap">
-          <Chip label={`上次触发：${trigger.command}`} color="primary" size="small" />
-          <Chip label={new Date(trigger.triggered_at).toLocaleString()} size="small" variant="outlined" />
-          {trigger.from_number && <Chip label={`来源 ${trigger.from_number}`} size="small" variant="outlined" />}
-        </Box>
-      )}
-      {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
-    </Box>
-  )
-}
-
 // ============ 诊断与备份 ============
 
 function DiagnosticsPanel() {
@@ -495,15 +402,13 @@ export default function Tools() {
       <Tabs value={tab} onChange={(_, value: number) => setTab(value)} sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}>
         <Tab icon={<DataUsage />} iconPosition="start" label="流量统计" />
         <Tab icon={<ScheduleIcon />} iconPosition="start" label="定时计划" />
-        <Tab icon={<Sms />} iconPosition="start" label="短信遥控" />
         <Tab icon={<Storage />} iconPosition="start" label="诊断与备份" />
       </Tabs>
 
       <Box mt={2}>
         {tab === 0 && <TrafficPanel />}
         {tab === 1 && <SchedulePanel />}
-        {tab === 2 && <RemoteControlPanel />}
-        {tab === 3 && <DiagnosticsPanel />}
+        {tab === 2 && <DiagnosticsPanel />}
       </Box>
     </Box>
   )

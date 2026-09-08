@@ -865,17 +865,3 @@ export interface ScheduleConfig {
   tolerance_min: number
 }
 
-// ========== 短信远程控制类型 ==========
-
-export interface RemoteControlConfig {
-  enabled: boolean
-  command_prefix: string
-  reply: boolean
-}
-
-export interface RemoteControlTrigger {
-  triggered_at?: string
-  command?: string
-  from_number?: string
-}
-

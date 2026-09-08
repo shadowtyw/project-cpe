@@ -47,11 +47,11 @@ export default function Logs() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [minLevel, setMinLevel] = useState<number>(2)
+  const [minLevel, setMinLevel] = useState<number>(1)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const load = useCallback(async (level: number) => {
-    setRefreshing(true)
+  const load = useCallback(async (level: number, showSpinner = false) => {
+    if (showSpinner) setRefreshing(true)
     try {
       const response = await api.getLogs(level, 500)
       if (response.data) {
@@ -62,13 +62,17 @@ export default function Logs() {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
-      setRefreshing(false)
+      if (showSpinner) setRefreshing(false)
     }
   }, [])
 
   const handleLevelChange = (value: number) => {
     setMinLevel(value)
-    void load(value)
+    void load(value, true)
+  }
+
+  const handleManualRefresh = () => {
+    void load(minLevel, true)
   }
 
   const handleClear = async () => {
@@ -124,7 +128,7 @@ export default function Logs() {
           <Button
             variant="outlined"
             startIcon={refreshing ? <CircularProgress size={18} /> : <Refresh />}
-            onClick={() => void load(minLevel)}
+            onClick={handleManualRefresh}
             disabled={refreshing}
           >
             刷新

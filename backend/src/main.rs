@@ -37,6 +37,7 @@ use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use zbus::Connection;
 
+mod call_control;
 mod config;
 mod db;
 mod dbus;
@@ -46,7 +47,6 @@ mod log_buffer;
 mod models;
 mod ota;
 mod process_monitor;
-mod remote_control;
 mod restart;
 mod schedule;
 mod serial;
@@ -193,17 +193,24 @@ struct Args {
 async fn main() -> Result<()> {
     // 初始化 tracing 日志框架
     // 通过 RUST_LOG 环境变量控制日志级别，默认为 info
+    // fmt layer 输出到终端（进程 stdout），LogBufferLayer 转发到内存环形缓冲，
+    // 使“系统日志”页面能看到与进程真实输出一致的运行日志。
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(log_buffer::LogBufferLayer)
         .init();
 
     // 解析命令行参数
     let args = Args::parse();
     let bind_addr = format!("{}:{}", args.host, args.port);
 
+    // 启动日志写入内存缓冲，确保"系统日志"页面在进程启动后立即有内容可看
+    log_entry!(info, "app", "CPE backend v{} starting (commit {})", env!("APP_VERSION"), env!("GIT_COMMIT"));
+
     // Connect to system D-Bus
     let dbus_conn = Arc::new(Connection::system().await?);
+    log_entry!(info, "app", "D-Bus system connection established");
     
     // 创建 SMS 数据库（存储在可执行文件同级目录）
     let db_path = get_persistent_root_dir().join("data.db");
@@ -225,6 +232,7 @@ async fn main() -> Result<()> {
         }
     }
     let app_db = Arc::new(Database::new(db_path)?);
+    log_entry!(info, "app", "Database initialized at {:?}", db_path);
     
     // 初始化配置管理器
     let config_path = get_default_config_path();
@@ -254,7 +262,6 @@ async fn main() -> Result<()> {
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
         let sms_push_clone = Arc::clone(&sms_push_sender);
-        let config_manager_clone = Arc::clone(&config_manager);
         tokio::spawn(async move {
             loop {
                 match Connection::system().await {
@@ -264,7 +271,6 @@ async fn main() -> Result<()> {
                             Arc::clone(&db_clone),
                             Arc::clone(&webhook_clone),
                             Arc::clone(&sms_push_clone),
-                            Arc::clone(&config_manager_clone),
                         )
                         .await
                         {
@@ -277,11 +283,12 @@ async fn main() -> Result<()> {
             }
         });
     }
-    
+
     // 启动电话监听线程（包括通话记录存储）
     {
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
+        let config_manager_clone = Arc::clone(&config_manager);
         tokio::spawn(async move {
             loop {
                 match Connection::system().await {
@@ -290,6 +297,7 @@ async fn main() -> Result<()> {
                             conn,
                             Arc::clone(&db_clone),
                             Arc::clone(&webhook_clone),
+                            Arc::clone(&config_manager_clone),
                         )
                         .await
                         {
@@ -299,6 +307,21 @@ async fn main() -> Result<()> {
                     Err(error) => warn!(error = %error, "Failed to connect call listener to system D-Bus"),
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    // 通话遥控轮询：周期检查白名单来电接通计时是否到期，到期执行动作。
+    {
+        let conn_clone = Arc::clone(&dbus_conn);
+        let config_manager_clone = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                let config = config_manager_clone.get_call_control();
+                if config.enabled {
+                    crate::call_control::poll(&conn_clone, &config).await;
+                }
             }
         });
     }
@@ -323,6 +346,7 @@ async fn main() -> Result<()> {
             // 初始延迟 5 秒，等待系统稳定
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             tracing::info!("Watchdog started");
+            log_entry!(info, "app", "Data connection watchdog started");
             dbus::data_connection_watchdog(conn_clone, config_manager, frontend_runtime).await;
         });
     }
@@ -489,9 +513,9 @@ async fn main() -> Result<()> {
         .route("/api/traffic/alert", post(set_traffic_alert_handler).options(options_handler))
         // ========== 定时计划接口 ==========
         .route("/api/schedule/config", get(get_schedule_config_handler).post(set_schedule_config_handler).options(options_handler))
-        // ========== 短信远程控制接口 ==========
-        .route("/api/sms/remote-control/config", get(get_remote_control_config_handler).post(set_remote_control_config_handler).options(options_handler))
-        .route("/api/sms/remote-control/status", get(get_remote_control_status_handler).options(options_handler))
+        // ========== 通话遥控接口 ==========
+        .route("/api/call-control/config", get(get_call_control_config_handler).post(set_call_control_config_handler).options(options_handler))
+        .route("/api/call-control/status", get(get_call_control_status_handler).options(options_handler))
         // ========== 统一状态和中间件 ==========
         .with_state(app_state)
         .layer(middleware::from_fn(move |request, next| api_auth(api_token.clone(), request, next)))
@@ -509,7 +533,7 @@ async fn main() -> Result<()> {
 
     // 绑定端口，如果被占用则轮询等待（最多 30 秒）
     let listener = bind_with_retry(&bind_addr, 30).await?;
-    info!(addr = %bind_addr, "Server listening");
+    log_entry!(info, "app", "Server listening on {}", bind_addr);
     // 使用优雅关闭
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

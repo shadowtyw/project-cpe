@@ -1369,23 +1369,24 @@ pub struct ScheduleConfigResponse {
     pub tolerance_min: u8,
 }
 
-/// 短信远程控制配置响应（镜像 config::RemoteControlConfig）
+/// 通话遥控配置响应（镜像 config::CallControlConfig）
 #[derive(Debug, Serialize, Default)]
-pub struct RemoteControlConfigResponse {
+pub struct CallControlConfigResponse {
     pub enabled: bool,
-    pub command_prefix: String,
-    pub reply: bool,
+    pub numbers: Vec<String>,
+    pub hold_seconds: u64,
+    pub action: crate::config::ScheduleAction,
 }
 
-// ============ 短信远程控制模型 ============
+// ============ 通话遥控模型 ============
 
-/// 上次触发的远程指令记录
+/// 上次触发的通话遥控记录
 #[derive(Debug, Serialize, Default)]
-pub struct RemoteControlTrigger {
+pub struct CallControlTrigger {
     /// 最后一次触发时间
     pub triggered_at: Option<String>,
-    /// 最后一次触发的命令
-    pub command: Option<String>,
+    /// 最后触发的动作
+    pub action: Option<String>,
     /// 来源号码
     pub from_number: Option<String>,
 }

@@ -81,8 +81,6 @@ import type {
   TrafficStatsResponse,
   TrafficAlertRequest,
   ScheduleConfig,
-  RemoteControlConfig,
-  RemoteControlTrigger,
 } from './types'
 
 // API 基础配置
@@ -768,23 +766,6 @@ class UDX710API {
       method: 'POST',
       body: JSON.stringify(config),
     })
-  }
-
-  // ========== 短信远程控制 ==========
-
-  async getRemoteControlConfig() {
-    return request<ApiResponse<RemoteControlConfig>>('/sms/remote-control/config')
-  }
-
-  async setRemoteControlConfig(config: RemoteControlConfig) {
-    return request<ApiResponse<RemoteControlConfig>>('/sms/remote-control/config', {
-      method: 'POST',
-      body: JSON.stringify(config),
-    })
-  }
-
-  async getRemoteControlStatus() {
-    return request<ApiResponse<RemoteControlTrigger>>('/sms/remote-control/status')
   }
 
 }

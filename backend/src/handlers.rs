@@ -24,7 +24,7 @@ use zbus::Connection;
 
 use crate::{
     config::{
-        ConfigManager, RefreshConfig, RemoteControlConfig, RestartConfig, ScheduleConfig,
+        CallControlConfig, ConfigManager, RefreshConfig, RestartConfig, ScheduleConfig,
         TrafficAlertConfig,
     },
     dbus::{
@@ -938,10 +938,10 @@ pub async fn get_system_stats() -> impl IntoResponse {
         let start = Instant::now();
         let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
 
-        // 补足剩余时间到 1 秒
+        // 补足到 200ms 的最小采样间隔，保证网速计算有足够的时间窗口
         let elapsed_so_far = start.elapsed();
-        if elapsed_so_far < Duration::from_secs(1) {
-            sleep(Duration::from_secs(1) - elapsed_so_far).await;
+        if elapsed_so_far < Duration::from_millis(200) {
+            sleep(Duration::from_millis(200) - elapsed_so_far).await;
         }
         let elapsed = start.elapsed().as_secs_f64();
         let (
@@ -3234,8 +3234,8 @@ pub async fn get_diagnostic_report(
             let start = Instant::now();
             let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
             let elapsed_so_far = start.elapsed();
-            if elapsed_so_far < Duration::from_secs(1) {
-                sleep(Duration::from_secs(1) - elapsed_so_far).await;
+            if elapsed_so_far < Duration::from_millis(200) {
+                sleep(Duration::from_millis(200) - elapsed_so_far).await;
             }
             let elapsed = start.elapsed().as_secs_f64();
 
@@ -3368,7 +3368,7 @@ pub async fn import_config_handler(
         refresh: parsed.refresh.sanitize(),
         restart: parsed.restart.sanitize(),
         schedule: parsed.schedule.sanitize(),
-        remote_control: parsed.remote_control.sanitize(),
+        call_control: parsed.call_control.sanitize(),
         traffic_alert: parsed.traffic_alert.sanitize(),
         ..parsed
     }) {
@@ -3438,60 +3438,60 @@ pub async fn set_schedule_config_handler(
     }
 }
 
-// ============ 短信远程控制 API ============
+// ============ 通话遥控 API ============
 
-/// GET /api/sms/remote-control/config - 读取远程控制配置
-pub async fn get_remote_control_config_handler(
+/// GET /api/call-control/config - 读取通话遥控配置
+pub async fn get_call_control_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
-) -> (StatusCode, Json<ApiResponse<RemoteControlConfigResponse>>) {
-    let config = config_manager.get_remote_control();
+) -> (StatusCode, Json<ApiResponse<CallControlConfigResponse>>) {
+    let config = config_manager.get_call_control();
+    let response = CallControlConfigResponse {
+        enabled: config.enabled,
+        numbers: config.numbers.clone(),
+        hold_seconds: config.hold_seconds,
+        action: config.action,
+    };
     (
         StatusCode::OK,
-        Json(ApiResponse::success_with_message(
-            "Success",
-            RemoteControlConfigResponse {
-                enabled: config.enabled,
-                command_prefix: config.command_prefix,
-                reply: config.reply,
-            },
-        )),
+        Json(ApiResponse::success_with_message("Success", response)),
     )
 }
 
-/// POST /api/sms/remote-control/config - 保存远程控制配置
-pub async fn set_remote_control_config_handler(
+/// POST /api/call-control/config - 保存通话遥控配置
+pub async fn set_call_control_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
-    Json(config): Json<RemoteControlConfig>,
-) -> (StatusCode, Json<ApiResponse<RemoteControlConfigResponse>>) {
+    Json(config): Json<CallControlConfig>,
+) -> (StatusCode, Json<ApiResponse<CallControlConfigResponse>>) {
     let config = config.sanitize();
-    match config_manager.set_remote_control(config.clone()) {
+    match config_manager.set_call_control(config.clone()) {
         Ok(()) => (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
-                "Remote control configuration updated",
-                RemoteControlConfigResponse {
+                "Call control configuration updated",
+                CallControlConfigResponse {
                     enabled: config.enabled,
-                    command_prefix: config.command_prefix,
-                    reply: config.reply,
+                    numbers: config.numbers.clone(),
+                    hold_seconds: config.hold_seconds,
+                    action: config.action,
                 },
             )),
         ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::error(format!(
-                "Failed to update remote control configuration: {}",
+                "Failed to update call control configuration: {}",
                 error
             ))),
         ),
     }
 }
 
-/// GET /api/sms/remote-control/status - 读取上次触发的远程指令
-pub async fn get_remote_control_status_handler() -> (
+/// GET /api/call-control/status - 读取上次触发的通话遥控记录
+pub async fn get_call_control_status_handler() -> (
     StatusCode,
-    Json<ApiResponse<crate::models::RemoteControlTrigger>>,
+    Json<ApiResponse<crate::models::CallControlTrigger>>,
 ) {
-    let trigger = crate::remote_control::get_last_trigger();
+    let trigger = crate::call_control::get_last_trigger();
     (
         StatusCode::OK,
         Json(ApiResponse::success_with_message("Success", trigger)),
