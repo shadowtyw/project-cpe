@@ -185,11 +185,11 @@ fn render_call_template(template: &str, call: &CallRecord) -> String {
         .replace("{{id}}", &call.id.to_string())
         .replace("{{phone_number}}", &escape_json_string(&call.phone_number))
         .replace("{{direction}}", &escape_json_string(&call.direction))
-        .replace("{{direction_cn}}", escape_json_string(direction_cn))
+        .replace("{{direction_cn}}", &escape_json_string(direction_cn))
         .replace("{{duration}}", &call.duration.to_string())
         .replace("{{start_time}}", &escape_json_string(&call.start_time))
         .replace("{{end_time}}", &escape_json_string(&end_time))
-        .replace("{{answered}}", escape_json_string(answered_str))
+        .replace("{{answered}}", &escape_json_string(answered_str))
         .replace("{{answered_bool}}", &call.answered.to_string())
         // 别名支持
         .replace("{{caller}}", &escape_json_string(&call.phone_number))
