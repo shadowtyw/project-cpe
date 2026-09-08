@@ -231,8 +231,8 @@ async fn main() -> Result<()> {
             }
         }
     }
-    let app_db = Arc::new(Database::new(db_path)?);
     log_entry!(info, "app", "Database initialized at {:?}", db_path);
+    let app_db = Arc::new(Database::new(db_path)?);
     
     // 初始化配置管理器
     let config_path = get_default_config_path();

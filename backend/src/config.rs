@@ -234,7 +234,7 @@ impl RestartConfig {
 }
 
 /// 定时计划执行的命令
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleAction {
     // 飞行模式开/关（开=关闭射频省电）
@@ -250,6 +250,7 @@ pub enum ScheduleAction {
     // 关闭射频（比飞行模式更彻底，Modem 下电）
     RadioOff,
     // 重启
+    #[default]
     Reboot,
 }
 
