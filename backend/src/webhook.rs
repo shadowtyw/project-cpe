@@ -157,18 +157,21 @@ impl WebhookSender {
 
 /// 渲染短信模板，替换变量
 /// 支持的变量：{{id}}, {{phone_number}}, {{content}}, {{direction}}, {{timestamp}}, {{status}}
+///
+/// 所有字符串字段统一做 JSON 转义：默认模板为 JSON 格式（如飞书），号码或内容里若
+/// 出现引号/换行会导致 payload 变成非法 JSON。对常规值转义是无副作用的。
 fn render_sms_template(template: &str, message: &SmsMessage) -> String {
     template
         .replace("{{id}}", &message.id.to_string())
-        .replace("{{phone_number}}", &message.phone_number)
+        .replace("{{phone_number}}", &escape_json_string(&message.phone_number))
         .replace("{{content}}", &escape_json_string(&message.content))
-        .replace("{{direction}}", &message.direction)
-        .replace("{{timestamp}}", &message.timestamp)
-        .replace("{{status}}", &message.status)
+        .replace("{{direction}}", &escape_json_string(&message.direction))
+        .replace("{{timestamp}}", &escape_json_string(&message.timestamp))
+        .replace("{{status}}", &escape_json_string(&message.status))
         // 别名支持
-        .replace("{{sender}}", &message.phone_number)
+        .replace("{{sender}}", &escape_json_string(&message.phone_number))
         .replace("{{message}}", &escape_json_string(&message.content))
-        .replace("{{time}}", &message.timestamp)
+        .replace("{{time}}", &escape_json_string(&message.timestamp))
 }
 
 /// 渲染通话模板，替换变量
@@ -177,20 +180,20 @@ fn render_call_template(template: &str, call: &CallRecord) -> String {
     let end_time = call.end_time.clone().unwrap_or_default();
     let answered_str = if call.answered { "是" } else { "否" };
     let direction_cn = if call.direction == "incoming" { "来电" } else { "去电" };
-    
+
     template
         .replace("{{id}}", &call.id.to_string())
-        .replace("{{phone_number}}", &call.phone_number)
-        .replace("{{direction}}", &call.direction)
-        .replace("{{direction_cn}}", direction_cn)
+        .replace("{{phone_number}}", &escape_json_string(&call.phone_number))
+        .replace("{{direction}}", &escape_json_string(&call.direction))
+        .replace("{{direction_cn}}", &escape_json_string(direction_cn))
         .replace("{{duration}}", &call.duration.to_string())
-        .replace("{{start_time}}", &call.start_time)
-        .replace("{{end_time}}", &end_time)
-        .replace("{{answered}}", answered_str)
+        .replace("{{start_time}}", &escape_json_string(&call.start_time))
+        .replace("{{end_time}}", &escape_json_string(&end_time))
+        .replace("{{answered}}", &escape_json_string(answered_str))
         .replace("{{answered_bool}}", &call.answered.to_string())
         // 别名支持
-        .replace("{{caller}}", &call.phone_number)
-        .replace("{{time}}", &call.start_time)
+        .replace("{{caller}}", &escape_json_string(&call.phone_number))
+        .replace("{{time}}", &escape_json_string(&call.start_time))
 }
 
 /// 转义 JSON 字符串中的特殊字符

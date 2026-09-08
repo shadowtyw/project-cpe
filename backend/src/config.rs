@@ -193,6 +193,200 @@ fn sanitize_refresh_interval_ms(interval_ms: u64) -> u64 {
     }
 }
 
+/// 自动重启配置。所有策略默认关闭，避免升级后改变既有设备行为。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartConfig {
+    #[serde(default)]
+    pub schedule_enabled: bool,
+    #[serde(default = "default_schedule_interval_days")]
+    pub schedule_interval_days: u32,
+    #[serde(default)]
+    pub low_memory_enabled: bool,
+    #[serde(default = "default_low_memory_threshold_percent")]
+    pub low_memory_threshold_percent: u8,
+}
+
+fn default_schedule_interval_days() -> u32 {
+    7
+}
+
+fn default_low_memory_threshold_percent() -> u8 {
+    10
+}
+
+impl Default for RestartConfig {
+    fn default() -> Self {
+        Self {
+            schedule_enabled: false,
+            schedule_interval_days: default_schedule_interval_days(),
+            low_memory_enabled: false,
+            low_memory_threshold_percent: default_low_memory_threshold_percent(),
+        }
+    }
+}
+
+impl RestartConfig {
+    pub fn sanitize(mut self) -> Self {
+        self.schedule_interval_days = self.schedule_interval_days.clamp(1, 365);
+        self.low_memory_threshold_percent = self.low_memory_threshold_percent.clamp(5, 50);
+        self
+    }
+}
+
+/// 定时计划执行的命令
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleAction {
+    // 飞行模式开/关（开=关闭射频省电）
+    AirplaneOn,
+    AirplaneOff,
+    // 数据连接开/关
+    DataOn,
+    DataOff,
+    // 射频模式
+    RadioLte,
+    RadioNr,
+    RadioAuto,
+    // 关闭射频（比飞行模式更彻底，Modem 下电）
+    RadioOff,
+    // 重启
+    #[default]
+    Reboot,
+}
+
+/// 单条定时计划
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleEntry {
+    /// 是否启用
+    #[serde(default)]
+    pub enabled: bool,
+    /// 触发时间（本地 24 小时制 HH:MM）
+    pub time: String,
+    /// 周几触发（0=周日 … 6=周六），空表示每天
+    #[serde(default)]
+    pub weekdays: Vec<u8>,
+    /// 要执行的命令
+    pub action: ScheduleAction,
+}
+
+/// 定时计划总配置。默认关闭，避免升级后改变既有设备行为。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScheduleConfig {
+    #[serde(default)]
+    pub entries: Vec<ScheduleEntry>,
+    /// 时钟校准误差容忍窗口（分钟）
+    #[serde(default = "default_schedule_tolerance_min")]
+    pub tolerance_min: u8,
+}
+
+fn default_schedule_tolerance_min() -> u8 {
+    1
+}
+
+/// 通话远程控制配置。默认关闭；启用后，指定号码来电自动接听，接通后
+/// 保持通话达到 `hold_seconds` 秒即执行配置的动作（默认重启）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallControlConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 白名单号码。来电号码经规范化（去空格/连字符）后，只要以任一白名单号码结尾即匹配，
+    /// 从而兼容来电显示带 "+86" 或国家码前缀的情况。
+    #[serde(default)]
+    pub numbers: Vec<String>,
+    /// 接通后需要保持通话的秒数，达到后执行动作。
+    #[serde(default = "default_call_hold_seconds")]
+    pub hold_seconds: u64,
+    /// 达到保持时长后执行的动作。
+    #[serde(default = "default_call_action")]
+    pub action: ScheduleAction,
+}
+
+fn default_call_hold_seconds() -> u64 {
+    15
+}
+
+fn default_call_action() -> ScheduleAction {
+    ScheduleAction::Reboot
+}
+
+impl Default for CallControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            numbers: Vec::new(),
+            hold_seconds: default_call_hold_seconds(),
+            action: default_call_action(),
+        }
+    }
+}
+
+/// 流量用量预警配置。默认关闭。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrafficAlertConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 单日流量阈值（字节），超过则触发通知
+    #[serde(default)]
+    pub daily_threshold_bytes: u64,
+}
+
+impl ScheduleConfig {
+    pub fn sanitize(mut self) -> Self {
+        self.tolerance_min = self.tolerance_min.clamp(1, 10);
+        self.entries.retain(|entry| {
+            // 丢弃格式错误的计划项：时间不是 HH:MM 或动作无效
+            valid_schedule_time(&entry.time)
+        });
+        self
+    }
+}
+
+/// 校验 HH:MM 格式
+fn valid_schedule_time(time: &str) -> bool {
+    let parts: Vec<&str> = time.split(':').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let hour: u8 = match parts[0].parse() {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let minute: u8 = match parts[1].parse() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    hour <= 23 && minute <= 59
+}
+
+impl CallControlConfig {
+    pub fn sanitize(mut self) -> Self {
+        self.hold_seconds = self.hold_seconds.clamp(5, 3600);
+        // 号码去空白、去连字符，过滤空项并去重。
+        let mut seen = std::collections::HashSet::new();
+        self.numbers = self
+            .numbers
+            .into_iter()
+            .map(|number| normalize_phone_number(&number))
+            .filter(|number| !number.is_empty() && seen.insert(number.clone()))
+            .collect();
+        self
+    }
+}
+
+impl TrafficAlertConfig {
+    pub fn sanitize(self) -> Self {
+        Self { ..self }
+    }
+}
+
+/// 规范化电话号码：去掉空白与连字符，统一用于来电号码匹配。
+pub fn normalize_phone_number(number: &str) -> String {
+    number
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '(' && *c != ')')
+        .collect()
+}
+
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -202,6 +396,14 @@ pub struct AppConfig {
     pub sms_push: SmsPushConfig,
     #[serde(default)]
     pub refresh: RefreshConfig,
+    #[serde(default)]
+    pub restart: RestartConfig,
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
+    #[serde(default)]
+    pub call_control: CallControlConfig,
+    #[serde(default)]
+    pub traffic_alert: TrafficAlertConfig,
 }
 
 
@@ -220,6 +422,7 @@ impl ConfigManager {
                     match serde_json::from_str::<AppConfig>(&content) {
                         Ok(cfg) => AppConfig {
                             refresh: cfg.refresh.sanitize(),
+                            restart: cfg.restart.sanitize(),
                             ..cfg
                         },
                         Err(e) => {
@@ -254,43 +457,110 @@ impl ConfigManager {
     /// 获取当前配置
     #[allow(dead_code)]
     pub fn get(&self) -> AppConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
     
     /// 获取 Webhook 配置
     pub fn get_webhook(&self) -> WebhookConfig {
-        self.config.read().unwrap().webhook.clone()
+        self.config.read().unwrap_or_else(|p| p.into_inner()).webhook.clone()
     }
     
-    /// 更新 Webhook 配置
-    pub fn set_webhook(&self, webhook: WebhookConfig) -> Result<(), String> {
+    pub fn get_webhook_for_response(&self) -> WebhookConfig {
+        let mut webhook = self.get_webhook();
+        webhook.secret.clear();
+        webhook
+    }
+
+    /// Empty secret means "keep the existing secret" so a masked GET response
+    /// can be saved again without accidentally erasing credentials.
+    pub fn set_webhook(&self, mut webhook: WebhookConfig) -> Result<(), String> {
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            if webhook.secret.is_empty() {
+                webhook.secret = config.webhook.secret.clone();
+            }
             config.webhook = webhook;
         }
         self.save()
     }
 
     pub fn get_sms_push(&self) -> SmsPushConfig {
-        self.config.read().unwrap().sms_push.clone()
+        self.config.read().unwrap_or_else(|p| p.into_inner()).sms_push.clone()
     }
 
-    pub fn set_sms_push(&self, sms_push: SmsPushConfig) -> Result<(), String> {
+    pub fn get_sms_push_for_response(&self) -> SmsPushConfig {
+        let mut sms_push = self.get_sms_push();
+        sms_push.credential.clear();
+        sms_push
+    }
+
+    pub fn set_sms_push(&self, mut sms_push: SmsPushConfig) -> Result<(), String> {
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            if sms_push.credential.is_empty() {
+                sms_push.credential = config.sms_push.credential.clone();
+            }
             config.sms_push = sms_push;
         }
         self.save()
     }
 
     pub fn get_refresh(&self) -> RefreshConfig {
-        self.config.read().unwrap().refresh.clone().sanitize()
+        self.config.read().unwrap_or_else(|p| p.into_inner()).refresh.clone().sanitize()
     }
 
     pub fn set_refresh(&self, refresh: RefreshConfig) -> Result<(), String> {
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
             config.refresh = refresh.sanitize();
+        }
+        self.save()
+    }
+
+    pub fn get_restart(&self) -> RestartConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).restart.clone().sanitize()
+    }
+
+    pub fn set_restart(&self, restart: RestartConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.restart = restart.sanitize();
+        }
+        self.save()
+    }
+
+    pub fn get_schedule(&self) -> ScheduleConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).schedule.clone()
+    }
+
+    pub fn set_schedule(&self, schedule: ScheduleConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.schedule = schedule.sanitize();
+        }
+        self.save()
+    }
+
+    pub fn get_call_control(&self) -> CallControlConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).call_control.clone()
+    }
+
+    pub fn set_call_control(&self, call_control: CallControlConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.call_control = call_control.sanitize();
+        }
+        self.save()
+    }
+
+    pub fn get_traffic_alert(&self) -> TrafficAlertConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).traffic_alert.clone()
+    }
+
+    pub fn set_traffic_alert(&self, traffic_alert: TrafficAlertConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.traffic_alert = traffic_alert.sanitize();
         }
         self.save()
     }
@@ -298,9 +568,10 @@ impl ConfigManager {
     #[allow(dead_code)]
     pub fn set(&self, config: AppConfig) -> Result<(), String> {
         {
-            let mut current = self.config.write().unwrap();
+            let mut current = self.config.write().unwrap_or_else(|p| p.into_inner());
             *current = AppConfig {
                 refresh: config.refresh.sanitize(),
+                restart: config.restart.sanitize(),
                 ..config
             };
         }
@@ -309,7 +580,7 @@ impl ConfigManager {
     
     /// 保存配置到文件
     pub fn save(&self) -> Result<(), String> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         let content = serde_json::to_string_pretty(&*config)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
         
@@ -321,7 +592,8 @@ impl ConfigManager {
         
         fs::write(&self.config_path, content)
             .map_err(|e| format!("Failed to write config file: {}", e))?;
-        
+        set_private_file_permissions(&self.config_path)?;
+
         Ok(())
     }
     
@@ -339,9 +611,10 @@ impl ConfigManager {
             .map_err(|e| format!("Failed to parse config file: {}", e))?;
         
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
             *config = AppConfig {
                 refresh: new_config.refresh.sanitize(),
+                restart: new_config.restart.sanitize(),
                 ..new_config
             };
         }
@@ -365,6 +638,21 @@ pub fn get_persistent_root_dir() -> PathBuf {
 
 pub fn get_default_config_path() -> PathBuf {
     get_persistent_root_dir().join("config.json")
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .map_err(|e| format!("Failed to protect {}: {}", path.display(), e))?;
+    }
+    Ok(())
 }
 
 fn normalize_newlines(content: &str) -> String {
@@ -525,6 +813,15 @@ pub fn ensure_loader_hooks_init() -> Result<(), String> {
         .map_err(|e| format!("Failed to write loader.sh: {}", e))?;
     set_executable_permissions(&loader_path)?;
 
+    // The loader always calls init.sh. Create a harmless executable placeholder when
+    // a device has never saved an init script, avoiding a noisy boot-time shell error.
+    let init_path = PathBuf::from(INIT_SCRIPT_PATH);
+    if !init_path.exists() {
+        fs::write(&init_path, "#!/bin/sh\n")
+            .map_err(|e| format!("Failed to create default init.sh: {}", e))?;
+        set_executable_permissions(&init_path)?;
+    }
+
     let _ = fs::remove_file("/home/root/ota.sh");
 
     Ok(())
@@ -575,6 +872,8 @@ mod tests {
         loader_contains_init_command,
         loader_contains_ota_command,
         remove_ota_command_from_loader,
+        AppConfig,
+        RestartConfig,
         INIT_SCRIPT_LOADER_COMMAND,
     };
 
@@ -617,5 +916,27 @@ mod tests {
 
         assert!(!loader_contains_ota_command(&updated));
         assert!(updated.contains("/home/root/udx710 -p 80 &"));
+    }
+
+    #[test]
+    fn restart_config_sanitizes_values() {
+        let sanitized = RestartConfig {
+            schedule_enabled: true,
+            schedule_interval_days: 0,
+            low_memory_enabled: true,
+            low_memory_threshold_percent: 100,
+        }
+        .sanitize();
+
+        assert_eq!(sanitized.schedule_interval_days, 1);
+        assert_eq!(sanitized.low_memory_threshold_percent, 50);
+    }
+
+    #[test]
+    fn legacy_config_defaults_restart_policies_to_disabled() {
+        let config: AppConfig = serde_json::from_str(r#"{"refresh":{"interval_ms":5000}}"#).unwrap();
+
+        assert!(!config.restart.schedule_enabled);
+        assert!(!config.restart.low_memory_enabled);
     }
 }

@@ -23,6 +23,12 @@ export const getTempColor = (temp: number) => {
   return 'success'
 }
 
+export const getAvailableMemoryColor = (percent: number) => {
+  if (percent <= 10) return 'error'
+  if (percent <= 30) return 'warning'
+  return 'success'
+}
+
 export const getMemoryColor = (percent: number) => {
   if (percent >= 90) return 'error'
   if (percent >= 70) return 'warning'

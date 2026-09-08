@@ -230,8 +230,14 @@ pub async fn start_sms_listener(
     loop {
         let msg = match stream.next().await {
             Some(Ok(msg)) => msg,
-            Some(Err(_)) => continue,
-            None => continue,
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "D-Bus listener stopped after stream error");
+                return Ok(());
+            }
+            None => {
+                tracing::warn!("D-Bus listener stopped because the stream ended");
+                return Ok(());
+            }
         };
         
         // Check if it's a signal message
@@ -246,23 +252,30 @@ pub async fn start_sms_listener(
                         .unwrap_or_else(|| "Unknown".to_string());
                     
                     // Store to database
-                    if let Ok(id) = db.insert_sms("incoming", &sender, &content, "received", None) {
-                        // Forward to webhook / SMS push
-                        let sms = SmsMessage {
-                            id,
-                            direction: "incoming".to_string(),
-                            phone_number: sender,
-                            content,
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                            status: "received".to_string(),
-                            pdu: None,
-                        };
-                        let webhook_clone = Arc::clone(&webhook);
-                        let sms_push_clone = Arc::clone(&sms_push);
-                        tokio::spawn(async move {
-                            let _ = webhook_clone.forward_sms(&sms).await;
-                            let _ = sms_push_clone.forward_sms(&sms).await;
-                        });
+                    match db.insert_sms("incoming", &sender, &content, "received", None) {
+                        Ok(id) => {
+                            // Forward to webhook / SMS push
+                            let sms = SmsMessage {
+                                id,
+                                direction: "incoming".to_string(),
+                                phone_number: sender,
+                                content,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                status: "received".to_string(),
+                                pdu: None,
+                            };
+                            let webhook_clone = Arc::clone(&webhook);
+                            let sms_push_clone = Arc::clone(&sms_push);
+
+                            // 并行转发 webhook / 推送（短信遥控已移除，短信仅做转发与入库）
+                            tokio::spawn(async move {
+                                let _ = webhook_clone.forward_sms(&sms).await;
+                                let _ = sms_push_clone.forward_sms(&sms).await;
+                            });
+                        }
+                        Err(error) => {
+                            crate::log_entry!(warn, "sms", "Failed to store incoming SMS: {}", error);
+                        }
                     }
                 }
             }
@@ -289,7 +302,12 @@ lazy_static::lazy_static! {
 }
 
 /// Start call status listener with call history recording and webhook support
-pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: Arc<WebhookSender>) -> zbus::Result<()> {
+pub async fn start_call_listener(
+    conn: Connection,
+    db: Arc<Database>,
+    webhook: Arc<WebhookSender>,
+    config_manager: Arc<crate::config::ConfigManager>,
+) -> zbus::Result<()> {
     // Subscribe to D-Bus signals via proxy
     let dbus_proxy = Proxy::new(&conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").await?;
     
@@ -306,8 +324,14 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
     loop {
         let msg = match stream.next().await {
             Some(Ok(msg)) => msg,
-            Some(Err(_)) => continue,
-            None => continue,
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "D-Bus listener stopped after stream error");
+                return Ok(());
+            }
+            None => {
+                tracing::warn!("D-Bus listener stopped because the stream ended");
+                return Ok(());
+            }
         };
         
         // Process call-related signals
@@ -342,14 +366,26 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
                         // Insert call record into database
                         let answered = state == "active";
                         if let Ok(db_id) = db.insert_call(direction, &phone_number, answered) {
-                            let mut active_calls = ACTIVE_CALLS.lock().unwrap();
-                            active_calls.insert(path_str, ActiveCall {
+                            let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
+                            active_calls.insert(path_str.clone(), ActiveCall {
                                 db_id,
-                                phone_number,
+                                phone_number: phone_number.clone(),
                                 direction: direction.to_string(),
                                 start_time: Utc::now(),
                                 answered,
                             });
+                        }
+
+                        // 通话遥控：来电命中白名单时自动接听并开始计时。
+                        if direction == "incoming" {
+                            let config = config_manager.get_call_control();
+                            let _ = crate::call_control::on_incoming_call(
+                                &conn,
+                                &config,
+                                &path_str,
+                                &phone_number,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -357,8 +393,11 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
                     // Parse CallRemoved signal: object_path
                     if let Ok(path) = msg.body().deserialize::<zbus::zvariant::ObjectPath>() {
                         let path_str = path.to_string();
-                        
-                        let mut active_calls = ACTIVE_CALLS.lock().unwrap();
+
+                        // 通话遥控：清理该通话的计时器。
+                        crate::call_control::on_call_removed(&path_str);
+
+                        let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
                         if let Some(call) = active_calls.remove(&path_str) {
                             // Calculate duration
                             let duration = (Utc::now() - call.start_time).num_seconds();
@@ -404,7 +443,7 @@ pub async fn start_call_listener(conn: Connection, db: Arc<Database>, webhook: A
                                     
                                     // Update answered status if call becomes active
                                     if state_str == "active" {
-                                        let mut active_calls = ACTIVE_CALLS.lock().unwrap();
+                                        let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
                                         if let Some(call) = active_calls.get_mut(&path_str) {
                                             call.answered = true;
                                         }
