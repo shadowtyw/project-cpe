@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Global mutex to serialize DBus/AT operations
-static DBUS_LOCK: Mutex<()> = Mutex::const_new();
+static DBUS_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Maximum time a single D-Bus call may hold the serial lock.
 /// Exceeding this indicates ofono is unresponsive; the process aborts to recover.
