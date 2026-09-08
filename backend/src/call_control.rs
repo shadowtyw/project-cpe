@@ -73,17 +73,6 @@ pub async fn on_incoming_call(
     true
 }
 
-/// 通话已接通（State -> active）时调用，确保计时器已建立（幂等）。
-pub async fn on_call_active(config: &CallControlConfig, path: &str, number: &str) {
-    if !config.enabled || config.numbers.is_empty() {
-        return;
-    }
-    let normalized = normalize_phone_number(number);
-    if is_whitelisted(&config.numbers, &normalized) {
-        start_timer(path, normalized, config.hold_seconds);
-    }
-}
-
 /// 通话结束（CallRemoved）时清理计时器。
 pub fn on_call_removed(path: &str) {
     let mut timers = lock_timers();

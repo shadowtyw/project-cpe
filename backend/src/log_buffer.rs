@@ -70,14 +70,6 @@ pub fn info(module: &str, message: impl Into<String>) {
     push("info", module, message.into());
 }
 
-/// 供 tracing 转发 Layer 调用：按等级字符串写入缓冲。
-///
-/// 常规运行日志走 `tracing`（`info!`/`warn!` 等），由 main.rs 注册的 Layer 转发到此处，
-/// 这样“系统日志”页面才能看到与进程实际输出一致的运行日志。
-pub fn record(level: &str, module: &str, message: String) {
-    push(level, module, message);
-}
-
 /// 记录一条 warn 日志
 pub fn warn(module: &str, message: impl Into<String>) {
     push("warn", module, message.into());
