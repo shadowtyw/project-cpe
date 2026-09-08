@@ -3314,7 +3314,7 @@ pub async fn get_diagnostic_report(
 
 /// GET /api/config/backup/export - 导出当前 config.json
 pub async fn export_config_handler(
-    State(config_manager): State<Arc<ConfigManager>>,
+    State(_config_manager): State<Arc<ConfigManager>>,
 ) -> impl IntoResponse {
     // 直接返回原始配置文件内容，便于用户保存与迁移
     let path = crate::config::get_default_config_path();

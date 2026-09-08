@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use chrono::{Datelike, Timelike};
+
 use crate::config::{ConfigManager, ScheduleAction};
 use zbus::Connection;
 
@@ -104,6 +106,7 @@ async fn execute_action(conn: &Connection, action: ScheduleAction) {
 #[cfg(test)]
 mod tests {
     use super::is_within_schedule_window;
+    use chrono::Timelike;
 
     #[test]
     fn schedule_window_rejects_invalid_time() {

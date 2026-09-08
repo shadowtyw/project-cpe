@@ -5,7 +5,7 @@
 //! 对设备 flash 仅有可忽略的磨损，不影响长期稳定运行。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::config::ConfigManager;
@@ -17,14 +17,14 @@ const SAMPLE_INTERVAL_SECONDS: u64 = 300;
 /// 预警去重：同日只通知一次，避免阈值边缘反复推送
 const ALERT_RESET_MINUTES: i64 = 24 * 60;
 
-/// 上次采样的接口计数缓存（进程内）
+// 上次采样的接口计数缓存（进程内）
 lazy_static::lazy_static! {
     static ref LAST_COUNTERS: std::sync::Mutex<HashMap<String, (u64, u64)>> =
         std::sync::Mutex::new(HashMap::new());
 }
 
 /// 上次预警时间戳（Unix 秒）
-static LAST_ALERT_AT: AtomicU64 = AtomicU64::new(0);
+static LAST_ALERT_AT: AtomicI64 = AtomicI64::new(0);
 
 /// 今日/本月累计已在数据库里维护，这里只负责采样 + 累加 + 预警。
 /// 返回当日是否新增了流量（用于日志去重）。
@@ -45,21 +45,25 @@ pub async fn traffic_watchdog(db: Arc<Database>, config_manager: Arc<ConfigManag
             }
         }
 
-        // 计算相对上次采样的增量
-        let mut last = match LAST_COUNTERS.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // 计算相对上次采样的增量。将锁 guard 限制在块内，确保在 `.await` 前已释放，
+        // 使 `traffic_watchdog` 的 future 保持 `Send`（tokio::spawn 要求）。
+        let (delta_rx, delta_tx) = {
+            let mut last = match LAST_COUNTERS.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
 
-        let mut delta_rx: u64 = 0;
-        let mut delta_tx: u64 = 0;
-        for (iface, (rx, tx)) in &cur_counters {
-            if let Some((last_rx, last_tx)) = last.get(iface) {
-                delta_rx = delta_rx.saturating_add(rx.saturating_sub(*last_rx));
-                delta_tx = delta_tx.saturating_add(tx.saturating_sub(*last_tx));
+            let mut delta_rx: u64 = 0;
+            let mut delta_tx: u64 = 0;
+            for (iface, (rx, tx)) in &cur_counters {
+                if let Some((last_rx, last_tx)) = last.get(iface) {
+                    delta_rx = delta_rx.saturating_add(rx.saturating_sub(*last_rx));
+                    delta_tx = delta_tx.saturating_add(tx.saturating_sub(*last_tx));
+                }
             }
-        }
-        *last = cur_counters;
+            *last = cur_counters;
+            (delta_rx, delta_tx)
+        };
 
         // 若没有任何变化（首轮或无流量），跳过写盘
         if delta_rx == 0 && delta_tx == 0 {
