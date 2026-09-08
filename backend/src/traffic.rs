@@ -82,10 +82,11 @@ async fn check_alert(config_manager: &ConfigManager, db: &Database) {
         return;
     }
 
-    let today_total = match db.get_todays_traffic() {
-        Ok(total) => total,
+    let (today_rx, today_tx) = match db.get_todays_traffic() {
+        Ok(totals) => totals,
         Err(_) => return,
     };
+    let today_total = today_rx.saturating_add(today_tx);
     if today_total < alert.daily_threshold_bytes {
         return;
     }

@@ -312,12 +312,11 @@ fn generate_product_name() -> String {
     let sn = read_serial_number();
     let model_id = read_hardware_id();
     
-    // 从序列号中提取后4位（如果长度足够）
+    // 从序列号中提取后4位（如果长度足够），否则用0填充
     let sn_suffix = if sn.len() >= 4 {
-        &sn[sn.len()-4..]
+        sn[sn.len()-4..].to_string()
     } else {
-        // 如果序列号太短，用0填充
-        &format!("{:0<4}", sn)[..4]
+        format!("{:0<4}", sn)
     };
     
     format!("unisoc-5g-modem-{}00{}", model_id, sn_suffix)
