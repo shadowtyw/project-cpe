@@ -207,30 +207,39 @@ macro_rules! log_entry {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear, snapshot};
+    use super::snapshot;
 
     #[test]
     fn snapshot_supports_min_level_filtering() {
-        clear();
-        super::info("test", "info message");
-        super::warn("test", "warn message");
-        super::error("test", "error message");
+        let module = "test_snapshot_supports_min_level_filtering";
+        super::info(module, "info message");
+        super::warn(module, "warn message");
+        super::error(module, "error message");
 
-        let all = snapshot(0, 100);
+        let all: Vec<_> = snapshot(0, 500)
+            .into_iter()
+            .filter(|e| e.module == module)
+            .collect();
         assert_eq!(all.len(), 3);
 
-        let warnings_up = snapshot(2, 100);
+        let warnings_up: Vec<_> = snapshot(2, 500)
+            .into_iter()
+            .filter(|e| e.module == module)
+            .collect();
         assert_eq!(warnings_up.len(), 2);
         assert!(warnings_up.iter().all(|e| e.level == "warn" || e.level == "error"));
     }
 
     #[test]
     fn snapshot_returns_newest_first() {
-        clear();
-        super::info("test", "first");
-        super::info("test", "second");
+        let module = "test_snapshot_returns_newest_first";
+        super::info(module, "first");
+        super::info(module, "second");
 
-        let entries = snapshot(0, 100);
+        let entries: Vec<_> = snapshot(0, 500)
+            .into_iter()
+            .filter(|e| e.module == module)
+            .collect();
         assert_eq!(entries[0].message, "second");
         assert_eq!(entries[1].message, "first");
     }
