@@ -75,12 +75,14 @@ pub fn warn(module: &str, message: impl Into<String>) {
     push("warn", module, message.into());
 }
 
-/// 记录一条 error 日志
+/// 记录一条 error 日志。仅通过 `log_entry!` 宏间接调用，直接调用点可能为零。
+#[allow(dead_code)]
 pub fn error(module: &str, message: impl Into<String>) {
     push("error", module, message.into());
 }
 
-/// 记录一条 debug 日志
+/// 记录一条 debug 日志。仅通过 `log_entry!` 宏间接调用，直接调用点可能为零。
+#[allow(dead_code)]
 pub fn debug(module: &str, message: impl Into<String>) {
     push("debug", module, message.into());
 }

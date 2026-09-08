@@ -354,6 +354,27 @@ async fn main() -> Result<()> {
         });
     }
 
+    // 数据库定期清理：短信/通话记录只保留最近 N 条。设备 flash 容量有限，
+    // 若不清理，data.db 会无限增长直至占满 /data 分区，导致服务无法写库。
+    {
+        let db_clone = Arc::clone(&app_db);
+        tokio::spawn(async move {
+            // 延迟启动，避免与启动阶段的读库扫描抢占。
+            tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+            loop {
+                const SMS_KEEP: i64 = 2000;
+                const CALL_KEEP: i64 = 1000;
+                if let Err(e) = db_clone.cleanup_old_sms(SMS_KEEP) {
+                    crate::log_entry!(warn, "db", "SMS history cleanup failed: {}", e);
+                }
+                if let Err(e) = db_clone.cleanup_old_calls(CALL_KEEP) {
+                    crate::log_entry!(warn, "db", "Call history cleanup failed: {}", e);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
+
     // Static frontend and API share one origin in production. Cross-origin access
     // is disabled unless the deployment explicitly adds an origin policy.
     let cors = CorsLayer::new();

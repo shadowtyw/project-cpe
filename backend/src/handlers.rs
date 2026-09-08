@@ -778,9 +778,10 @@ pub async fn set_usb_mode_advanced(Json(payload): Json<SetUsbModeRequest>) -> im
         );
     }
     
-    // 执行热切换
-    match usb_switch::switch_usb_mode_advanced(payload.mode) {
-        Ok(_) => {
+    // 执行热切换。该操作内部有多次短 sleep 与阻塞 IO，放到 spawn_blocking 执行，
+    // 避免卡住 tokio 工作线程导致管理页面在切换期间无响应。
+    match tokio::task::spawn_blocking(move || usb_switch::switch_usb_mode_advanced(payload.mode)).await {
+        Ok(Ok(_)) => {
             let mode_name = get_mode_name(Some(payload.mode));
             (
                 StatusCode::OK,
@@ -790,9 +791,13 @@ pub async fn set_usb_mode_advanced(Json(payload): Json<SetUsbModeRequest>) -> im
                 )),
             )
         }
-        Err(e) => (
+        Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::<()>::error(format!("USB 模式切换失败: {}", e))),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<()>::error(format!("USB 模式切换任务失败: {}", e))),
         ),
     }
 }

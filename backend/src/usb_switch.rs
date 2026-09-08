@@ -387,33 +387,48 @@ fn wait_for_functionfs_mount() -> Result<(), String> {
 pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
     let config = UsbModeConfig::get(mode)
         .ok_or_else(|| format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS, 4=NCM(no ADB)", mode))?;
-    
+
     // 在禁用 gadget 前捕获现有地址，避免重新枚举后丢失用户的管理网段。
     let usb_interface_ip = resolve_usb_interface_ip();
-
-    // **********************************************************
     // 提前读取 UDC 名称，避免禁用后 list 为空
     let udc_name_cached = get_udc_name();
-    
+
+    let result = switch_usb_mode_advanced_inner(&config, &usb_interface_ip, &udc_name_cached);
+
+    // 切换过程涉及禁用 UDC 后的一系列 configfs 操作，任一步失败都可能让 USB
+    // gadget 停留在“已禁用、未绑定”的半配置状态，导致管理页面赖以通信的 usb0
+    // 掉线。这里尽力把 UDC 重新绑回，恢复网络与 adbd，避免只能物理重启。
+    if let Err(ref error) = result {
+        recover_usb_after_failed_switch(&udc_name_cached, &usb_interface_ip, error);
+    }
+
+    result
+}
+
+fn switch_usb_mode_advanced_inner(
+    config: &UsbModeConfig,
+    usb_interface_ip: &str,
+    udc_name_cached: &str,
+) -> Result<(), String> {
     // 热切换不写入配置文件，仅临时生效
     // 如需永久保存，请使用 set_usb_mode_config() 函数
-    
+
     // 1. 停止 adbd 服务
     let _ = stop_adbd();
-    
+
     // 2. 禁用 UDC
     write_to_file(UDC_PATH, "none")
         .map_err(|e| format!("Failed to disable UDC: {}", e))?;
-    
+
     // 等待 UDC 完全禁用
     std::thread::sleep(std::time::Duration::from_millis(100));
-    
+
     // 3. 删除所有链接和 CDC 功能
     remove_all_links()
         .map_err(|e| format!("Failed to remove links: {}", e))?;
     remove_all_cdc()
         .map_err(|e| format!("Failed to remove CDC functions: {}", e))?;
-    
+
     // 4. 设置 IPA 硬件加速协议
     if let Some(protocol) = config.pamu3_protocol {
         if Path::new(PAMU3_PROTOCOL_PATH).exists() {
@@ -421,27 +436,27 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
                 .map_err(|e| format!("Failed to set pamu3_protocol: {}", e))?;
         }
     }
-    
+
     // 5. 设置 max_dl_pkts (下行包批量数)
     if Path::new(PAMU3_MAX_DL_PKTS_PATH).exists() {
         let _ = write_to_file(PAMU3_MAX_DL_PKTS_PATH, "7");
     }
-    
+
     // 6. 发送 AT 指令控制 USB 共享模式
     let _ = set_usb_share_mode(config.usb_share_enable);
-    
+
     // 7. 确保 configfs 已挂载
     let _ = Command::new("mount")
         .args(["-t", "configfs", "none", "/sys/kernel/config"])
         .output();
-    
+
     // 8. 设置 USB gadget 基本配置
     // 确保目录存在
     if !Path::new(GADGET_PATH).exists() {
         fs::create_dir_all(GADGET_PATH)
             .map_err(|e| format!("Failed to create gadget directory: {}", e))?;
     }
-    
+
     write_to_file(&format!("{}/idVendor", GADGET_PATH), config.vid)
         .map_err(|e| format!("Failed to set VID: {}", e))?;
     write_to_file(&format!("{}/idProduct", GADGET_PATH), config.pid)
@@ -450,38 +465,38 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
         .map_err(|e| format!("Failed to set bcdDevice: {}", e))?;
     write_to_file(&format!("{}/bDeviceClass", GADGET_PATH), "0")
         .map_err(|e| format!("Failed to set bDeviceClass: {}", e))?;
-    
+
     // 9. 设置字符串描述符
     let strings_path = format!("{}/strings/0x409", GADGET_PATH);
     if !Path::new(&strings_path).exists() {
         fs::create_dir_all(&strings_path)
             .map_err(|e| format!("Failed to create strings directory: {}", e))?;
     }
-    
+
     let sn = read_serial_number();
     let product_name = generate_product_name();
-    
+
     write_to_file(&format!("{}/serialnumber", strings_path), &sn)
         .map_err(|e| format!("Failed to set serial number: {}", e))?;
     write_to_file(&format!("{}/manufacturer", strings_path), "SOYEA")
         .map_err(|e| format!("Failed to set manufacturer: {}", e))?;
     write_to_file(&format!("{}/product", strings_path), &product_name)
         .map_err(|e| format!("Failed to set product name: {}", e))?;
-    
+
     // 10. 设置配置描述符
     let config_strings_path = format!("{}/strings/0x409", CONFIG_PATH);
     if !Path::new(&config_strings_path).exists() {
         fs::create_dir_all(&config_strings_path)
             .map_err(|e| format!("Failed to create config strings directory: {}", e))?;
     }
-    
+
     write_to_file(&format!("{}/configuration", config_strings_path), config.configuration)
         .map_err(|e| format!("Failed to set configuration: {}", e))?;
     write_to_file(&format!("{}/MaxPower", CONFIG_PATH), "500")
         .map_err(|e| format!("Failed to set MaxPower: {}", e))?;
     write_to_file(&format!("{}/bmAttributes", CONFIG_PATH), "0xc0")
         .map_err(|e| format!("Failed to set bmAttributes: {}", e))?;
-    
+
     // 11. 创建主功能目录
     let function_path = format!("{}/{}", FUNCTIONS_PATH, config.functions);
     if !Path::new(&function_path).exists() {
@@ -494,11 +509,11 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
             let _ = fs::set_permissions(&function_path, perms);
         }
     }
-    
+
     // 12. 创建 gser/vser 功能
     create_gser_functions()
         .map_err(|e| format!("Failed to create gser functions: {}", e))?;
-    
+
     // 13. 设置 MAC 地址
     let dev_addr_path = format!("{}/dev_addr", function_path);
     if Path::new(&dev_addr_path).exists() {
@@ -515,9 +530,9 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
         let host_mac = parts.join(":").to_lowercase();
         let _ = write_to_file(&host_addr_path, &host_mac);
     }
-    
+
     // 14. 创建符号链接（始终使用多功能模式，包含 ADB 和调试接口）
-    create_multi_function_links(&config)?;
+    create_multi_function_links(config)?;
 
     // 15. 启动 adbd（始终启动）
     // adbd-init 会挂载 functionfs 到 /dev/usb-ffs/adb
@@ -529,19 +544,39 @@ pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
 
     // 17. 设置日志传输
     let _ = set_log_transport(true);
-    
+
     // 18. 启用 UDC
     // 使用之前缓存的 UDC 名称写回，避免读取为空导致挂载失败
-    write_to_file(UDC_PATH, &udc_name_cached)
+    write_to_file(UDC_PATH, udc_name_cached)
         .map_err(|e| format!("Failed to enable UDC: {}", e))?;
-    
+
     // 19. 等待 USB 设备被主机识别
     std::thread::sleep(std::time::Duration::from_millis(1000));
-    
+
     // 20. 配置网络接口，优先保留设备当前的 USB 管理地址。
-    configure_usb_network(&usb_interface_ip)?;
-    
+    configure_usb_network(usb_interface_ip)?;
+
     Ok(())
+}
+
+/// 切换失败后的尽力恢复：重绑 UDC、重启 adbd、恢复 USB 网络配置。
+/// 全部 best-effort，绝不 panic，避免把本就可能掉线的设备推向更糟状态。
+fn recover_usb_after_failed_switch(udc_name: &str, usb_interface_ip: &str, error: &str) {
+    // 关键一步：把 UDC 重新绑回（可能是旧功能，也可能是已建半的 gadget）。即使
+    // 当前 gadget 不完整，绑定也比停留在 "none" 更可能保住 usb0。
+    let _ = write_to_file(UDC_PATH, udc_name);
+
+    // adbd 可能已被 stop 或在半启动状态；重启一轮让 functionfs 尽量恢复。
+    let _ = stop_adbd();
+    let _ = start_adbd();
+    let _ = wait_for_functionfs_mount();
+
+    // 恢复 USB 管理网段配置，保住管理页面通信。
+    if let Err(recover_error) = configure_usb_network(usb_interface_ip) {
+        crate::log_entry!(error, "usb", "USB 切换失败且网络恢复亦失败: {} (recover: {})", error, recover_error);
+    } else {
+        crate::log_entry!(warn, "usb", "USB 热切换失败，已尝试自动恢复 UDC 与网络: {}", error);
+    }
 }
 
 /// 创建多功能模式的符号链接

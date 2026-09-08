@@ -266,9 +266,13 @@ impl Database {
         })
     }
     
-    /// 删除旧短信（保留最近 N 条）
-    #[allow(dead_code)]
+    /// 删除旧短信（保留最近 N 条）。
+    ///
+    /// `keep_count <= 0` 时不删除任何记录，避免误清空。
     pub fn cleanup_old_sms(&self, keep_count: i64) -> Result<usize> {
+        if keep_count <= 0 {
+            return Ok(0);
+        }
         let conn = self.lock_conn();
         let deleted = conn.execute(
             "DELETE FROM sms_messages WHERE id NOT IN (
@@ -448,6 +452,23 @@ impl Database {
         let conn = self.lock_conn();
         conn.execute("DELETE FROM call_history", [])?;
         Ok(())
+    }
+
+    /// 删除旧通话记录（保留最近 N 条）。
+    ///
+    /// `keep_count <= 0` 时不删除任何记录，避免误清空。
+    pub fn cleanup_old_calls(&self, keep_count: i64) -> Result<usize> {
+        if keep_count <= 0 {
+            return Ok(0);
+        }
+        let conn = self.lock_conn();
+        let deleted = conn.execute(
+            "DELETE FROM call_history WHERE id NOT IN (
+                SELECT id FROM call_history ORDER BY start_time DESC LIMIT ?1
+            )",
+            params![keep_count],
+        )?;
+        Ok(deleted)
     }
 
     // ==================== 流量统计相关方法 ====================

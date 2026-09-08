@@ -15,13 +15,22 @@ const CHECK_INTERVAL_SECONDS: u64 = 30;
 
 /// 计划执行 watchdog
 pub async fn schedule_watchdog(conn: Arc<Connection>, config_manager: Arc<ConfigManager>) {
-    let mut last_fired: Option<(String, String)> = None;
+    let mut fired_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_fired_minute: Option<u32> = None;
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECONDS)).await;
 
         let config = config_manager.get_schedule();
         let tolerance_min = u64::from(config.tolerance_min.max(1));
+
+        // 以“当日分钟数”作为窗口边界：跨到新的分钟时清空去重集合，避免上一分钟的
+        // 记录导致新窗口内的计划项被误跳过。
+        let current_minute = minute_of_day(chrono::Local::now());
+        if last_fired_minute != Some(current_minute) {
+            fired_keys.clear();
+            last_fired_minute = Some(current_minute);
+        }
 
         for entry in &config.entries {
             if !entry.enabled {
@@ -31,23 +40,30 @@ pub async fn schedule_watchdog(conn: Arc<Connection>, config_manager: Arc<Config
                 continue;
             }
 
-            // 每个计划项在同一个分钟窗口内只触发一次
-            let fire_key = (entry.time.clone(), format!("{:?}", entry.action));
-            if last_fired.as_ref() == Some(&fire_key) {
+            // 每个计划项（时间+动作）在同一个分钟窗口内只触发一次；不同计划项互不覆盖。
+            let fire_key = format!("{}|{:?}", entry.time, entry.action);
+            if !fired_keys.insert(fire_key.clone()) {
                 continue;
             }
 
             execute_action(&conn, entry.action).await;
             crate::log_entry!(info, "schedule", "Scheduled action {:?} fired at local {}", entry.action, entry.time);
-            last_fired = Some(fire_key);
         }
     }
 }
 
-/// 判断当前本地时间是否落在计划的触发窗口内
+/// 当前本地时间的“当日分钟数”（0..1440）。
+fn minute_of_day(now: chrono::DateTime<chrono::Local>) -> u32 {
+    u32::from(now.hour()) * 60 + u32::from(now.minute())
+}
+
+/// 判断当前本地时间是否落在计划的触发窗口内。
+///
+/// 时间差按“环形”计算（00:00 与 23:59 只差 1 分钟），避免零点前后的计划因线性
+/// 差值（1439 分钟）被错误判定为窗口外。
 fn is_within_schedule_window(time: &str, tolerance_min: u64, weekdays: &[u8]) -> bool {
     let now = chrono::Local::now();
-    let now_minutes = u32::from(now.hour()) * 60 + u32::from(now.minute());
+    let now_minutes = minute_of_day(now);
 
     // 解析计划时间 HH:MM
     let parts: Vec<&str> = time.split(':').collect();
@@ -57,10 +73,14 @@ fn is_within_schedule_window(time: &str, tolerance_min: u64, weekdays: &[u8]) ->
     let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) else {
         return false;
     };
+    if hour > 23 || minute > 59 {
+        return false;
+    }
     let target = hour.saturating_mul(60).saturating_add(minute);
 
-    let diff = now_minutes.abs_diff(target);
-    let within_time = diff <= tolerance_min as u32;
+    let linear = now_minutes.abs_diff(target);
+    let circular = linear.min(1440 - linear);
+    let within_time = circular <= tolerance_min as u32;
 
     // 周几过滤：空表示每天，否则要求当天匹配（0=周日）
     let weekday_ok = weekdays.is_empty()
