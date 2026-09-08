@@ -369,7 +369,7 @@ pub async fn start_call_listener(
                             let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
                             active_calls.insert(path_str.clone(), ActiveCall {
                                 db_id,
-                                phone_number,
+                                phone_number: phone_number.clone(),
                                 direction: direction.to_string(),
                                 start_time: Utc::now(),
                                 answered,
