@@ -475,6 +475,47 @@ pub async fn set_roaming_allowed(conn: &Connection, allowed: bool) -> zbus::Resu
     }).await
 }
 
+/// 探测 ofono 服务是否已在 D-Bus 上就绪。
+///
+/// 后端进程往往早于 ofono 启动：此时调用 org.ofono 会得到
+/// `DBus.Error.ServiceUnknown: The name org.ofono was not provided by any .service files`。
+/// 这里通过 org.freedesktop.DBus 的 NameHasOwner 探测名字是否已注册，
+/// 避免在 ofono 尚未就绪时发起注定失败的自动连接。
+///
+/// # Arguments
+/// * `conn` - 系统 D-Bus 连接
+///
+/// # Returns
+/// ofono 名字是否已被占用（即服务已注册）
+pub async fn ofono_ready(conn: &Connection) -> bool {
+    let Ok(proxy) =
+        Proxy::new(conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").await
+    else {
+        return false;
+    };
+    proxy
+        .call::<_, _, bool>("NameHasOwner", &("org.ofono",))
+        .await
+        .unwrap_or(false)
+}
+
+/// 等待 ofono 在 D-Bus 上就绪，最多 `timeout` 秒；就绪返回 true。
+///
+/// 设备重启后 ofono 通常需要几秒到十几秒才能完成注册，本函数以 1 秒
+/// 间隔轮询，避免占用系统资源。
+pub async fn wait_for_ofono(conn: &Connection, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if ofono_ready(conn).await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// 初始化数据连接（程序启动时调用）
 ///
 /// 检查当前数据连接状态，如果未激活则尝试自动激活。
@@ -732,6 +773,8 @@ pub async fn data_connection_watchdog(
     frontend_runtime: Arc<FrontendRuntime>,
 ) {
     let mut last_data_log = String::new();
+    // 首次进入循环前先检查一次，避免设备刚启动、连接已断时还要再等满一个 interval。
+    let mut first_round = true;
 
     loop {
         let refresh = config_manager.get_refresh();
@@ -742,15 +785,18 @@ pub async fn data_connection_watchdog(
             Duration::from_millis(refresh.idle_watchdog_interval_ms())
         };
 
-        tokio::time::sleep(interval).await;
-        
-        // 检查并恢复数据连接
-        let result = check_and_restore_data_connection(&conn).await;
-        
-        // 只在状态变化时打印日志，避免刷屏
-        if result != last_data_log {
-            info!("Watchdog: data connection: {}", result);
-            last_data_log = result;
+        if !first_round {
+            tokio::time::sleep(interval).await;
+        }
+        first_round = false;
+
+        // ofono 尚未就绪时先不检查，等下一个周期；真实状态变化才打印日志，避免刷屏。
+        if ofono_ready(&conn).await {
+            let result = check_and_restore_data_connection(&conn).await;
+            if result != last_data_log {
+                info!("Watchdog: data connection: {}", result);
+                last_data_log = result;
+            }
         }
     }
 }

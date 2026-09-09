@@ -356,10 +356,14 @@ async fn main() -> Result<()> {
     {
         let conn_clone = Arc::clone(&dbus_conn);
         tokio::spawn(async move {
-            // 等待 2 秒让 modem 完全初始化
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            let result = init_data_connection(&conn_clone).await;
-            tracing::info!("Auto-connect completed: {}", result);
+            // ofono 服务可能晚于后端进程启动；等待其就绪后再自动连接，
+            // 避免在 ofono 未注册时发起注定失败的连接（见 dbus::wait_for_ofono）。
+            if dbus::wait_for_ofono(&conn_clone, std::time::Duration::from_secs(60)).await {
+                let result = init_data_connection(&conn_clone).await;
+                tracing::info!("Auto-connect completed: {}", result);
+            } else {
+                tracing::warn!("Auto-connect skipped: ofono not ready within 60s; watchdog will retry");
+            }
         });
     }
     
