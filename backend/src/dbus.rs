@@ -749,7 +749,7 @@ pub async fn data_connection_watchdog(
         
         // 只在状态变化时打印日志，避免刷屏
         if result != last_data_log {
-            info!(status = %result, "Watchdog: data connection");
+            info!("Watchdog: data connection: {}", result);
             last_data_log = result;
         }
     }

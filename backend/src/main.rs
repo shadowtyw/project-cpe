@@ -359,7 +359,7 @@ async fn main() -> Result<()> {
             // 等待 2 秒让 modem 完全初始化
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             let result = init_data_connection(&conn_clone).await;
-            tracing::info!(result = %result, "Auto-connect completed");
+            tracing::info!("Auto-connect completed: {}", result);
         });
     }
     
