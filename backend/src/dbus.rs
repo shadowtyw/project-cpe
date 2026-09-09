@@ -527,6 +527,37 @@ pub async fn wait_for_ofono(conn: &Connection, timeout: Duration) -> bool {
 /// # Returns
 /// 初始化结果消息
 pub async fn init_data_connection(conn: &Connection) -> String {
+    // ofono 名字就绪后，其内部 RIL / ConnectionManager 仍可能处于初始化窗口，
+    // 此时调用 GetContexts 会瞬时失败。对这类错误做有限重试，避免启动即丢连接。
+    const MAX_ATTEMPTS: usize = 5;
+    let mut last = String::new();
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        last = init_data_connection_attempt(conn).await;
+        if !is_ofono_transient_error(&last) {
+            return last;
+        }
+    }
+    last
+}
+
+/// 判断自动连接结果是否为 ofono 尚未就绪的瞬时错误（值得重试）。
+///
+/// 只有 ServiceUnknown / 名字未提供的错误才重试；「网络未注册」「APN 未配置」
+/// 「已激活」等确定性结果不重试，交给 watchdog 按各自语义处理。
+fn is_ofono_transient_error(result: &str) -> bool {
+    result.contains("not provided by any .service files")
+        || result.contains("ServiceUnknown")
+        || result.contains("Failed to find internet context")
+        || result.contains("Failed to create context proxy")
+        || result.contains("Failed to build context path")
+        || result.contains("Failed to get context properties")
+}
+
+/// 单次数据连接初始化尝试（原 init_data_connection 主体）。
+async fn init_data_connection_attempt(conn: &Connection) -> String {
     // 1. 先检查网络注册状态
     match NetworkRegistrationProxy::new(conn).await {
         Ok(net_proxy) => {
