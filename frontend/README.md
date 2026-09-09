@@ -24,11 +24,13 @@ npm run dev
 
 访问：`http://localhost:5173`
 
+开发代理默认指向 `http://192.168.67.1`。生产前端通过相对 `/api` 请求同一设备，不依赖这个开发地址。
+
 **注意**：需要同时运行后端服务 (Rust)，请在另一个终端中运行：
 
 ```bash
 cd ..
-cargo run
+cargo run --manifest-path backend/Cargo.toml
 ```
 
 ### 3. 生产构建
@@ -39,7 +41,7 @@ pnpm build
 npm run build
 ```
 
-构建产物输出到 `../www` 目录。
+构建产物输出到 `dist` 目录；仓库根目录的 `scripts/pack-ota.sh` 会将其放入 OTA 包中的 `www/`。
 
 ## 📁 项目结构
 
@@ -67,7 +69,7 @@ src/
 - React 19
 - TypeScript
 - MUI v7
-- React Router v6
+- React Router v7
 - Vite
 
 查看 `SETUP.md` 获取详细配置说明。

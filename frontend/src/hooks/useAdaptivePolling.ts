@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const DEFAULT_HIDDEN_MIN_INTERVAL = 30_000
 const DEFAULT_HIDDEN_MULTIPLIER = 6
@@ -75,9 +75,17 @@ export function useAdaptivePolling({
     [hiddenMinInterval, hiddenMultiplier, isPageVisible, refreshInterval]
   )
 
+  // 始终用 ref 指向最新的 onTick，避免把 onTick（通常是内联箭头函数，每次渲染
+  // 都是新引用）放进 effect 依赖数组，导致 effect 反复重建、`immediate` 反复触发
+  // 形成“自触发循环”（表现为刷新按钮被不停点击）。
+  const onTickRef = useRef(onTick)
+  useEffect(() => {
+    onTickRef.current = onTick
+  }, [onTick])
+
   useEffect(() => {
     if (immediate) {
-      void onTick()
+      void onTickRef.current()
     }
 
     if (effectiveRefreshInterval <= 0) {
@@ -85,13 +93,13 @@ export function useAdaptivePolling({
     }
 
     const timer = window.setInterval(() => {
-      void onTick()
+      void onTickRef.current()
     }, effectiveRefreshInterval)
 
     return () => {
       window.clearInterval(timer)
     }
-  }, [effectiveRefreshInterval, immediate, onTick, refreshKey])
+  }, [effectiveRefreshInterval, immediate, refreshKey])
 
   return {
     effectiveRefreshInterval,

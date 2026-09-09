@@ -147,9 +147,11 @@ fn build_request(
             let base = resolve_base_url(&config.server_url, "https://sctapi.ftqq.com");
             let endpoint = format!("{}/{}.send", base, credential);
 
+            // Server酱 Turbo (sctapi.ftqq.com) 只接受 title / desp 两个字段：
+            // title 为标题，desp 为正文（支持 Markdown）。旧的 text 字段已废弃，
+            // 误传会被忽略，导致正文丢失。
             Ok(client.post(endpoint).form(&[
                 ("title", title),
-                ("text", title),
                 ("desp", body),
             ]))
         }

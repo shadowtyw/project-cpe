@@ -70,13 +70,48 @@ import type {
   WebhookConfig,
   WebhookTestResponse,
   SmsPushConfig,
+  MemoryProcessesResponse,
+  RestartConfig,
   RefreshConfigResponse,
   OtaStatusResponse,
   OtaUploadResponse,
+  LogsResponse,
+  DiagnosticReport,
+  ConfigBackupMap,
+  TrafficStatsResponse,
+  TrafficAlertRequest,
+  ScheduleConfig,
 } from './types'
 
 // API 基础配置
 const API_BASE = '/api'
+const API_TOKEN_STORAGE_KEY = 'udx710-api-token'
+
+export function getApiToken(): string {
+  return localStorage.getItem(API_TOKEN_STORAGE_KEY)?.trim() ?? ''
+}
+
+export function setApiToken(token: string): void {
+  const normalized = token.trim()
+  if (normalized) {
+    localStorage.setItem(API_TOKEN_STORAGE_KEY, normalized)
+  } else {
+    localStorage.removeItem(API_TOKEN_STORAGE_KEY)
+  }
+}
+
+interface ApiResponseLike {
+  status?: string
+  message?: string
+}
+
+function assertApiSuccess<T>(payload: T): T {
+  const response = payload as T & ApiResponseLike
+  if (response.status === 'error') {
+    throw new Error(response.message || '设备拒绝了请求')
+  }
+  return payload
+}
 
 // 通用请求函数
 async function request<T>(
@@ -84,24 +119,70 @@ async function request<T>(
   options: RequestInit & { returnText?: boolean } = {}
 ): Promise<T> {
   const { returnText, ...fetchOptions } = options
-  
-  const response = await fetch(`${API_BASE}${url}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...fetchOptions.headers,
-    },
-    ...fetchOptions,
-  })
+  const token = typeof window === 'undefined' ? '' : getApiToken()
 
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`)
+  // 网络错误时指数退避：连续失败后延长轮询间隔，避免设备恢复后请求风暴。
+  // 成功响应自动重置退避计数器。
+  try {
+    const response = await fetch(`${API_BASE}${url}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...fetchOptions.headers,
+      },
+      ...fetchOptions,
+    })
+
+    if (!response.ok) {
+      let message = `HTTP error! status: ${response.status}`
+      try {
+        const payload = await response.json() as ApiResponseLike
+        message = payload.message || message
+      } catch {
+        // Keep the HTTP status fallback when the body is not JSON.
+      }
+      throw new Error(message)
+    }
+
+    recordRequestSuccess()
+
+    if (returnText) {
+      return (await response.text()) as T
+    }
+
+    return assertApiSuccess(await response.json() as T)
+  } catch (error) {
+    recordRequestFailure()
+    throw error
   }
+}
 
-  if (returnText) {
-    return (await response.text()) as T
-  }
+// 指数退避配置：连续失败后逐渐延长轮询间隔，避免网络恢复后请求风暴。
+const BACKOFF_BASE_MS = 2000
+const BACKOFF_MAX_MS = 60_000
+let consecutiveFailures = 0
+let backoffUntil = 0
 
-  return await response.json() as T
+function recordRequestSuccess() {
+  consecutiveFailures = 0
+  backoffUntil = 0
+}
+
+function recordRequestFailure() {
+  consecutiveFailures = Math.min(consecutiveFailures + 1, 10)
+  // 指数退避：2s, 4s, 8s, 16s, 32s, 60s (cap)
+  const delay = Math.min(BACKOFF_BASE_MS * Math.pow(2, consecutiveFailures - 1), BACKOFF_MAX_MS)
+  backoffUntil = Date.now() + delay
+}
+
+/** 当前是否处于退避静默期。调用方可在发起请求前检查，跳过本轮轮询。 */
+export function isInBackoff(): boolean {
+  return Date.now() < backoffUntil
+}
+
+/** 退避剩余毫秒数（用于 UI 展示）。 */
+export function backoffRemainingMs(): number {
+  return Math.max(0, backoffUntil - Date.now())
 }
 
 // API 类
@@ -209,6 +290,11 @@ class UDX710API {
       body: JSON.stringify(body),
       returnText: true,
     })
+  }
+
+  // 获取内存占用最高的进程
+  async getMemoryProcesses() {
+    return request<ApiResponse<MemoryProcessesResponse>>('/system/memory-processes')
   }
 
   // 获取实时网速信息
@@ -595,6 +681,17 @@ class UDX710API {
     })
   }
 
+  async getRestartConfig() {
+    return request<ApiResponse<RestartConfig>>('/restart/config')
+  }
+
+  async setRestartConfig(config: RestartConfig) {
+    return request<ApiResponse<RestartConfig>>('/restart/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
   // ========== OTA 更新 ==========
 
   // 获取 OTA 状态
@@ -609,14 +706,33 @@ class UDX710API {
       body: file,
       headers: {
         'Content-Type': 'application/octet-stream',
+        ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}),
       },
     })
-    return response.json() as Promise<ApiResponse<OtaUploadResponse>>
+    if (!response.ok) {
+      let message = `HTTP error! status: ${response.status}`
+      try {
+        const payload = await response.json() as ApiResponseLike
+        message = payload.message || message
+      } catch {
+        // Keep the HTTP status fallback when the body is not JSON.
+      }
+      throw new Error(message)
+    }
+    return assertApiSuccess(await response.json() as ApiResponse<OtaUploadResponse>)
   }
 
-  // 应用 OTA 更新
-  async applyOta(restartNow: boolean = false) {
+  // 应用 OTA 更新；同版本或降级包必须显式允许。
+  async applyOta(restartNow: boolean = false, allowDowngrade: boolean = false) {
     return request<ApiResponse<{ applied: boolean }>>('/ota/apply', {
+      method: 'POST',
+      body: JSON.stringify({ restart_now: restartNow, allow_downgrade: allowDowngrade }),
+    })
+  }
+
+  // 恢复设备保留的上一版本。
+  async rollbackOta(restartNow: boolean = true) {
+    return request<ApiResponse<{ rolled_back: boolean }>>('/ota/rollback', {
       method: 'POST',
       body: JSON.stringify({ restart_now: restartNow }),
     })
@@ -626,6 +742,66 @@ class UDX710API {
   async cancelOta() {
     return request<ApiResponse<Record<string, unknown>>>('/ota/cancel', {
       method: 'POST',
+    })
+  }
+
+  // ========== 运行日志 ==========
+
+  // 读取内存中的运行日志。min_level: 0=debug 1=info 2=warn 3=error
+  async getLogs(minLevel: number = 0, limit: number = 200) {
+    return request<ApiResponse<LogsResponse>>(
+      `/logs?min_level=${minLevel}&limit=${limit}`,
+    )
+  }
+
+  async clearLogs() {
+    return request<ApiResponse<Record<string, unknown>>>('/logs/clear', {
+      method: 'POST',
+    })
+  }
+
+  // ========== 一键诊断 ==========
+
+  async getDiagnosticReport() {
+    return request<ApiResponse<DiagnosticReport>>('/diag/report')
+  }
+
+  // ========== 配置备份/恢复 ==========
+
+  async exportConfig() {
+    return request<ApiResponse<ConfigBackupMap>>('/config/backup/export')
+  }
+
+  async importConfig(config: ConfigBackupMap) {
+    return request<ApiResponse<Record<string, unknown>>>('/config/backup/import', {
+      method: 'POST',
+      body: JSON.stringify({ config }),
+    })
+  }
+
+  // ========== 流量统计 ==========
+
+  async getTrafficStats() {
+    return request<ApiResponse<TrafficStatsResponse>>('/traffic/stats')
+  }
+
+  async setTrafficAlert(config: TrafficAlertRequest) {
+    return request<ApiResponse<Record<string, unknown>>>('/traffic/alert', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  // ========== 定时计划 ==========
+
+  async getScheduleConfig() {
+    return request<ApiResponse<ScheduleConfig>>('/schedule/config')
+  }
+
+  async setScheduleConfig(config: ScheduleConfig) {
+    return request<ApiResponse<ScheduleConfig>>('/schedule/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
     })
   }
 

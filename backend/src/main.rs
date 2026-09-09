@@ -21,32 +21,40 @@
 
 use anyhow::Result;
 use axum::{
-    routing::get, 
-    routing::post, 
+    routing::get,
+    routing::post,
     Router,
     response::{IntoResponse, Response},
     http::{StatusCode, Uri},
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, Request},
+    middleware::{self, Next},
 };
 use clap::Parser;
+use std::future::Future;
 use std::sync::Arc;
-use std::path::PathBuf;
-use tower_http::cors::{CorsLayer, Any};
+use std::path::{Component, PathBuf};
+use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use zbus::Connection;
 
+mod call_control;
 mod config;
 mod db;
 mod dbus;
 mod handlers;
 mod iptables;
+mod log_buffer;
 mod models;
 mod ota;
+mod process_monitor;
+mod restart;
+mod schedule;
 mod serial;
 mod sms_push;
 mod sms_listener;
 mod state;
+mod traffic;
 mod usb_switch;
 mod utils;
 mod webhook;
@@ -73,11 +81,49 @@ fn get_www_dir() -> PathBuf {
     exe_dir.join("www")
 }
 
+/// Protect management APIs when UDX710_API_TOKEN is configured.
+/// Keeping the token optional preserves compatibility for existing devices; production
+/// deployments should always set it in the service environment.
+async fn api_auth(
+    expected_token: Option<String>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/api/")
+        || path == "/api/health"
+        || request.method() == axum::http::Method::OPTIONS
+    {
+        return next.run(request).await;
+    }
+
+    match expected_token {
+        Some(token) => {
+            let authorized = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.strip_prefix("Bearer ") == Some(token.as_str()));
+            if authorized {
+                next.run(request).await
+            } else {
+                (StatusCode::UNAUTHORIZED, "Missing or invalid API token").into_response()
+            }
+        }
+        None => next.run(request).await,
+    }
+}
+
 /// SPA fallback handler - 对于所有前端路由返回 index.html
 async fn spa_fallback(uri: Uri) -> Response {
     let path = uri.path();
-    
-    // 如果是 API 路由，返回 404（不应该走到这里，但作为保险）
+    if PathBuf::from(path)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
+
     if path.starts_with("/api/") {
         return (StatusCode::NOT_FOUND, "API endpoint not found").into_response();
     }
@@ -130,7 +176,7 @@ async fn spa_fallback(uri: Uri) -> Response {
     }
 }
 
-/// R106 Backend Service - UDX710 5G/LTE 模块管理服务
+/// UDX710 Backend Service - UDX710 5G/LTE 模块管理服务
 #[derive(Parser, Debug)]
 #[command(name = "udx710")]
 #[command(author, version, about, long_about = None)]
@@ -148,17 +194,24 @@ struct Args {
 async fn main() -> Result<()> {
     // 初始化 tracing 日志框架
     // 通过 RUST_LOG 环境变量控制日志级别，默认为 info
+    // fmt layer 输出到终端（进程 stdout），LogBufferLayer 转发到内存环形缓冲，
+    // 使“系统日志”页面能看到与进程真实输出一致的运行日志。
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(log_buffer::LogBufferLayer)
         .init();
 
     // 解析命令行参数
     let args = Args::parse();
     let bind_addr = format!("{}:{}", args.host, args.port);
 
+    // 启动日志写入内存缓冲，确保"系统日志"页面在进程启动后立即有内容可看
+    log_entry!(info, "app", "CPE backend v{} starting (commit {})", env!("APP_VERSION"), env!("GIT_COMMIT"));
+
     // Connect to system D-Bus
     let dbus_conn = Arc::new(Connection::system().await?);
+    log_entry!(info, "app", "D-Bus system connection established");
     
     // 创建 SMS 数据库（存储在可执行文件同级目录）
     let db_path = get_persistent_root_dir().join("data.db");
@@ -179,6 +232,7 @@ async fn main() -> Result<()> {
             }
         }
     }
+    log_entry!(info, "app", "Database initialized at {:?}", db_path);
     let app_db = Arc::new(Database::new(db_path)?);
     
     // 初始化配置管理器
@@ -189,6 +243,17 @@ async fn main() -> Result<()> {
     if let Err(err) = ensure_loader_hooks_init() {
         warn!(error = %err, "Failed to ensure loader bootstrap");
     }
+    // 启动时检查并恢复中断的 OTA 安装（进程崩溃/断电导致的中断状态）。
+    ota::recover_interrupted_ota();
+    // route_test.sh adds the rule after its five-second boot delay. Remove only this
+    // known USB-to-cellular DROP rule twice after startup; do not flush firewall tables.
+    usb_switch::remove_usb_uplink_drop_rules();
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
+        usb_switch::remove_usb_uplink_drop_rules();
+        tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
+        usb_switch::remove_usb_uplink_drop_rules();
+    });
     
     // 初始化 Webhook 发送器
     let webhook_sender = Arc::new(WebhookSender::new(Arc::clone(&config_manager)));
@@ -197,22 +262,93 @@ async fn main() -> Result<()> {
     
     // 启动 SMS 监听线程
     {
-        let conn_clone = Connection::system().await?;
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
         let sms_push_clone = Arc::clone(&sms_push_sender);
         tokio::spawn(async move {
-            let _ = sms_listener::start_sms_listener(conn_clone, db_clone, webhook_clone, sms_push_clone).await;
+            supervise("sms_listener", move || {
+                let db_clone = Arc::clone(&db_clone);
+                let webhook_clone = Arc::clone(&webhook_clone);
+                let sms_push_clone = Arc::clone(&sms_push_clone);
+                async move {
+                    loop {
+                        match Connection::system().await {
+                            Ok(conn) => {
+                                if let Err(error) = sms_listener::start_sms_listener(
+                                    conn,
+                                    Arc::clone(&db_clone),
+                                    Arc::clone(&webhook_clone),
+                                    Arc::clone(&sms_push_clone),
+                                )
+                                .await
+                                {
+                                    warn!(error = %error, "SMS listener stopped");
+                                }
+                            }
+                            Err(error) => warn!(error = %error, "Failed to connect SMS listener to system D-Bus"),
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
+                }
+            })
+            .await;
         });
     }
-    
+
     // 启动电话监听线程（包括通话记录存储）
     {
-        let conn_clone = Connection::system().await?;
         let db_clone = Arc::clone(&app_db);
         let webhook_clone = Arc::clone(&webhook_sender);
+        let config_manager_clone = Arc::clone(&config_manager);
         tokio::spawn(async move {
-            let _ = sms_listener::start_call_listener(conn_clone, db_clone, webhook_clone).await;
+            supervise("call_listener", move || {
+                let db_clone = Arc::clone(&db_clone);
+                let webhook_clone = Arc::clone(&webhook_clone);
+                let config_manager_clone = Arc::clone(&config_manager_clone);
+                async move {
+                    loop {
+                        match Connection::system().await {
+                            Ok(conn) => {
+                                if let Err(error) = sms_listener::start_call_listener(
+                                    conn,
+                                    Arc::clone(&db_clone),
+                                    Arc::clone(&webhook_clone),
+                                    Arc::clone(&config_manager_clone),
+                                )
+                                .await
+                                {
+                                    warn!(error = %error, "Call listener stopped");
+                                }
+                            }
+                            Err(error) => warn!(error = %error, "Failed to connect call listener to system D-Bus"),
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
+    // 通话遥控轮询：周期检查白名单来电接通计时是否到期，到期执行动作。
+    {
+        let conn_clone = Arc::clone(&dbus_conn);
+        let config_manager_clone = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            supervise("call_control_poll", move || {
+                let conn_clone = Arc::clone(&conn_clone);
+                let config_manager_clone = Arc::clone(&config_manager_clone);
+                async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        let config = config_manager_clone.get_call_control();
+                        if config.enabled {
+                            crate::call_control::poll(&conn_clone, &config).await;
+                        }
+                    }
+                }
+            })
+            .await;
         });
     }
     
@@ -233,18 +369,101 @@ async fn main() -> Result<()> {
         let config_manager = Arc::clone(&config_manager);
         let frontend_runtime = Arc::clone(&frontend_runtime);
         tokio::spawn(async move {
-            // 初始延迟 5 秒，等待系统稳定
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            tracing::info!("Watchdog started");
-            dbus::data_connection_watchdog(conn_clone, config_manager, frontend_runtime).await;
+            supervise("data_connection_watchdog", move || {
+                let conn_clone = Arc::clone(&conn_clone);
+                let config_manager = Arc::clone(&config_manager);
+                let frontend_runtime = Arc::clone(&frontend_runtime);
+                async move {
+                    // 初始延迟 5 秒，等待系统稳定
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tracing::info!("Watchdog started");
+                    log_entry!(info, "app", "Data connection watchdog started");
+                    dbus::data_connection_watchdog(conn_clone, config_manager, frontend_runtime).await;
+                }
+            })
+            .await;
         });
     }
 
-    // CORS 配置：允许前端开发服务器跨域访问
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // 自动重启策略默认关闭；任务只在服务启动时创建一次。
+    {
+        let config_manager = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            supervise("restart_watchdog", move || {
+                let config_manager = Arc::clone(&config_manager);
+                async move {
+                    restart::restart_watchdog(config_manager).await;
+                }
+            })
+            .await;
+        });
+    }
+
+    // 定时计划 watchdog（默认无计划项，不改变既有行为）
+    {
+        let conn_clone = Arc::clone(&dbus_conn);
+        let config_manager = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            supervise("schedule_watchdog", move || {
+                let conn_clone = Arc::clone(&conn_clone);
+                let config_manager = Arc::clone(&config_manager);
+                async move {
+                    schedule::schedule_watchdog(conn_clone, config_manager).await;
+                }
+            })
+            .await;
+        });
+    }
+
+    // 流量统计与用量预警 watchdog（低频采样，晚 60 秒启动避免与启动扫描抢占）
+    {
+        let db_clone = Arc::clone(&app_db);
+        let config_manager = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            supervise("traffic_watchdog", move || {
+                let db_clone = Arc::clone(&db_clone);
+                let config_manager = Arc::clone(&config_manager);
+                async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    traffic::traffic_watchdog(db_clone, config_manager).await;
+                }
+            })
+            .await;
+        });
+    }
+
+    // 数据库定期清理：短信/通话记录只保留最近 N 条。设备 flash 容量有限，
+    // 若不清理，data.db 会无限增长直至占满 /data 分区，导致服务无法写库。
+    {
+        let db_clone = Arc::clone(&app_db);
+        tokio::spawn(async move {
+            supervise("db_cleanup", move || {
+                let db_clone = Arc::clone(&db_clone);
+                async move {
+                    // 延迟启动，避免与启动阶段的读库扫描抢占。
+                    tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+                    loop {
+                        const SMS_KEEP: i64 = 2000;
+                        const CALL_KEEP: i64 = 1000;
+                        if let Err(e) = db_clone.cleanup_old_sms(SMS_KEEP) {
+                            crate::log_entry!(warn, "db", "SMS history cleanup failed: {}", e);
+                        }
+                        if let Err(e) = db_clone.cleanup_old_calls(CALL_KEEP) {
+                            crate::log_entry!(warn, "db", "Call history cleanup failed: {}", e);
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
+    // Static frontend and API share one origin in production. Cross-origin access
+    // is disabled unless the deployment explicitly adds an origin policy.
+    let cors = CorsLayer::new();
+
+    let api_token = std::env::var("UDX710_API_TOKEN").ok().filter(|token| !token.trim().is_empty());
 
     // 创建统一的应用状态
     let app_state = AppState::new(
@@ -318,9 +537,11 @@ async fn main() -> Result<()> {
         .route("/api/usb-advance", post(set_usb_mode_advanced).options(options_handler))
         // ========== 系统接口 ==========
         .route("/api/stats", get(get_system_stats).options(options_handler))
+        .route("/api/system/memory-processes", get(get_memory_processes).options(options_handler))
         .route("/api/stats/cpu", get(get_cpu_info).options(options_handler))
         .route("/api/connectivity", get(get_connectivity_check).options(options_handler))
         .route("/api/system/reboot", post(system_reboot).options(options_handler))
+        .route("/api/restart/config", get(get_restart_config_handler).post(set_restart_config_handler).options(options_handler))
         .route("/api/health", get(health_check))
         // ========== init.sh 管理接口 ==========
         .route("/api/init-script", get(get_init_script_handler).post(set_init_script_handler).options(options_handler))
@@ -337,9 +558,27 @@ async fn main() -> Result<()> {
         .route("/api/ota/upload", post(upload_ota_handler).options(options_handler)
             .layer(DefaultBodyLimit::max(50 * 1024 * 1024))) // 50MB 限制
         .route("/api/ota/apply", post(apply_ota_handler).options(options_handler))
+        .route("/api/ota/rollback", post(rollback_ota_handler).options(options_handler))
         .route("/api/ota/cancel", post(cancel_ota_handler).options(options_handler))
+        // ========== 运行日志接口 ==========
+        .route("/api/logs", get(get_logs_handler).options(options_handler))
+        .route("/api/logs/clear", post(clear_logs_handler).options(options_handler))
+        // ========== 一键诊断接口 ==========
+        .route("/api/diag/report", get(get_diagnostic_report).options(options_handler))
+        // ========== 配置备份/恢复接口 ==========
+        .route("/api/config/backup/export", get(export_config_handler).options(options_handler))
+        .route("/api/config/backup/import", post(import_config_handler).options(options_handler))
+        // ========== 流量统计接口 ==========
+        .route("/api/traffic/stats", get(get_traffic_stats_handler).options(options_handler))
+        .route("/api/traffic/alert", post(set_traffic_alert_handler).options(options_handler))
+        // ========== 定时计划接口 ==========
+        .route("/api/schedule/config", get(get_schedule_config_handler).post(set_schedule_config_handler).options(options_handler))
+        // ========== 通话遥控接口 ==========
+        .route("/api/call-control/config", get(get_call_control_config_handler).post(set_call_control_config_handler).options(options_handler))
+        .route("/api/call-control/status", get(get_call_control_status_handler).options(options_handler))
         // ========== 统一状态和中间件 ==========
         .with_state(app_state)
+        .layer(middleware::from_fn(move |request, next| api_auth(api_token.clone(), request, next)))
         .layer(cors)
         .fallback(spa_fallback);
 
@@ -354,13 +593,39 @@ async fn main() -> Result<()> {
 
     // 绑定端口，如果被占用则轮询等待（最多 30 秒）
     let listener = bind_with_retry(&bind_addr, 30).await?;
-    info!(addr = %bind_addr, "Server listening");
+    log_entry!(info, "app", "Server listening on {}", bind_addr);
     // 使用优雅关闭
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     Ok(())
+}
+
+/// 监督一个长期运行的后台任务：panic 或意外返回时自动重启。
+///
+/// 之前所有后台 watchdog / 监听器的 `JoinHandle` 都被丢弃，一旦内部 panic，该任务就
+/// 永久退出，对应功能（数据连接恢复、自动重启、短信接收等）静默失效直到整机重启。
+/// 由 `supervise` 包裹后，panic 会被拦截记录，并在短暂延迟后重新拉起任务。
+async fn supervise<F, Fut>(name: &'static str, task: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let mut restarts = 0u32;
+    loop {
+        let handle = tokio::spawn(task());
+        match handle.await {
+            Ok(()) => {
+                tracing::warn!(name, restarts, "background task returned unexpectedly; restarting");
+            }
+            Err(error) => {
+                tracing::error!(name, restarts, error = %error, "background task panicked; restarting");
+            }
+        }
+        restarts = restarts.saturating_add(1);
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// 绑定端口，如果被占用则轮询等待
