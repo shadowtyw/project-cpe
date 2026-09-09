@@ -386,7 +386,7 @@ fn wait_for_functionfs_mount() -> Result<(), String> {
 /// - 建议使用模式 1 (NCM) 以获得最佳兼容性
 pub fn switch_usb_mode_advanced(mode: u8) -> Result<(), String> {
     let config = UsbModeConfig::get(mode)
-        .ok_or_else(|| format!(“Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS, 4=NCM(no ADB)”, mode))?;
+        .ok_or_else(|| format!("Invalid USB mode: {}. Valid modes: 1=NCM, 2=ECM, 3=RNDIS, 4=NCM(no ADB)", mode))?;
 
     // 在禁用 gadget 前捕获现有地址，避免重新枚举后丢失用户的管理网段。
     let usb_interface_ip = resolve_usb_interface_ip();
