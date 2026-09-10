@@ -748,11 +748,15 @@ export interface SmsControlConfigResponse {
 
 // ========== 通话遥控配置 ==========
 
+export interface CallControlActionItem {
+  hold_seconds: number
+  action: ScheduleAction
+}
+
 export interface CallControlConfig {
   enabled: boolean
   numbers: string[]
-  hold_seconds: number
-  action: ScheduleAction
+  actions: CallControlActionItem[]
 }
 
 export interface CallControlTrigger {

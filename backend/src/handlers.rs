@@ -3550,8 +3550,10 @@ pub async fn get_call_control_config_handler(
     let response = CallControlConfigResponse {
         enabled: config.enabled,
         numbers: config.numbers.clone(),
-        hold_seconds: config.hold_seconds,
-        action: config.action,
+        actions: config.actions.into_iter().map(|a| CallControlActionResponse {
+            hold_seconds: a.hold_seconds,
+            action: a.action,
+        }).collect(),
     };
     (
         StatusCode::OK,
@@ -3573,8 +3575,10 @@ pub async fn set_call_control_config_handler(
                 CallControlConfigResponse {
                     enabled: config.enabled,
                     numbers: config.numbers.clone(),
-                    hold_seconds: config.hold_seconds,
-                    action: config.action,
+                    actions: config.actions.into_iter().map(|a| CallControlActionResponse {
+                        hold_seconds: a.hold_seconds,
+                        action: a.action,
+                    }).collect(),
                 },
             )),
         ),

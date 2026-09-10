@@ -18,7 +18,6 @@ import {
   MenuItem as MuiMenuItem,
   Select,
   FormControl,
-  InputLabel,
   Snackbar,
   Card,
   CardContent,
@@ -74,8 +73,7 @@ export default function RemoteControl() {
   const [callConfig, setCallConfig] = useState<CallControlConfig>({
     enabled: false,
     numbers: [],
-    hold_seconds: 15,
-    action: 'reboot',
+    actions: [],
   })
   const [callTrigger, setCallTrigger] = useState<CallControlTrigger | null>(null)
   const [callLoading, setCallLoading] = useState(false)
@@ -293,7 +291,7 @@ export default function RemoteControl() {
           ) : (
             <Stack spacing={3}>
               <Alert severity="info">
-                白名单号码拨打电话时，设备会自动接听并保持通话指定时长，然后执行预设动作。
+                白名单号码拨打电话时，设备会自动接听，接通后所有动作同时计时，各自在到达等待时长后触发。
               </Alert>
 
               <FormControlLabel
@@ -352,7 +350,7 @@ export default function RemoteControl() {
                     placeholder="输入手机号码"
                     value={newNumber}
                     onChange={(e) => setNewNumber(e.target.value)}
-                    onKeyPress={(e) => {
+                    onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault()
                         handleAddNumber()
@@ -380,41 +378,107 @@ export default function RemoteControl() {
                 )}
               </Box>
 
-              {/* Hold Seconds */}
-              <TextField
-                type="number"
-                label="等待时长（秒）"
-                value={callConfig.hold_seconds}
-                onChange={(e) =>
-                  setCallConfig({
-                    ...callConfig,
-                    hold_seconds: Math.max(5, Math.min(3600, parseInt(e.target.value) || 15)),
-                  })
-                }
-                inputProps={{ min: 5, max: 3600 }}
-                helperText="范围 5-3600 秒，默认 15 秒"
-              />
+              <Divider />
 
-              {/* Action Selector */}
-              <FormControl fullWidth>
-                <InputLabel>执行动作</InputLabel>
-                <Select
-                  value={callConfig.action}
-                  label="执行动作"
-                  onChange={(e) =>
-                    setCallConfig({
-                      ...callConfig,
-                      action: e.target.value as ScheduleAction,
-                    })
-                  }
-                >
-                  {Object.entries(ACTION_LABELS).map(([value, label]) => (
-                    <MuiMenuItem key={value} value={value}>
-                      {label}
-                    </MuiMenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+              {/* Action List */}
+              <Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="subtitle2">
+                    遥控动作列表
+                  </Typography>
+                  <Button
+                    size="small"
+                    startIcon={<AddIcon />}
+                    onClick={() => {
+                      if (callConfig.actions.length >= 10) return
+                      setCallConfig({
+                        ...callConfig,
+                        actions: [...callConfig.actions, { hold_seconds: 15, action: 'reboot' }],
+                      })
+                    }}
+                    disabled={callConfig.actions.length >= 10}
+                  >
+                    添加动作
+                  </Button>
+                </Box>
+                {callConfig.actions.length > 0 ? (
+                  <Stack spacing={2}>
+                    {callConfig.actions
+                      .map((a, i) => ({ ...a, _idx: i }))
+                      .sort((a, b) => a.hold_seconds - b.hold_seconds)
+                      .map((item) => (
+                        <Box
+                          key={item._idx}
+                          sx={{
+                            display: 'flex',
+                            gap: 1,
+                            alignItems: 'center',
+                            p: 1.5,
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1,
+                          }}
+                        >
+                          <TextField
+                            type="number"
+                            size="small"
+                            label="等待(秒)"
+                            value={item.hold_seconds}
+                            onChange={(e) => {
+                              const newActions = [...callConfig.actions]
+                              newActions[item._idx] = {
+                                ...newActions[item._idx],
+                                hold_seconds: Math.max(5, Math.min(3600, parseInt(e.target.value) || 5)),
+                              }
+                              setCallConfig({ ...callConfig, actions: newActions })
+                            }}
+                            inputProps={{ min: 5, max: 3600 }}
+                            sx={{ width: 110 }}
+                          />
+                          <FormControl size="small" sx={{ flex: 1 }}>
+                            <Select
+                              value={item.action}
+                              onChange={(e) => {
+                                const newActions = [...callConfig.actions]
+                                newActions[item._idx] = {
+                                  ...newActions[item._idx],
+                                  action: e.target.value as ScheduleAction,
+                                }
+                                setCallConfig({ ...callConfig, actions: newActions })
+                              }}
+                            >
+                              {Object.entries(ACTION_LABELS).map(([value, label]) => (
+                                <MuiMenuItem key={value} value={value}>
+                                  {label}
+                                </MuiMenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          <IconButton
+                            size="small"
+                            color="error"
+                            onClick={() => {
+                              setCallConfig({
+                                ...callConfig,
+                                actions: callConfig.actions.filter((_, i) => i !== item._idx),
+                              })
+                            }}
+                          >
+                            <DeleteIcon />
+                          </IconButton>
+                        </Box>
+                      ))}
+                  </Stack>
+                ) : (
+                  <Alert severity="warning">
+                    尚未配置遥控动作，请点击"添加动作"创建。接通后所有动作同时计时，按等待时长依次触发。
+                  </Alert>
+                )}
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  最多 10 条动作。所有动作从接通时刻同时开始计时，互不干扰。
+                  飞行模式相关动作会在 10 秒后自动恢复网络。
+                </Typography>
+              </Box>
 
               <Button
                 variant="contained"

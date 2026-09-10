@@ -1369,13 +1369,19 @@ pub struct ScheduleConfigResponse {
     pub tolerance_min: u8,
 }
 
+/// 通话遥控单条动作响应
+#[derive(Debug, Serialize)]
+pub struct CallControlActionResponse {
+    pub hold_seconds: u64,
+    pub action: crate::config::ScheduleAction,
+}
+
 /// 通话遥控配置响应（镜像 config::CallControlConfig）
 #[derive(Debug, Serialize, Default)]
 pub struct CallControlConfigResponse {
     pub enabled: bool,
     pub numbers: Vec<String>,
-    pub hold_seconds: u64,
-    pub action: crate::config::ScheduleAction,
+    pub actions: Vec<CallControlActionResponse>,
 }
 
 // ============ 通话遥控模型 ============

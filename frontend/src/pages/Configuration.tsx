@@ -1061,31 +1061,6 @@ export default function ConfigurationPage() {
           </AccordionDetails>
         </Accordion>
 
-        {/* 短信遥控配置 - 已迁移 */}
-        <Accordion
-          expanded={expanded === 'smsControl'}
-          onChange={handleAccordionChange('smsControl')}
-        >
-          <AccordionSummary expandIcon={<ExpandMore />}>
-            <Box display="flex" alignItems="center" gap={1} width="100%">
-              <Sms color="primary" />
-              <Typography fontWeight={600}>短信遥控</Typography>
-              <Box flexGrow={1} />
-              <Chip
-                label="已迁移"
-                color="default"
-                size="small"
-                onClick={(event: MouseEvent) => event.stopPropagation()}
-              />
-            </Box>
-          </AccordionSummary>
-          <AccordionDetails>
-            <Alert severity="info" sx={{ mb: 2 }}>
-              短信遥控和通话遥控配置已迁移到「远程遥控」页面，请在左侧菜单中访问。
-            </Alert>
-          </AccordionDetails>
-        </Accordion>
-
         {/* USB 配置 */}
         <Accordion
           expanded={expanded === 'usbConfig'}

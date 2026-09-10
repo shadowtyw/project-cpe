@@ -359,8 +359,18 @@ fn default_schedule_tolerance_min() -> u8 {
     1
 }
 
+/// 通话遥控的单条动作：独立的等待时长 + 执行动作。
+/// 多条动作从接通时刻同时计时，各自在到达 hold_seconds 时触发。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallControlAction {
+    #[serde(default = "default_call_hold_seconds")]
+    pub hold_seconds: u64,
+    #[serde(default = "default_call_action")]
+    pub action: ScheduleAction,
+}
+
 /// 通话远程控制配置。默认关闭；启用后，指定号码来电自动接听，接通后
-/// 保持通话达到 `hold_seconds` 秒即执行配置的动作（默认重启）。
+/// 每条动作独立计时，到达各自的 hold_seconds 时触发对应动作。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallControlConfig {
     #[serde(default)]
@@ -369,12 +379,11 @@ pub struct CallControlConfig {
     /// 从而兼容来电显示带 "+86" 或国家码前缀的情况。
     #[serde(default)]
     pub numbers: Vec<String>,
-    /// 接通后需要保持通话的秒数，达到后执行动作。
-    #[serde(default = "default_call_hold_seconds")]
-    pub hold_seconds: u64,
-    /// 达到保持时长后执行的动作。
-    #[serde(default = "default_call_action")]
-    pub action: ScheduleAction,
+    /// 多条遥控动作，每条配置独立的等待时长和动作。
+    /// 所有动作从接通时刻同时计时，各自在到达 hold_seconds 时触发。
+    /// 推荐按 hold_seconds 升序排列。
+    #[serde(default)]
+    pub actions: Vec<CallControlAction>,
 }
 
 fn default_call_hold_seconds() -> u64 {
@@ -390,8 +399,7 @@ impl Default for CallControlConfig {
         Self {
             enabled: false,
             numbers: Vec::new(),
-            hold_seconds: default_call_hold_seconds(),
-            action: default_call_action(),
+            actions: Vec::new(),
         }
     }
 }
@@ -458,7 +466,6 @@ fn valid_schedule_time(time: &str) -> bool {
 
 impl CallControlConfig {
     pub fn sanitize(mut self) -> Self {
-        self.hold_seconds = self.hold_seconds.clamp(5, 3600);
         // 号码去空白、去连字符，过滤空项并去重。
         let mut seen = std::collections::HashSet::new();
         self.numbers = self
@@ -467,6 +474,11 @@ impl CallControlConfig {
             .map(|number| normalize_phone_number(&number))
             .filter(|number| !number.is_empty() && seen.insert(number.clone()))
             .collect();
+        // 每条动作的 hold_seconds 限定范围；最多保留 10 条。
+        for action in &mut self.actions {
+            action.hold_seconds = action.hold_seconds.clamp(5, 3600);
+        }
+        self.actions.truncate(10);
         self
     }
 }

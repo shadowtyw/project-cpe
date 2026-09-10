@@ -21,6 +21,7 @@
 //! - 短信遥控有独立的 `SmsControlConfig.enabled` 开关，与通话遥控互不干扰。
 //! - 命中指令的短信不会触发 Webhook/短信推送转发，避免把控制指令泄漏到第三方平台。
 //! - 每条指令执行后都会回复一条确认短信，耗费一条普通短信费。
+//! - 开启飞行模式（#飞行开# / #关射频#）后 10 秒自动恢复网络，防止设备永久断网。
 
 use std::time::Duration;
 
@@ -154,7 +155,10 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
         }
         "FLIGHTON" => {
             match crate::dbus::set_airplane_mode(conn, true).await {
-                Ok(()) => "[UDX710] 飞行模式已开启。".to_string(),
+                Ok(()) => {
+                    spawn_airplane_recovery(conn);
+                    "[UDX710] 飞行模式已开启，将在10秒后自动关闭并恢复网络。".to_string()
+                }
                 Err(e) => format!("[UDX710] 开启飞行模式失败：{}", e),
             }
         }
@@ -196,12 +200,32 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
         }
         "RADIOOFF" => {
             match crate::dbus::set_airplane_mode(conn, true).await {
-                Ok(()) => "[UDX710] 射频已关闭（飞行模式已开启）。".to_string(),
+                Ok(()) => {
+                    spawn_airplane_recovery(conn);
+                    "[UDX710] 射频已关闭，将在10秒后自动关闭飞行模式并恢复网络。".to_string()
+                }
                 Err(e) => format!("[UDX710] 关闭射频失败：{}", e),
             }
         }
         _ => "[UDX710] 未知指令。支持的命令请查看说明。".to_string(),
     }
+}
+
+/// 飞行模式自动恢复：10 秒后关闭飞行模式并开启数据连接。
+///
+/// 无论是短信遥控还是通话遥控触发的飞行模式，都通过此函数确保设备不因
+/// 远程指令而永久断网。恢复操作在独立后台任务中执行，不阻塞主流程。
+fn spawn_airplane_recovery(conn: &Connection) {
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        info!("Airplane mode auto-recovery: turning off airplane mode");
+        let _ = crate::dbus::set_airplane_mode(&conn, false).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        info!("Airplane mode auto-recovery: enabling data connection");
+        let _ = crate::dbus::set_data_connection(&conn, true).await;
+        info!("Airplane mode auto-recovery completed");
+    });
 }
 
 /// 构造设备状态回复短信。
