@@ -3736,7 +3736,7 @@ pub async fn get_mqtt_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
 ) -> impl IntoResponse {
     let config = config_manager.get_mqtt();
-    Json(ApiResponse::success(MqttConfigResponse {
+    Json(ApiResponse::success_with_message("Success", MqttConfigResponse {
         enabled: config.enabled,
         broker_list: config.broker_list,
         active_broker: config.active_broker,
@@ -3762,8 +3762,18 @@ pub async fn set_mqtt_config_handler(
         auth_token: config.auth_token,
     };
 
+    let resp = MqttConfigResponse {
+        enabled: mqtt_config.enabled,
+        broker_list: mqtt_config.broker_list.clone(),
+        active_broker: mqtt_config.active_broker.clone(),
+        port: mqtt_config.port,
+        topic_sub: mqtt_config.topic_sub.clone(),
+        topic_pub: mqtt_config.topic_pub.clone(),
+        auth_token: mqtt_config.auth_token.clone(),
+    };
+
     match config_manager.set_mqtt(mqtt_config) {
-        Ok(_) => Json(ApiResponse::success("MQTT configuration updated")),
+        Ok(_) => Json(ApiResponse::success_with_message("MQTT configuration updated", resp)),
         Err(e) => Json(ApiResponse::error(format!("Failed to save MQTT config: {}", e))),
     }
 }
@@ -3771,7 +3781,7 @@ pub async fn set_mqtt_config_handler(
 /// GET /api/mqtt/status - 获取 MQTT 连接状态
 pub async fn get_mqtt_status_handler() -> impl IntoResponse {
     let status = crate::mqtt_service::get_mqtt_status().await;
-    Json(ApiResponse::success(MqttStatusResponse {
+    Json(ApiResponse::success_with_message("Success", MqttStatusResponse {
         connected: status.connected,
         current_broker: status.current_broker,
         last_heartbeat: status.last_heartbeat,
