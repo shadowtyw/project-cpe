@@ -2,7 +2,7 @@
 
 面向成品 5G CPE / 通讯壳的 Web 管理系统。后端采用 Rust + Axum + zbus，通过 ofono D-Bus 管理 5G/LTE 调制解调器；前端基于 React + Vite + @tanstack/react-query，提供网络、短信、电话、频段、小区、USB、OTA、Webhook 和系统状态管理界面。
 
-> 当前版本：`3.6.0`  
+> 当前版本：`3.6.1`  
 > 目标平台：`aarch64-unknown-linux-musl`（展锐 UDX710 SoC）  
 > 授权协议：[GNU GPLv3](LICENSE)
 
