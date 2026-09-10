@@ -69,7 +69,7 @@ jobs:
 
       - name: Run Rust tests
         working-directory: backend
-        run: cargo test --locked
+        run: cargo test
 
       - name: Build backend for UDX710
         working-directory: backend
@@ -78,7 +78,7 @@ jobs:
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           export SQLITE3_STATIC=1
           export LIBSQLITE3_SYS_USE_PKG_CONFIG=0
-          cargo build --locked --release --target aarch64-unknown-linux-musl
+          cargo build --release --target aarch64-unknown-linux-musl
           file target/aarch64-unknown-linux-musl/release/udx710
           file target/aarch64-unknown-linux-musl/release/udx710 | grep -qi aarch64
 
