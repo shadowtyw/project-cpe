@@ -1411,7 +1411,7 @@ pub struct SmsControlConfigResponse {
 // ============ MQTT 远程控制模型 ============
 
 /// MQTT 配置响应（镜像 config::MqttConfig）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MqttConfigResponse {
     pub enabled: bool,
     pub broker_list: Vec<String>,
