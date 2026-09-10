@@ -233,19 +233,24 @@ export default function RemoteControl() {
 
               <Alert severity="info">
                 <Typography variant="subtitle2" gutterBottom>
-                  支持的指令：
+                  支持的指令（中英文均可）：
                 </Typography>
-                <ul>
-                  <li>
-                    <Chip label="#STATUS#" size="small" /> - 查询设备状态
-                  </li>
-                  <li>
-                    <Chip label="#REBOOT#" size="small" /> - 重启设备
-                  </li>
-                  <li>
-                    <Chip label="#RECONNECT#" size="small" /> - 重连网络
-                  </li>
-                </ul>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+                  <Chip label="#状态#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#重启#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#重连#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#飞行开#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#飞行关#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#数据开#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#数据关#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#仅4G#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#仅5G#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#自动#" size="small" color="primary" variant="outlined" />
+                  <Chip label="#关射频#" size="small" color="primary" variant="outlined" />
+                </Box>
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  也支持英文指令：#STATUS# #REBOOT# #RECONNECT# 等
+                </Typography>
               </Alert>
 
               <Box>

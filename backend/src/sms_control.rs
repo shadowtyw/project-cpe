@@ -3,10 +3,18 @@
 //! 当白名单号码（复用通话遥控的 `CallControlConfig.numbers`）发来特定格式的短信时，
 //! 设备执行对应动作。用于无数据网络环境下的外部应急通道——用手机给设备发短信即可遥控。
 //!
-//! ## 支持的指令
-//! - `#REBOOT#` — 延迟 3 秒重启系统
-//! - `#RECONNECT#` — 重置数据连接（断开→重连）
-//! - `#STATUS#` — 回复设备当前运行状态（信号强度、上网状态、运行时间等）
+//! ## 支持的指令（中英文均可）
+//! - `#STATUS#` / `#状态#` — 回复设备当前运行状态（信号强度、上网状态、运行时间等）
+//! - `#REBOOT#` / `#重启#` — 延迟 3 秒重启系统
+//! - `#RECONNECT#` / `#重连#` — 重置数据连接（断开→重连）
+//! - `#FLIGHTON#` / `#飞行开#` — 开启飞行模式
+//! - `#FLIGHTOFF#` / `#飞行关#` — 关闭飞行模式
+//! - `#DATAON#` / `#数据开#` — 开启数据连接
+//! - `#DATAOFF#` / `#数据关#` — 关闭数据连接
+//! - `#RADIOLTE#` / `#仅4G#` — 仅 4G
+//! - `#RADIONR#` / `#仅5G#` — 仅 5G
+//! - `#RADIOAUTO#` / `#自动#` — 4G/5G 自动
+//! - `#RADIOOFF#` / `#关射频#` — 关闭射频
 //!
 //! ## 设计约束
 //! - 白名单复用通话遥控的 `CallControlConfig.numbers`，两项功能共用同一组管理员号码。
@@ -21,21 +29,40 @@ use zbus::Connection;
 
 use crate::config::{normalize_phone_number, ConfigManager};
 
-/// 短信指令关键字（不含前后 # 号）。匹配时忽略大小写，但要求前后各有一个 `#`。
-const COMMAND_REBOOT: &str = "REBOOT";
-const COMMAND_RECONNECT: &str = "RECONNECT";
-const COMMAND_STATUS: &str = "STATUS";
+/// 指令映射：统一的管理名称 → (英文关键词, 中文关键词)
+/// 英文关键词用于向后兼容，中文关键词用于用户易用性。
+const COMMANDS: &[(&str, &[&str])] = &[
+    ("STATUS", &["STATUS", "状态"]),
+    ("REBOOT", &["REBOOT", "重启"]),
+    ("RECONNECT", &["RECONNECT", "重连"]),
+    ("FLIGHTON", &["FLIGHTON", "飞行开"]),
+    ("FLIGHTOFF", &["FLIGHTOFF", "飞行关"]),
+    ("DATAON", &["DATAON", "数据开"]),
+    ("DATAOFF", &["DATAOFF", "数据关"]),
+    ("RADIOLTE", &["RADIOLTE", "仅4G", "仅 4G", "仅4g"]),
+    ("RADIONR", &["RADIONR", "仅5G", "仅 5G", "仅5g"]),
+    ("RADIOAUTO", &["RADIOAUTO", "自动"]),
+    ("RADIOOFF", &["RADIOOFF", "关射频"]),
+];
 
-/// 解析短信内容，返回命中的指令（不含 # 号），大小写敏感匹配失败返回 None。
-fn parse_command(content: &str) -> Option<&str> {
+/// 解析短信内容，返回命中的统一指令名，None 表示未命中。
+/// 格式：`#关键字#`，忽略大小写和前后空白。
+fn parse_command(content: &str) -> Option<&'static str> {
     let trimmed = content.trim();
-    for cmd in &[COMMAND_REBOOT, COMMAND_RECONNECT, COMMAND_STATUS] {
-        let pattern = format!("#{}#", cmd);
-        // 忽略大小写比较
-        if trimmed.len() >= pattern.len() {
-            let upper = trimmed.to_uppercase();
-            if upper == pattern.to_uppercase() {
-                return Some(cmd);
+    let upper = trimmed.to_uppercase();
+    // 去掉前后的 # 号
+    let inner = upper.strip_prefix('#').and_then(|s| s.strip_suffix('#'));
+    let inner = match inner {
+        Some(s) => s,
+        None => return None,
+    };
+    if inner.is_empty() {
+        return None;
+    }
+    for &(cmd_name, keywords) in COMMANDS {
+        for kw in keywords {
+            if inner == kw.to_uppercase() {
+                return Some(cmd_name);
             }
         }
     }
@@ -107,15 +134,16 @@ pub async fn handle_incoming_sms(
 
 /// 执行指令并返回回复短信内容。
 async fn execute_command(conn: &Connection, command: &str) -> String {
-    match command.to_uppercase().as_str() {
-        COMMAND_REBOOT => {
+    match command {
+        "STATUS" => build_status_reply(conn).await,
+        "REBOOT" => {
             if crate::restart::schedule_reboot("sms_control", 3) {
                 "[UDX710] 重启指令已收到，设备将在 3 秒后重启。".to_string()
             } else {
                 "[UDX710] 重启指令被拒绝：设备可能正在处理其他重启请求。".to_string()
             }
         }
-        COMMAND_RECONNECT => {
+        "RECONNECT" => {
             warn!("SMS control: reconnecting data connection");
             let _ = crate::dbus::set_data_connection(conn, false).await;
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -124,10 +152,55 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
                 Err(e) => format!("[UDX710] 数据连接重置失败：{}", e),
             }
         }
-        COMMAND_STATUS => {
-            build_status_reply(conn).await
+        "FLIGHTON" => {
+            match crate::dbus::set_airplane_mode(conn, true).await {
+                Ok(()) => "[UDX710] 飞行模式已开启。".to_string(),
+                Err(e) => format!("[UDX710] 开启飞行模式失败：{}", e),
+            }
         }
-        _ => "[UDX710] 未知指令。支持：#REBOOT# #RECONNECT# #STATUS#".to_string(),
+        "FLIGHTOFF" => {
+            match crate::dbus::set_airplane_mode(conn, false).await {
+                Ok(()) => "[UDX710] 飞行模式已关闭。".to_string(),
+                Err(e) => format!("[UDX710] 关闭飞行模式失败：{}", e),
+            }
+        }
+        "DATAON" => {
+            match crate::dbus::set_data_connection(conn, true).await {
+                Ok(()) => "[UDX710] 数据连接已开启。".to_string(),
+                Err(e) => format!("[UDX710] 开启数据连接失败：{}", e),
+            }
+        }
+        "DATAOFF" => {
+            match crate::dbus::set_data_connection(conn, false).await {
+                Ok(()) => "[UDX710] 数据连接已关闭。".to_string(),
+                Err(e) => format!("[UDX710] 关闭数据连接失败：{}", e),
+            }
+        }
+        "RADIOLTE" => {
+            match crate::dbus::set_radio_mode(conn, crate::models::RadioMode::LteOnly).await {
+                Ok(()) => "[UDX710] 已切换为仅 4G 模式。".to_string(),
+                Err(e) => format!("[UDX710] 切换仅 4G 模式失败：{}", e),
+            }
+        }
+        "RADIONR" => {
+            match crate::dbus::set_radio_mode(conn, crate::models::RadioMode::NrOnly).await {
+                Ok(()) => "[UDX710] 已切换为仅 5G 模式。".to_string(),
+                Err(e) => format!("[UDX710] 切换仅 5G 模式失败：{}", e),
+            }
+        }
+        "RADIOAUTO" => {
+            match crate::dbus::set_radio_mode(conn, crate::models::RadioMode::Auto).await {
+                Ok(()) => "[UDX710] 已切换为 4G/5G 自动模式。".to_string(),
+                Err(e) => format!("[UDX710] 切换自动模式失败：{}", e),
+            }
+        }
+        "RADIOOFF" => {
+            match crate::dbus::set_airplane_mode(conn, true).await {
+                Ok(()) => "[UDX710] 射频已关闭（飞行模式已开启）。".to_string(),
+                Err(e) => format!("[UDX710] 关闭射频失败：{}", e),
+            }
+        }
+        _ => "[UDX710] 未知指令。支持的命令请查看说明。".to_string(),
     }
 }
 
@@ -196,24 +269,86 @@ fn read_mem_available_kb() -> u64 {
 mod tests {
     use super::*;
 
+    // === 英文指令（向后兼容）===
+
     #[test]
-    fn parse_reboot() {
+    fn parse_reboot_en() {
         assert_eq!(parse_command("#REBOOT#"), Some("REBOOT"));
         assert_eq!(parse_command("#reboot#"), Some("REBOOT"));
         assert_eq!(parse_command("  #REBOOT#  "), Some("REBOOT"));
     }
 
     #[test]
-    fn parse_reconnect() {
+    fn parse_reconnect_en() {
         assert_eq!(parse_command("#RECONNECT#"), Some("RECONNECT"));
         assert_eq!(parse_command("#reconnect#"), Some("RECONNECT"));
     }
 
     #[test]
-    fn parse_status() {
+    fn parse_status_en() {
         assert_eq!(parse_command("#STATUS#"), Some("STATUS"));
         assert_eq!(parse_command("#status#"), Some("STATUS"));
     }
+
+    // === 中文指令 ===
+
+    #[test]
+    fn parse_reboot_cn() {
+        assert_eq!(parse_command("#重启#"), Some("REBOOT"));
+    }
+
+    #[test]
+    fn parse_reconnect_cn() {
+        assert_eq!(parse_command("#重连#"), Some("RECONNECT"));
+    }
+
+    #[test]
+    fn parse_status_cn() {
+        assert_eq!(parse_command("#状态#"), Some("STATUS"));
+    }
+
+    #[test]
+    fn parse_flight_on_cn() {
+        assert_eq!(parse_command("#飞行开#"), Some("FLIGHTON"));
+    }
+
+    #[test]
+    fn parse_flight_off_cn() {
+        assert_eq!(parse_command("#飞行关#"), Some("FLIGHTOFF"));
+    }
+
+    #[test]
+    fn parse_data_on_cn() {
+        assert_eq!(parse_command("#数据开#"), Some("DATAON"));
+    }
+
+    #[test]
+    fn parse_data_off_cn() {
+        assert_eq!(parse_command("#数据关#"), Some("DATAOFF"));
+    }
+
+    #[test]
+    fn parse_radio_lte_cn() {
+        assert_eq!(parse_command("#仅4G#"), Some("RADIOLTE"));
+        assert_eq!(parse_command("#仅4g#"), Some("RADIOLTE"));
+    }
+
+    #[test]
+    fn parse_radio_nr_cn() {
+        assert_eq!(parse_command("#仅5G#"), Some("RADIONR"));
+    }
+
+    #[test]
+    fn parse_radio_auto_cn() {
+        assert_eq!(parse_command("#自动#"), Some("RADIOAUTO"));
+    }
+
+    #[test]
+    fn parse_radio_off_cn() {
+        assert_eq!(parse_command("#关射频#"), Some("RADIOOFF"));
+    }
+
+    // === 非法输入 ===
 
     #[test]
     fn parse_non_command() {
@@ -222,5 +357,7 @@ mod tests {
         assert_eq!(parse_command("#REBOOT"), None);
         assert_eq!(parse_command("REBOOT#"), None);
         assert_eq!(parse_command(""), None);
+        assert_eq!(parse_command("# #"), None);
+        assert_eq!(parse_command("##"), None);
     }
 }

@@ -258,7 +258,6 @@ export default function ConfigurationPage() {
       if (smsPushRes.data) setSmsPushConfig(normalizeSmsPushConfig(smsPushRes.data))
       if (restartRes.data) setRestartConfig(restartRes.data)
       if (netHealthRes.data) setNetHealthConfig(netHealthRes.data)
-      if (smsControlRes.data) setSmsControlConfig(smsControlRes.data)
 
       // 加载健康检查
       await checkHealth()
@@ -372,6 +371,7 @@ export default function ConfigurationPage() {
       setRebooting(true)
       await api.systemReboot(3)
       setSuccess('系统将在 3 秒后重启...')
+      setRebooting(false)
     } catch (err) {
       setRebooting(false)
       setError(err instanceof Error ? err.message : String(err))
@@ -1061,26 +1061,25 @@ export default function ConfigurationPage() {
           </AccordionDetails>
         </Accordion>
 
-        {/* 短信遥控配置 */}
+        {/* 短信遥控配置 - 已迁移 */}
         <Accordion
           expanded={expanded === 'smsControl'}
           onChange={handleAccordionChange('smsControl')}
         >
           <AccordionSummary expandIcon={<ExpandMore />}>
             <Box display="flex" alignItems="center" gap={1} width="100%">
-              <Sms color={smsControlConfig.enabled ? 'success' : 'primary'} />
+              <Sms color="primary" />
               <Typography fontWeight={600}>短信遥控</Typography>
               <Box flexGrow={1} />
               <Chip
-                label={smsControlConfig.enabled ? '已启用' : '已关闭'}
-                color={smsControlConfig.enabled ? 'success' : 'default'}
+                label="已迁移"
+                color="default"
                 size="small"
                 onClick={(event: MouseEvent) => event.stopPropagation()}
               />
             </Box>
           </AccordionSummary>
           <AccordionDetails>
-            {/* 短信遥控配置已迁移到远程遥控页面 */}
             <Alert severity="info" sx={{ mb: 2 }}>
               短信遥控和通话遥控配置已迁移到「远程遥控」页面，请在左侧菜单中访问。
             </Alert>
