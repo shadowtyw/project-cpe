@@ -105,46 +105,40 @@ pub async fn on_incoming_call(
         return false;
     }
 
-    let mut state = lock_state();
-
     // 二次来电确认：是否存在待确认命令且号码匹配？
-    if let Some(ref pending) = state.pending {
-        if pending.number == normalized {
-            let action = pending.action;
-            let label = pending.action_label.clone();
-            let number = pending.number.clone();
+    let (action, label, number) = {
+        let mut state = lock_state();
+        let pending = match state.pending.take() {
+            Some(p) if p.number == normalized => p,
+            _ => {
+                // 覆盖旧活跃通话（同一时刻只跟踪一通），然后退出锁作用域去接听
+                state.active_call = Some(ActiveCall {
+                    number: normalized.clone(),
+                    path: path.to_string(),
+                    begin: Instant::now(),
+                });
+                drop(state);
+                let _ = crate::dbus::answer_call(conn, path).await;
+                return true;
+            }
+        };
+        (pending.action, pending.action_label.clone(), pending.number.clone())
+    };
 
-            // 清除 pending，执行命令
-            state.pending = None;
-            drop(state);
+    send_notification(&serde_json::json!({
+        "event": "call_control_confirmed",
+        "number": number,
+        "action": format!("{:?}", action),
+        "action_label": label,
+        "message": format!("命令已确认: {}，开始执行", label),
+    }));
 
-            send_notification(&serde_json::json!({
-                "event": "call_control_confirmed",
-                "number": number,
-                "action": format!("{:?}", action),
-                "action_label": label,
-                "message": format!("命令已确认: {}，开始执行", label),
-            }));
+    record_trigger(&number, action);
+    execute_action(conn, action).await;
 
-            record_trigger(&number, action);
-            execute_action(conn, action).await;
-
-            // 挂断确认来电
-            let _ = crate::dbus::hangup_call(conn, path).await;
-            return true;
-        }
-    }
-
-    // 覆盖旧活跃通话（同一时刻只跟踪一通）
-    state.active_call = Some(ActiveCall {
-        number: normalized,
-        path: path.to_string(),
-        begin: Instant::now(),
-    });
-    drop(state);
-
-    let _ = crate::dbus::answer_call(conn, path).await;
-    true
+    // 挂断确认来电
+    let _ = crate::dbus::hangup_call(conn, path).await;
+    return true;
 }
 
 /// 通话结束：测量通话时长，匹配命令，开始确认倒计时。
