@@ -746,6 +746,21 @@ export interface SmsControlConfigResponse {
   numbers: string[]  // 共享通话遥控白名单
 }
 
+// ========== 通话遥控配置 ==========
+
+export interface CallControlConfig {
+  enabled: boolean
+  numbers: string[]
+  hold_seconds: number
+  action: ScheduleAction
+}
+
+export interface CallControlTrigger {
+  triggered_at: string | null
+  action: string | null
+  from_number: string | null
+}
+
 // ========== OTA 更新类型 ==========
 
 // OTA 元数据

@@ -720,6 +720,22 @@ class UDX710API {
     })
   }
 
+  // 通话遥控
+  async getCallControlConfig() {
+    return request<ApiResponse<CallControlConfig>>('/call-control/config')
+  }
+
+  async setCallControlConfig(config: CallControlConfig) {
+    return request<ApiResponse<CallControlConfig>>('/call-control/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  async getCallControlStatus() {
+    return request<ApiResponse<CallControlTrigger>>('/call-control/status')
+  }
+
   // ========== OTA 更新 ==========
 
   // 获取 OTA 状态

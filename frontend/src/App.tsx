@@ -30,6 +30,7 @@ const MemoryProcesses = lazy(() => import('./pages/MemoryProcesses'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Tools = lazy(() => import('./pages/Tools'))
 const OtaUpdate = lazy(() => import('./pages/OtaUpdate'))
+const RemoteControl = lazy(() => import('./pages/RemoteControl'))
 
 // 页面加载中的 fallback
 function PageLoading() {
@@ -57,6 +58,8 @@ const appRoutes: AppRouteConfig[] = [
   { path: 'config', component: Configuration },
   { path: 'init-script', component: InitScript },
   { path: 'ota', component: OtaUpdate },
+  { path: 'remote/sms', component: RemoteControl },
+  { path: 'remote/call', component: RemoteControl },
   { path: 'memory-processes', component: MemoryProcesses },
   { path: 'logs', component: Logs },
   { path: 'tools', component: Tools },

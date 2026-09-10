@@ -214,11 +214,6 @@ export default function ConfigurationPage() {
   })
   const [netHealthLoading, setNetHealthLoading] = useState(false)
 
-  const [smsControlConfig, setSmsControlConfig] = useState<SmsControlConfigResponse>({
-    enabled: false,
-    numbers: [],
-  })
-  const [smsControlLoading, setSmsControlLoading] = useState(false)
 
   const checkHealth = useCallback(async () => {
     setHealthLoading(true)
@@ -243,7 +238,7 @@ export default function ConfigurationPage() {
     setError(null)
     
     try {
-      const [dataRes, usbRes, airplaneModeRes, webhookRes, smsPushRes, restartRes, netHealthRes, smsControlRes] = await Promise.all([
+      const [dataRes, usbRes, airplaneModeRes, webhookRes, smsPushRes, restartRes, netHealthRes] = await Promise.all([
         api.getDataStatus(),
         api.getUsbMode(),
         api.getAirplaneMode(),
@@ -251,7 +246,6 @@ export default function ConfigurationPage() {
         api.getSmsPushConfig(),
         api.getRestartConfig(),
         api.getNetHealthConfig(),
-        api.getSmsControlConfig(),
       ])
       
       if (dataRes.data) setDataStatus(dataRes.data.active)
@@ -564,21 +558,6 @@ export default function ConfigurationPage() {
     }
   }
 
-  const handleSaveSmsControlConfig = async () => {
-    setSmsControlLoading(true)
-    setError(null)
-    try {
-      const response = await api.setSmsControlConfig(smsControlConfig.enabled)
-      if (response.data) {
-        setSmsControlConfig(response.data)
-        setSuccess('短信遥控配置已保存')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSmsControlLoading(false)
-    }
-  }
 
   const currentSmsPushProvider = getSmsPushProviderOption(smsPushConfig.provider)
   const smsPushCanTest = smsPushConfig.enabled
@@ -1101,74 +1080,10 @@ export default function ConfigurationPage() {
             </Box>
           </AccordionSummary>
           <AccordionDetails>
+            {/* 短信遥控配置已迁移到远程遥控页面 */}
             <Alert severity="info" sx={{ mb: 2 }}>
-              当设备断网、Web 界面无法访问时，用管理员手机号给设备发送短信指令即可遥控。
-              白名单与通话遥控共享，在通话遥控配置中管理。
+              短信遥控和通话遥控配置已迁移到「远程遥控」页面，请在左侧菜单中访问。
             </Alert>
-
-            <FormControlLabel
-              control={(
-                <Switch
-                  checked={smsControlConfig.enabled}
-                  onChange={(event: ChangeEvent<HTMLInputElement>) => setSmsControlConfig({ ...smsControlConfig, enabled: event.target.checked })}
-                  color="success"
-                />
-              )}
-              label={(
-                <Box>
-                  <Typography variant="body1" fontWeight={600}>
-                    {smsControlConfig.enabled ? '短信遥控已启用' : '短信遥控已禁用'}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    启用后白名单号码可发送指令短信控制设备
-                  </Typography>
-                </Box>
-              )}
-              sx={{ mb: 2 }}
-            />
-
-            <Divider sx={{ my: 2 }} />
-            <Typography variant="subtitle2" gutterBottom>支持的短信指令</Typography>
-
-            <Box sx={{ mb: 2 }}>
-              {[
-                { cmd: '#REBOOT#', desc: '延迟 3 秒重启系统' },
-                { cmd: '#RECONNECT#', desc: '重置数据连接（断开→重连）' },
-                { cmd: '#STATUS#', desc: '回复设备运行状态（信号、上网、运行时间、内存）' },
-              ].map(({ cmd, desc }) => (
-                <Box key={cmd} display="flex" alignItems="center" gap={1} mb={0.5}>
-                  <Chip label={cmd} size="small" color="primary" variant="outlined" />
-                  <Typography variant="body2" color="text.secondary">{desc}</Typography>
-                </Box>
-              ))}
-            </Box>
-
-            {smsControlConfig.numbers.length > 0 ? (
-              <Alert severity="success" sx={{ mb: 2 }}>
-                <Typography variant="body2">
-                  <strong>当前白名单号码：</strong>{smsControlConfig.numbers.join(', ')}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  前往「通话遥控」配置中添加或修改管理员号码
-                </Typography>
-              </Alert>
-            ) : (
-              <Alert severity="warning" sx={{ mb: 2 }}>
-                <Typography variant="body2">
-                  <strong>未配置白名单号码。</strong>请先在「通话遥控」中添加管理员号码，否则短信遥控不会生效。
-                </Typography>
-              </Alert>
-            )}
-
-            <Button
-              variant="contained"
-              color="success"
-              onClick={() => void handleSaveSmsControlConfig()}
-              disabled={smsControlLoading}
-              startIcon={smsControlLoading ? <CircularProgress size={20} /> : <Sms />}
-            >
-              {smsControlLoading ? '保存中...' : '保存短信遥控配置'}
-            </Button>
           </AccordionDetails>
         </Accordion>
 

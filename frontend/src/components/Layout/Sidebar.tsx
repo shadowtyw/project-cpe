@@ -8,6 +8,7 @@
  *
  * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
+import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Drawer,
@@ -21,6 +22,7 @@ import {
   Box,
   Typography,
   Link,
+  Collapse,
 } from '@mui/material'
 import {
   Dashboard as DashboardIcon,
@@ -37,6 +39,9 @@ import {
   RocketLaunch as InitScriptIcon,
   Article as LogsIcon,
   Build as ToolsIcon,
+  PhonelinkSetup as PhonelinkSetupIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -47,7 +52,14 @@ interface SidebarProps {
   isMobile: boolean
 }
 
-const menuItems = [
+interface MenuItem {
+  path?: string
+  label: string
+  icon: React.ComponentType
+  children?: MenuItem[]
+}
+
+const menuItems: MenuItem[] = [
   { path: '/', label: '仪表盘', icon: DashboardIcon },
   { path: '/device', label: '设备信息', icon: DevicesIcon },
   { path: '/network', label: '网络状态', icon: SignalIcon },
@@ -56,6 +68,14 @@ const menuItems = [
   { path: '/config', label: '系统配置', icon: SettingsIcon },
   { path: '/init-script', label: '开机脚本', icon: InitScriptIcon },
   { path: '/ota', label: 'OTA 更新', icon: OtaIcon },
+  {
+    label: '远程遥控',
+    icon: PhonelinkSetupIcon,
+    children: [
+      { path: '/remote/sms', label: '短信遥控', icon: SmsIcon },
+      { path: '/remote/call', label: '通话遥控', icon: PhoneIcon },
+    ],
+  },
   { path: '/memory-processes', label: '内存进程', icon: MemoryIcon },
   { path: '/logs', label: '系统日志', icon: LogsIcon },
   { path: '/tools', label: '高级工具', icon: ToolsIcon },
@@ -67,11 +87,54 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
   const navigate = useNavigate()
   const location = useLocation()
 
+  // 展开状态持久化到 localStorage
+  const [expandedMenus, setExpandedMenus] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('expandedMenus')
+      return saved ? new Set(JSON.parse(saved) as string[]) : new Set<string>()
+    } catch {
+      return new Set<string>()
+    }
+  })
+
+  useEffect(() => {
+    localStorage.setItem('expandedMenus', JSON.stringify([...expandedMenus]))
+  }, [expandedMenus])
+
+  // 如果当前路径匹配子菜单项，自动展开父菜单
+  useEffect(() => {
+    for (const item of menuItems) {
+      if (item.children) {
+        const hasMatch = item.children.some((child) => child.path === location.pathname)
+        if (hasMatch && !expandedMenus.has(item.label)) {
+          setExpandedMenus((prev) => new Set([...prev, item.label!]))
+        }
+      }
+    }
+  }, [location.pathname, expandedMenus])
+
   const handleNavigation = (path: string): void => {
     void navigate(path)
     if (isMobile) {
       onClose()
     }
+  }
+
+  const toggleMenu = (label: string) => {
+    setExpandedMenus((prev) => {
+      const next = new Set(prev)
+      if (next.has(label)) {
+        next.delete(label)
+      } else {
+        next.add(label)
+      }
+      return next
+    })
+  }
+
+  const isChildActive = (children?: MenuItem[]) => {
+    if (!children) return false
+    return children.some((child) => child.path === location.pathname)
   }
 
   const drawer = (
@@ -87,11 +150,57 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
       <List sx={{ flexGrow: 1 }}>
         {menuItems.map((item) => {
           const IconComponent = item.icon
+
+          // 有子菜单的父级项
+          if (item.children) {
+            const isExpanded = expandedMenus.has(item.label)
+            const childActive = isChildActive(item.children)
+
+            return (
+              <Box key={item.label}>
+                <ListItem disablePadding>
+                  <ListItemButton
+                    selected={childActive}
+                    onClick={() => toggleMenu(item.label)}
+                  >
+                    <ListItemIcon>
+                      <IconComponent />
+                    </ListItemIcon>
+                    <ListItemText primary={item.label} />
+                    {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                  </ListItemButton>
+                </ListItem>
+                <Collapse in={isExpanded} timeout="auto" unmountOnExit>
+                  <List component="div" disablePadding>
+                    {item.children.map((child) => {
+                      const ChildIcon = child.icon
+                      return (
+                        <ListItem key={child.path} disablePadding>
+                          <ListItemButton
+                            selected={location.pathname === child.path}
+                            onClick={() => handleNavigation(child.path!)}
+                            sx={{ pl: 4 }}
+                          >
+                            <ListItemIcon>
+                              <ChildIcon />
+                            </ListItemIcon>
+                            <ListItemText primary={child.label} />
+                          </ListItemButton>
+                        </ListItem>
+                      )
+                    })}
+                  </List>
+                </Collapse>
+              </Box>
+            )
+          }
+
+          // 普通菜单项
           return (
             <ListItem key={item.path} disablePadding>
               <ListItemButton
                 selected={location.pathname === item.path}
-                onClick={() => handleNavigation(item.path)}
+                onClick={() => handleNavigation(item.path!)}
               >
                 <ListItemIcon>
                   <IconComponent />
