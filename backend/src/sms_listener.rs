@@ -432,8 +432,9 @@ pub async fn start_call_listener(
                     if let Ok(path) = msg.body().deserialize::<zbus::zvariant::ObjectPath>() {
                         let path_str = path.to_string();
 
-                        // 通话遥控：清理该通话的计时器。
-                        crate::call_control::on_call_removed(&path_str);
+                        // 通话遥控：根据通话时长匹配命令，进入 10 秒确认窗口。
+                        let call_config = config_manager.get_call_control();
+                        crate::call_control::on_call_removed(&conn, &call_config, &path_str).await;
 
                         let mut active_calls = ACTIVE_CALLS.lock().unwrap_or_else(|p| p.into_inner());
                         if let Some(call) = active_calls.remove(&path_str) {

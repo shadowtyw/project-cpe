@@ -104,6 +104,17 @@ impl WebhookSender {
         }
     }
     
+    /// 转发通话遥控事件（原始 JSON payload）
+    pub async fn forward_call_control(&self, payload: &str) -> Result<(), String> {
+        let config = self.get_config();
+
+        if !config.enabled || !config.forward_calls || config.url.is_empty() {
+            return Ok(());
+        }
+
+        self.send_webhook_raw(&config, payload).await
+    }
+
     /// 测试 Webhook 连接（使用短信模板发送测试数据）
     pub async fn test_webhook(&self) -> Result<String, String> {
         let config = self.get_config();

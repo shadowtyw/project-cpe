@@ -83,6 +83,8 @@ import type {
   TrafficStatsResponse,
   TrafficAlertRequest,
   ScheduleConfig,
+  MqttConfigResponse,
+  MqttStatusResponse,
 } from './types'
 
 // API 基础配置
@@ -847,6 +849,23 @@ class UDX710API {
       method: 'POST',
       body: JSON.stringify(config),
     })
+  }
+
+  // ========== MQTT 远程控制 ==========
+
+  async getMqttConfig() {
+    return request<ApiResponse<MqttConfigResponse>>('/mqtt/config')
+  }
+
+  async setMqttConfig(config: MqttConfigResponse) {
+    return request<ApiResponse<MqttConfigResponse>>('/mqtt/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  async getMqttStatus() {
+    return request<ApiResponse<MqttStatusResponse>>('/mqtt/status')
   }
 
 }

@@ -44,6 +44,7 @@ project-cpe-main/
 │       ├── sms_listener.rs     # 短信/通话 D-Bus 信号监听 + 通话遥控
 │       ├── call_control.rs     # 通话遥控（白名单来电→接听→计时→执行动作）
 │       ├── sms_control.rs      # 短信遥控指令（#REBOOT#/#RECONNECT#/#STATUS#）
+│       ├── mqtt_service.rs     # MQTT 远程控制（公共 Broker + 多节点故障转移）
 │       ├── webhook.rs          # Webhook 转发（飞书/自定义）+ HMAC-SHA256
 │       ├── sms_push.rs         # 短信推送（Pushplus/Server酱/Pushdeer/Bark/Ntfy）
 │       ├── ota.rs              # OTA 更新（tar.gz 校验/安装/回滚/哨兵恢复）
@@ -346,6 +347,10 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 | `/api/ims/status` | GET | IMS 状态 |
 | `/api/voicemail/status` | GET | 语音信箱状态 |
 | `/api/sms-control/config` | GET/POST | 短信遥控配置（开关/白名单） |
+| `/api/call-control/config` | GET/POST | 通话遥控配置（时长编码命令） |
+| `/api/call-control/status` | GET | 通话遥控状态（上次触发记录） |
+| `/api/mqtt/config` | GET/POST | MQTT 远程控制配置 |
+| `/api/mqtt/status` | GET | MQTT 连接状态 |
 
 ### 系统、配置与 OTA
 
@@ -408,8 +413,9 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - 短信收发、对话历史、统计
 - 通话记录（含未接来电标记）
 - 短信转发（Webhook + 多平台推送）
-- 通话遥控（白名单来电→自动接听→多条独立计时动作→执行）
+- 通话遥控（白名单来电→自动接听→通话时长编码命令→二次来电确认→执行）
 - **短信遥控指令**：白名单号码发送短信远程控制设备（与通话遥控共享白名单，控制短信不转发到第三方）。支持中英文 11 条指令，覆盖重启、重连、飞行模式、数据连接、射频模式等全部动作。飞行模式指令触发后 10 秒自动恢复网络。
+- **MQTT 远程控制**：适用于纯数据物联卡（无短信/通话权限），通过公共 MQTT Broker 收发指令。支持多国内节点故障转移，Client ID 使用 IMEI 标识设备。支持 3 条指令（reboot/reconnect/status），可选 Token 鉴权。
 
 ### USB 模式
 
@@ -469,6 +475,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 | `schedule_watchdog` | 定时计划执行 | 2s |
 | `traffic_watchdog` | 流量统计采样（300s） | 2s |
 | `db_cleanup` | 数据库记录清理（3600s） | 2s |
+| `mqtt_service` | MQTT 远程控制（故障转移） | 5s |
 
 ### 3. 数据库稳定性
 
@@ -536,7 +543,24 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **安全隔离**：命中指令的短信仅入库审计，不转发到 Webhook/推送平台
 - **独立开关**：`SmsControlConfig.enabled` 控制，与通话遥控互不干扰
 
-### 10. 频段/小区锁持久化与自动重套
+### 10. 通话遥控（时长编码 + 二次确认）
+
+通讯壳无实体按键，通话遥控提供另一条外部应急通道：
+
+- **时长编码命令**：用户配置"通话时长 → 动作"映射表（如 5s=重启、10s=飞行模式、15s=关数据）
+- **交互流程**：
+  1. 白名单号码来电 → 自动接听，开始计时
+  2. 用户保持通话 N 秒后挂断 → 根据时长匹配命令（±2s 容差）
+  3. 推送通知："检测到遥控命令 #X: 开启飞行模式，请在 10 秒内再次来电确认"
+  4. 同号码 10 秒内再次来电 → 确认并执行动作，推送"已执行"
+  5. 10 秒内无二次来电 → 推送"命令已取消"，丢弃待确认命令
+- **通知双通道**：命令检测、确认执行、超时取消三个事件均通过 Webhook + 短信推送双通道推送
+- **防误触设计**：通话时长 <3s 或 >30s 视为误操作，不匹配任何命令
+- **飞行模式自动恢复**：`AirplaneOn` / `RadioOff` 动作执行后 10 秒自动关闭飞行模式 + 开启数据连接
+- **独立开关**：`CallControlConfig.enabled` 控制，与短信遥控互不干扰
+- **配置上限**：最多 10 条时长命令映射，时长范围 3-30 秒
+
+### 11. 频段/小区锁持久化与自动重套
 
 解决 4G 物联卡自动模式无信号、频段锁定 NVRAM 不可靠、小区锁定 RAM 态丢失问题：
 
@@ -548,6 +572,23 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   - 频段锁（AT+SPLBAND）
   - 小区锁（AT+SPFORCEFRQ）
 - **容错设计**：每步失败只打 warn 日志，不阻断后续步骤
+
+### 12. MQTT 远程控制
+
+适用于纯数据物联卡（无短信/通话权限）的远程运维通道：
+
+- **轻量级协议**：使用 rumqttc 0.24 异步 MQTT 3.1.1 客户端，低带宽开销
+- **国内公共 Broker**：预设 3 个国内节点（broker.emqx.io、broker-cn.emqx.io、test.mosquitto.org），无需自建服务器
+- **多节点故障转移**：连接失败时自动轮询下一个节点，全部失败后等待 10 秒重试
+- **设备唯一标识**：Client ID 使用 `udx710_{imei}` 格式，避免公共 Broker 上的冲突
+- **指令格式**：JSON 通过订阅主题 `cpe/{imei}/cmd` 下发
+  - `{"action":"reboot"}` — 延迟 3 秒重启系统
+  - `{"action":"reconnect"}` — 断开并重连数据连接
+  - `{"action":"status"}` — 发布系统状态到发布主题 `cpe/{imei}/status`
+- **Token 鉴权**：可选配置 `auth_token`，指令中需携带 `"token":"your-token"` 才会执行
+- **状态看板**：前端 MQTT 遥控页面实时显示连接状态、当前 Broker、最后心跳/指令、异常信息
+- **默认关闭**：`MqttConfig.enabled` 默认 `false`，需手动开启
+- **延迟启动**：服务启动 10 秒后自动获取 IMEI 并尝试连接
 
 ---
 

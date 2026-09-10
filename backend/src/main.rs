@@ -47,6 +47,7 @@ mod handlers;
 mod iptables;
 mod log_buffer;
 mod models;
+mod mqtt_service;
 mod net_health;
 mod ota;
 mod process_monitor;
@@ -262,6 +263,34 @@ async fn main() -> Result<()> {
     let webhook_sender = Arc::new(WebhookSender::new(Arc::clone(&config_manager)));
     let sms_push_sender = Arc::new(SmsPushSender::new(Arc::clone(&config_manager)));
     let frontend_runtime = Arc::new(FrontendRuntime::new());
+
+    // 初始化通话遥控通知器（Webhook + 短信推送双通道）
+    {
+        struct CompositeNotifier {
+            webhook: Arc<WebhookSender>,
+            sms_push: Arc<SmsPushSender>,
+        }
+        impl call_control::CallControlNotifier for CompositeNotifier {
+            fn notify(&self, json_payload: &str) {
+                let webhook = Arc::clone(&self.webhook);
+                let sms_push = Arc::clone(&self.sms_push);
+                let payload = json_payload.to_string();
+                tokio::spawn(async move {
+                    let _ = webhook.forward_call_control(&payload).await;
+                    // 提取 message 字段作为推送正文
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(msg) = v["data"]["message"].as_str() {
+                            let _ = sms_push.push_notification("通话遥控", msg).await;
+                        }
+                    }
+                });
+            }
+        }
+        call_control::set_notifier(Arc::new(CompositeNotifier {
+            webhook: Arc::clone(&webhook_sender),
+            sms_push: Arc::clone(&sms_push_sender),
+        }));
+    }
     
     // 启动 SMS 监听线程
     {
@@ -336,22 +365,13 @@ async fn main() -> Result<()> {
         });
     }
 
-    // 通话遥控轮询：周期检查白名单来电接通计时是否到期，到期执行动作。
+    // 通话遥控轮询：检查待确认命令是否过期。
     {
-        let conn_clone = Arc::clone(&dbus_conn);
-        let config_manager_clone = Arc::clone(&config_manager);
         tokio::spawn(async move {
-            supervise("call_control_poll", move || {
-                let conn_clone = Arc::clone(&conn_clone);
-                let config_manager_clone = Arc::clone(&config_manager_clone);
-                async move {
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                        let config = config_manager_clone.get_call_control();
-                        if config.enabled {
-                            crate::call_control::poll(&conn_clone, &config).await;
-                        }
-                    }
+            supervise("call_control_poll", move || async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    crate::call_control::poll().await;
                 }
             })
             .await;
@@ -488,6 +508,35 @@ async fn main() -> Result<()> {
         });
     }
 
+    // MQTT 远程控制服务（默认关闭，启用后连接国内公共 Broker 实现远程控制）
+    {
+        let conn_clone = Arc::clone(&dbus_conn);
+        let config_manager = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            supervise("mqtt_service", move || {
+                let conn_clone = Arc::clone(&conn_clone);
+                let config_manager = Arc::clone(&config_manager);
+                async move {
+                    // 延迟 10 秒启动，等待数据连接就绪
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+                    // 获取 IMEI 用于生成唯一的 Client ID
+                    let imei = match crate::dbus::get_device_info_data(&conn_clone).await {
+                        Ok(info) if !info.imei.is_empty() => info.imei,
+                        _ => {
+                            tracing::warn!("Failed to get IMEI, using 'unknown' as fallback");
+                            "unknown".to_string()
+                        }
+                    };
+
+                    let service = mqtt_service::MqttService::new(config_manager, conn_clone, imei);
+                    service.run().await;
+                }
+            })
+            .await;
+        });
+    }
+
     // Static frontend and API share one origin in production. Cross-origin access
     // is disabled unless the deployment explicitly adds an origin policy.
     let cors = CorsLayer::new();
@@ -607,6 +656,9 @@ async fn main() -> Result<()> {
         .route("/api/call-control/config", get(get_call_control_config_handler).post(set_call_control_config_handler).options(options_handler))
         .route("/api/call-control/status", get(get_call_control_status_handler).options(options_handler))
         .route("/api/sms-control/config", get(get_sms_control_config_handler).post(set_sms_control_config_handler).options(options_handler))
+        // ========== MQTT 远程控制接口 ==========
+        .route("/api/mqtt/config", get(get_mqtt_config_handler).post(set_mqtt_config_handler).options(options_handler))
+        .route("/api/mqtt/status", get(get_mqtt_status_handler).options(options_handler))
         // ========== 统一状态和中间件 ==========
         .with_state(app_state)
         .layer(middleware::from_fn(move |request, next| api_auth(api_token.clone(), request, next)))

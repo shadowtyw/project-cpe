@@ -42,6 +42,7 @@ import {
   PhonelinkSetup as PhonelinkSetupIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
+  CloudQueue as CloudQueueIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -74,6 +75,7 @@ const menuItems: MenuItem[] = [
     children: [
       { path: '/remote/sms', label: '短信遥控', icon: SmsIcon },
       { path: '/remote/call', label: '通话遥控', icon: PhoneIcon },
+      { path: '/remote/mqtt', label: 'MQTT 遥控', icon: CloudQueueIcon },
     ],
   },
   { path: '/memory-processes', label: '内存进程', icon: MemoryIcon },

@@ -60,6 +60,7 @@ const appRoutes: AppRouteConfig[] = [
   { path: 'ota', component: OtaUpdate },
   { path: 'remote/sms', component: RemoteControl },
   { path: 'remote/call', component: RemoteControl },
+  { path: 'remote/mqtt', component: RemoteControl },
   { path: 'memory-processes', component: MemoryProcesses },
   { path: 'logs', component: Logs },
   { path: 'tools', component: Tools },

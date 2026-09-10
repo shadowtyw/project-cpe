@@ -748,15 +748,16 @@ export interface SmsControlConfigResponse {
 
 // ========== 通话遥控配置 ==========
 
-export interface CallControlActionItem {
-  hold_seconds: number
+export interface CallControlDurationCommand {
+  duration_secs: number
   action: ScheduleAction
+  label: string
 }
 
 export interface CallControlConfig {
   enabled: boolean
   numbers: string[]
-  actions: CallControlActionItem[]
+  duration_commands: CallControlDurationCommand[]
 }
 
 export interface CallControlTrigger {
@@ -901,5 +902,26 @@ export interface ScheduleEntry {
 export interface ScheduleConfig {
   entries: ScheduleEntry[]
   tolerance_min: number
+}
+
+// ========== MQTT 远程控制类型 ==========
+
+export interface MqttConfigResponse {
+  enabled: boolean
+  broker_list: string[]
+  active_broker: string
+  port: number
+  topic_sub: string
+  topic_pub: string
+  auth_token: string | null
+}
+
+export interface MqttStatusResponse {
+  connected: boolean
+  current_broker: string
+  last_heartbeat: string | null
+  last_command: string | null
+  error_message: string | null
+  broker_index: number
 }
 

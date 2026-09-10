@@ -45,6 +45,16 @@ impl SmsPushSender {
         self.send_with_config(&config, &title, &body).await.map(|_| ())
     }
 
+    pub async fn push_notification(&self, title: &str, body: &str) -> Result<(), String> {
+        let config = self.get_config();
+
+        if !config.enabled {
+            return Ok(());
+        }
+
+        self.send_with_config(&config, title, body).await.map(|_| ())
+    }
+
     pub async fn test_sms_push(&self) -> Result<String, String> {
         let config = self.get_config();
 

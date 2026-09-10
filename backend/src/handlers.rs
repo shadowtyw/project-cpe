@@ -599,7 +599,7 @@ pub async fn get_qos_info(State(conn): State<Arc<Connection>>) -> impl IntoRespo
 }
 
 /// 读取温度传感器数据（内部工具函数）
-fn read_temperature_sensors() -> Vec<ThermalZone> {
+pub fn read_temperature_sensors() -> Vec<ThermalZone> {
     use std::fs;
     use std::path::Path;
 
@@ -3550,9 +3550,10 @@ pub async fn get_call_control_config_handler(
     let response = CallControlConfigResponse {
         enabled: config.enabled,
         numbers: config.numbers.clone(),
-        actions: config.actions.into_iter().map(|a| CallControlActionResponse {
-            hold_seconds: a.hold_seconds,
-            action: a.action,
+        duration_commands: config.duration_commands.into_iter().map(|c| CallControlDurationCommandResponse {
+            duration_secs: c.duration_secs,
+            action: c.action,
+            label: c.label,
         }).collect(),
     };
     (
@@ -3575,9 +3576,10 @@ pub async fn set_call_control_config_handler(
                 CallControlConfigResponse {
                     enabled: config.enabled,
                     numbers: config.numbers.clone(),
-                    actions: config.actions.into_iter().map(|a| CallControlActionResponse {
-                        hold_seconds: a.hold_seconds,
-                        action: a.action,
+                    duration_commands: config.duration_commands.into_iter().map(|c| CallControlDurationCommandResponse {
+                        duration_secs: c.duration_secs,
+                        action: c.action,
+                        label: c.label,
                     }).collect(),
                 },
             )),
@@ -3726,3 +3728,55 @@ pub async fn set_traffic_alert_handler(
     }
 }
 
+
+// ============ MQTT 远程控制 API ============
+
+/// GET /api/mqtt/config - 获取 MQTT 配置
+pub async fn get_mqtt_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> impl IntoResponse {
+    let config = config_manager.get_mqtt();
+    Json(ApiResponse::success(MqttConfigResponse {
+        enabled: config.enabled,
+        broker_list: config.broker_list,
+        active_broker: config.active_broker,
+        port: config.port,
+        topic_sub: config.topic_sub,
+        topic_pub: config.topic_pub,
+        auth_token: config.auth_token,
+    }))
+}
+
+/// POST /api/mqtt/config - 更新 MQTT 配置
+pub async fn set_mqtt_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    Json(config): Json<MqttConfigResponse>,
+) -> impl IntoResponse {
+    let mqtt_config = crate::config::MqttConfig {
+        enabled: config.enabled,
+        broker_list: config.broker_list,
+        active_broker: config.active_broker,
+        port: config.port,
+        topic_sub: config.topic_sub,
+        topic_pub: config.topic_pub,
+        auth_token: config.auth_token,
+    };
+
+    match config_manager.set_mqtt(mqtt_config) {
+        Ok(_) => Json(ApiResponse::success("MQTT configuration updated")),
+        Err(e) => Json(ApiResponse::error(format!("Failed to save MQTT config: {}", e))),
+    }
+}
+
+/// GET /api/mqtt/status - 获取 MQTT 连接状态
+pub async fn get_mqtt_status_handler() -> impl IntoResponse {
+    let status = crate::mqtt_service::get_mqtt_status().await;
+    Json(ApiResponse::success(MqttStatusResponse {
+        connected: status.connected,
+        current_broker: status.current_broker,
+        last_heartbeat: status.last_heartbeat,
+        last_command: status.last_command,
+        error_message: status.error_message,
+        broker_index: status.broker_index,
+    }))
+}

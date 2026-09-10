@@ -1369,11 +1369,12 @@ pub struct ScheduleConfigResponse {
     pub tolerance_min: u8,
 }
 
-/// 通话遥控单条动作响应
+/// 通话遥控时长编码命令响应
 #[derive(Debug, Serialize)]
-pub struct CallControlActionResponse {
-    pub hold_seconds: u64,
+pub struct CallControlDurationCommandResponse {
+    pub duration_secs: u64,
     pub action: crate::config::ScheduleAction,
+    pub label: String,
 }
 
 /// 通话遥控配置响应（镜像 config::CallControlConfig）
@@ -1381,7 +1382,7 @@ pub struct CallControlActionResponse {
 pub struct CallControlConfigResponse {
     pub enabled: bool,
     pub numbers: Vec<String>,
-    pub actions: Vec<CallControlActionResponse>,
+    pub duration_commands: Vec<CallControlDurationCommandResponse>,
 }
 
 // ============ 通话遥控模型 ============
@@ -1405,5 +1406,30 @@ pub struct SmsControlConfigResponse {
     pub enabled: bool,
     /// 共享的管理员白名单（来自 CallControlConfig.numbers）
     pub numbers: Vec<String>,
+}
+
+// ============ MQTT 远程控制模型 ============
+
+/// MQTT 配置响应（镜像 config::MqttConfig）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MqttConfigResponse {
+    pub enabled: bool,
+    pub broker_list: Vec<String>,
+    pub active_broker: String,
+    pub port: u16,
+    pub topic_sub: String,
+    pub topic_pub: String,
+    pub auth_token: Option<String>,
+}
+
+/// MQTT 状态响应（镜像 mqtt_service::MqttRuntimeState）
+#[derive(Debug, Clone, Serialize)]
+pub struct MqttStatusResponse {
+    pub connected: bool,
+    pub current_broker: String,
+    pub last_heartbeat: Option<String>,
+    pub last_command: Option<String>,
+    pub error_message: Option<String>,
+    pub broker_index: usize,
 }
 

@@ -359,18 +359,30 @@ fn default_schedule_tolerance_min() -> u8 {
     1
 }
 
-/// 通话遥控的单条动作：独立的等待时长 + 执行动作。
-/// 多条动作从接通时刻同时计时，各自在到达 hold_seconds 时触发。
+/// 通话遥控时长编码命令：通话持续 N 秒映射到指定动作。
+/// 使用 ±2 秒容差匹配，例如 duration_secs=5 可匹配 3–7 秒的通话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallControlAction {
-    #[serde(default = "default_call_hold_seconds")]
-    pub hold_seconds: u64,
-    #[serde(default = "default_call_action")]
+pub struct CallControlDurationCommand {
+    /// 匹配的通话时长（秒）；同一通话时长只匹配一条命令，重复的取第一条。
+    #[serde(default = "default_duration_secs")]
+    pub duration_secs: u64,
+    /// 匹配后执行的动作
+    #[serde(default = "default_duration_command_action")]
     pub action: ScheduleAction,
+    /// 前端展示标签（可为空，为空时显示动作名称）
+    #[serde(default)]
+    pub label: String,
 }
 
-/// 通话远程控制配置。默认关闭；启用后，指定号码来电自动接听，接通后
-/// 每条动作独立计时，到达各自的 hold_seconds 时触发对应动作。
+/// 通话远程控制配置（时长编码方案）。
+///
+/// ## 交互流程
+///
+/// 1. 白名单号码来电 → 自动接听，开始计时。
+/// 2. 用户保持通话 N 秒后挂断 → 根据 duration_commands 匹配命令（±2s 容差）。
+/// 3. 通过 Webhook + 短信推送通知"检测到遥控命令，10 秒内再次来电确认执行"。
+/// 4. 同号码 10 秒内再次来电 → 确认并执行动作。
+/// 5. 10 秒内无二次来电 → 推送"命令已取消"。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallControlConfig {
     #[serde(default)]
@@ -379,18 +391,16 @@ pub struct CallControlConfig {
     /// 从而兼容来电显示带 "+86" 或国家码前缀的情况。
     #[serde(default)]
     pub numbers: Vec<String>,
-    /// 多条遥控动作，每条配置独立的等待时长和动作。
-    /// 所有动作从接通时刻同时计时，各自在到达 hold_seconds 时触发。
-    /// 推荐按 hold_seconds 升序排列。
+    /// 时长→命令映射表。同一 duration_secs 只保留第一条，推荐 5、10、15、20 秒依次递增。
     #[serde(default)]
-    pub actions: Vec<CallControlAction>,
+    pub duration_commands: Vec<CallControlDurationCommand>,
 }
 
-fn default_call_hold_seconds() -> u64 {
-    15
+fn default_duration_secs() -> u64 {
+    10
 }
 
-fn default_call_action() -> ScheduleAction {
+fn default_duration_command_action() -> ScheduleAction {
     ScheduleAction::Reboot
 }
 
@@ -399,7 +409,7 @@ impl Default for CallControlConfig {
         Self {
             enabled: false,
             numbers: Vec::new(),
-            actions: Vec::new(),
+            duration_commands: Vec::new(),
         }
     }
 }
@@ -474,11 +484,13 @@ impl CallControlConfig {
             .map(|number| normalize_phone_number(&number))
             .filter(|number| !number.is_empty() && seen.insert(number.clone()))
             .collect();
-        // 每条动作的 hold_seconds 限定范围；最多保留 10 条。
-        for action in &mut self.actions {
-            action.hold_seconds = action.hold_seconds.clamp(5, 3600);
+        // 每条命令的 duration_secs 限定 [3, 30] 秒范围；去重（同 duration 只保留第一条）；最多 10 条。
+        let mut seen_dur = std::collections::HashSet::new();
+        for cmd in &mut self.duration_commands {
+            cmd.duration_secs = cmd.duration_secs.clamp(3, 30);
         }
-        self.actions.truncate(10);
+        self.duration_commands.retain(|cmd| seen_dur.insert(cmd.duration_secs));
+        self.duration_commands.truncate(10);
         self
     }
 }
@@ -588,6 +600,86 @@ pub fn normalize_phone_number(number: &str) -> String {
         .collect()
 }
 
+/// MQTT 远程控制配置
+///
+/// 用于国内蜂窝网络与纯数据物联卡的远程运维场景。
+/// 支持多 Broker 节点容灾轮询，Client ID 动态拼接 IMEI 避免重名。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MqttConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Broker 节点列表（按优先级排序，失败时自动轮询）
+    #[serde(default = "default_broker_list")]
+    pub broker_list: Vec<String>,
+    /// 当前使用的 Broker（初始值，运行时可能切换）
+    #[serde(default = "default_broker")]
+    pub active_broker: String,
+    /// MQTT 端口
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    /// 订阅主题（接收指令）
+    #[serde(default = "default_topic_sub")]
+    pub topic_sub: String,
+    /// 发布主题（发送状态）
+    #[serde(default = "default_topic_pub")]
+    pub topic_pub: String,
+    /// 指令鉴权 Token（防止公共 Broker 上被误触）
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+fn default_broker_list() -> Vec<String> {
+    vec![
+        "broker.emqx.io".to_string(),
+        "broker-cn.emqx.io".to_string(),
+        "test.mosquitto.org".to_string(),
+    ]
+}
+
+fn default_broker() -> String {
+    "broker.emqx.io".to_string()
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
+}
+
+fn default_topic_sub() -> String {
+    "cpe/{imei}/cmd".to_string()
+}
+
+fn default_topic_pub() -> String {
+    "cpe/{imei}/status".to_string()
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            broker_list: default_broker_list(),
+            active_broker: default_broker(),
+            port: default_mqtt_port(),
+            topic_sub: default_topic_sub(),
+            topic_pub: default_topic_pub(),
+            auth_token: None,
+        }
+    }
+}
+
+impl MqttConfig {
+    pub fn sanitize(mut self) -> Self {
+        // 确保 broker_list 非空
+        if self.broker_list.is_empty() {
+            self.broker_list = default_broker_list();
+        }
+        // 确保 active_broker 在列表中
+        if !self.broker_list.contains(&self.active_broker) {
+            self.active_broker = self.broker_list[0].clone();
+        }
+        self
+    }
+}
+
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -615,6 +707,8 @@ pub struct AppConfig {
     pub band_lock: BandLockConfig,
     #[serde(default)]
     pub cell_lock: CellLockConfig,
+    #[serde(default)]
+    pub mqtt: MqttConfig,
 }
 
 
@@ -838,6 +932,18 @@ impl ConfigManager {
         {
             let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
             config.cell_lock = cell_lock;
+        }
+        self.save()
+    }
+
+    pub fn get_mqtt(&self) -> MqttConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).mqtt.clone()
+    }
+
+    pub fn set_mqtt(&self, mqtt: MqttConfig) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.mqtt = mqtt.sanitize();
         }
         self.save()
     }

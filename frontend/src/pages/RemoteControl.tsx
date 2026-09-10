@@ -30,13 +30,17 @@ import {
   Sms as SmsIcon,
   Phone as PhoneIcon,
   Refresh as RefreshIcon,
+  CloudQueue as CloudIcon,
 } from '@mui/icons-material'
 import { api } from '../api'
 import type {
   SmsControlConfigResponse,
   CallControlConfig,
+  CallControlDurationCommand,
   CallControlTrigger,
   ScheduleAction,
+  MqttConfigResponse,
+  MqttStatusResponse,
 } from '../api/types'
 
 const ACTION_LABELS: Record<ScheduleAction, string> = {
@@ -55,10 +59,12 @@ export default function RemoteControl() {
   const location = useLocation()
   const navigate = useNavigate()
 
-  const activeTab = location.pathname.endsWith('/call') ? 1 : 0
+  const activeTabMap: Record<string, number> = { '/remote/sms': 0, '/remote/call': 1, '/remote/mqtt': 2 }
+  const activeTab = activeTabMap[location.pathname] ?? 0
 
   const handleTabChange = (_: unknown, newValue: number) => {
-    void navigate(newValue === 0 ? '/remote/sms' : '/remote/call')
+    const paths = ['/remote/sms', '/remote/call', '/remote/mqtt']
+    void navigate(paths[newValue] || '/remote/sms')
   }
 
   // SMS Control state
@@ -73,12 +79,33 @@ export default function RemoteControl() {
   const [callConfig, setCallConfig] = useState<CallControlConfig>({
     enabled: false,
     numbers: [],
-    actions: [],
+    duration_commands: [],
   })
   const [callTrigger, setCallTrigger] = useState<CallControlTrigger | null>(null)
   const [callLoading, setCallLoading] = useState(false)
   const [callInitialized, setCallInitialized] = useState(false)
   const [newNumber, setNewNumber] = useState('')
+
+  // MQTT Control state
+  const [mqttConfig, setMqttConfig] = useState<MqttConfigResponse>({
+    enabled: false,
+    broker_list: ['broker.emqx.io', 'broker-cn.emqx.io', 'test.mosquitto.org'],
+    active_broker: 'broker.emqx.io',
+    port: 1883,
+    topic_sub: 'cpe/{imei}/cmd',
+    topic_pub: 'cpe/{imei}/status',
+    auth_token: null,
+  })
+  const [mqttStatus, setMqttStatus] = useState<MqttStatusResponse>({
+    connected: false,
+    current_broker: '',
+    last_heartbeat: null,
+    last_command: null,
+    error_message: null,
+    broker_index: 0,
+  })
+  const [mqttConfigLoading, setMqttConfigLoading] = useState(false)
+  const [mqttInitialized, setMqttInitialized] = useState(false)
 
   // Snackbar state
   const [snackbar, setSnackbar] = useState<{
@@ -129,6 +156,56 @@ export default function RemoteControl() {
     void loadSmsConfig()
     void loadCallConfig()
   }, [loadSmsConfig, loadCallConfig])
+
+  // Load MQTT config and status
+  const loadMqttConfig = useCallback(async () => {
+    try {
+      const [configRes, statusRes] = await Promise.all([
+        api.getMqttConfig(),
+        api.getMqttStatus(),
+      ])
+      if (configRes.data) setMqttConfig(configRes.data)
+      if (statusRes.data) setMqttStatus(statusRes.data)
+    } catch {
+      showSnackbar('加载 MQTT 配置失败', 'error')
+    } finally {
+      setMqttInitialized(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 2 && !mqttInitialized) {
+      void loadMqttConfig()
+    }
+  }, [activeTab, mqttInitialized, loadMqttConfig])
+
+  // Poll MQTT status every 5 seconds when on MQTT tab
+  useEffect(() => {
+    if (activeTab !== 2) return
+    const timer = setInterval(async () => {
+      try {
+        const res = await api.getMqttStatus()
+        if (res.data) setMqttStatus(res.data)
+      } catch { /* ignore poll errors */ }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [activeTab])
+
+  // Save MQTT config
+  const handleSaveMqtt = async () => {
+    setMqttConfigLoading(true)
+    try {
+      const res = await api.setMqttConfig(mqttConfig)
+      if (res.data) {
+        setMqttConfig(res.data)
+        showSnackbar('MQTT 配置已保存', 'success')
+      }
+    } catch {
+      showSnackbar('保存 MQTT 配置失败', 'error')
+    } finally {
+      setMqttConfigLoading(false)
+    }
+  }
 
   // Save SMS config
   const handleSaveSms = async () => {
@@ -202,6 +279,7 @@ export default function RemoteControl() {
       <Tabs value={activeTab} onChange={handleTabChange} sx={{ mb: 3 }}>
         <Tab icon={<SmsIcon />} iconPosition="start" label="短信遥控" />
         <Tab icon={<PhoneIcon />} iconPosition="start" label="通话遥控" />
+        <Tab icon={<CloudIcon />} iconPosition="start" label="MQTT" />
       </Tabs>
 
       {/* SMS Control Panel */}
@@ -291,7 +369,18 @@ export default function RemoteControl() {
           ) : (
             <Stack spacing={3}>
               <Alert severity="info">
-                白名单号码拨打电话时，设备会自动接听，接通后所有动作同时计时，各自在到达等待时长后触发。
+                <Typography variant="body2" fontWeight="bold" gutterBottom>
+                  通话时长编码遥控
+                </Typography>
+                <Typography variant="body2" component="div">
+                  <ol style={{ margin: 0, paddingLeft: 20 }}>
+                    <li>白名单号码来电 → 自动接听并计时</li>
+                    <li>保持通话 N 秒后挂断 → 根据时长匹配命令（±2秒容差）</li>
+                    <li>推送通知："检测到命令，10秒内再次来电确认"</li>
+                    <li>同号码10秒内再次来电 → 确认执行</li>
+                    <li>超时未确认 → 自动取消</li>
+                  </ol>
+                </Typography>
               </Alert>
 
               <FormControlLabel
@@ -380,32 +469,41 @@ export default function RemoteControl() {
 
               <Divider />
 
-              {/* Action List */}
+              {/* Duration Commands List */}
               <Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                   <Typography variant="subtitle2">
-                    遥控动作列表
+                    通话时长 → 命令映射
                   </Typography>
                   <Button
                     size="small"
                     startIcon={<AddIcon />}
                     onClick={() => {
-                      if (callConfig.actions.length >= 10) return
+                      if (callConfig.duration_commands.length >= 10) return
+                      // Find next unused duration (5, 10, 15, ...)
+                      const usedDurations = new Set(callConfig.duration_commands.map(c => c.duration_secs))
+                      let nextDur = 5
+                      while (usedDurations.has(nextDur)) nextDur += 5
+                      const newCmd: CallControlDurationCommand = {
+                        duration_secs: nextDur,
+                        action: 'reboot',
+                        label: '',
+                      }
                       setCallConfig({
                         ...callConfig,
-                        actions: [...callConfig.actions, { hold_seconds: 15, action: 'reboot' }],
+                        duration_commands: [...callConfig.duration_commands, newCmd],
                       })
                     }}
-                    disabled={callConfig.actions.length >= 10}
+                    disabled={callConfig.duration_commands.length >= 10}
                   >
-                    添加动作
+                    添加命令
                   </Button>
                 </Box>
-                {callConfig.actions.length > 0 ? (
+                {callConfig.duration_commands.length > 0 ? (
                   <Stack spacing={2}>
-                    {callConfig.actions
-                      .map((a, i) => ({ ...a, _idx: i }))
-                      .sort((a, b) => a.hold_seconds - b.hold_seconds)
+                    {callConfig.duration_commands
+                      .map((cmd, i) => ({ ...cmd, _idx: i }))
+                      .sort((a, b) => a.duration_secs - b.duration_secs)
                       .map((item) => (
                         <Box
                           key={item._idx}
@@ -422,29 +520,29 @@ export default function RemoteControl() {
                           <TextField
                             type="number"
                             size="small"
-                            label="等待(秒)"
-                            value={item.hold_seconds}
+                            label="通话时长(秒)"
+                            value={item.duration_secs}
                             onChange={(e) => {
-                              const newActions = [...callConfig.actions]
-                              newActions[item._idx] = {
-                                ...newActions[item._idx],
-                                hold_seconds: Math.max(5, Math.min(3600, parseInt(e.target.value) || 5)),
+                              const newCmds = [...callConfig.duration_commands]
+                              newCmds[item._idx] = {
+                                ...newCmds[item._idx],
+                                duration_secs: Math.max(3, Math.min(30, parseInt(e.target.value) || 3)),
                               }
-                              setCallConfig({ ...callConfig, actions: newActions })
+                              setCallConfig({ ...callConfig, duration_commands: newCmds })
                             }}
-                            inputProps={{ min: 5, max: 3600 }}
-                            sx={{ width: 110 }}
+                            inputProps={{ min: 3, max: 30 }}
+                            sx={{ width: 130 }}
                           />
                           <FormControl size="small" sx={{ flex: 1 }}>
                             <Select
                               value={item.action}
                               onChange={(e) => {
-                                const newActions = [...callConfig.actions]
-                                newActions[item._idx] = {
-                                  ...newActions[item._idx],
+                                const newCmds = [...callConfig.duration_commands]
+                                newCmds[item._idx] = {
+                                  ...newCmds[item._idx],
                                   action: e.target.value as ScheduleAction,
                                 }
-                                setCallConfig({ ...callConfig, actions: newActions })
+                                setCallConfig({ ...callConfig, duration_commands: newCmds })
                               }}
                             >
                               {Object.entries(ACTION_LABELS).map(([value, label]) => (
@@ -454,13 +552,28 @@ export default function RemoteControl() {
                               ))}
                             </Select>
                           </FormControl>
+                          <TextField
+                            size="small"
+                            label="标签(可选)"
+                            value={item.label}
+                            onChange={(e) => {
+                              const newCmds = [...callConfig.duration_commands]
+                              newCmds[item._idx] = {
+                                ...newCmds[item._idx],
+                                label: e.target.value,
+                              }
+                              setCallConfig({ ...callConfig, duration_commands: newCmds })
+                            }}
+                            placeholder="例: 重启"
+                            sx={{ width: 100 }}
+                          />
                           <IconButton
                             size="small"
                             color="error"
                             onClick={() => {
                               setCallConfig({
                                 ...callConfig,
-                                actions: callConfig.actions.filter((_, i) => i !== item._idx),
+                                duration_commands: callConfig.duration_commands.filter((_, i) => i !== item._idx),
                               })
                             }}
                           >
@@ -471,12 +584,12 @@ export default function RemoteControl() {
                   </Stack>
                 ) : (
                   <Alert severity="warning">
-                    尚未配置遥控动作，请点击"添加动作"创建。接通后所有动作同时计时，按等待时长依次触发。
+                    尚未配置命令映射。请点击"添加命令"创建时长→动作映射。
                   </Alert>
                 )}
                 <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                  最多 10 条动作。所有动作从接通时刻同时开始计时，互不干扰。
-                  飞行模式相关动作会在 10 秒后自动恢复网络。
+                  通话时长范围 3-30 秒，±2 秒容差匹配。每个时长只能配置一条命令，最多 10 条。
+                  检测后需同号码 10 秒内再次来电确认执行。飞行模式相关动作会在 10 秒后自动恢复网络。
                 </Typography>
               </Box>
 
@@ -487,6 +600,200 @@ export default function RemoteControl() {
                 disabled={callLoading}
               >
                 {callLoading ? '保存中...' : '保存配置'}
+              </Button>
+            </Stack>
+          )}
+        </Paper>
+      )}
+
+      {/* MQTT Remote Control Panel */}
+      {activeTab === 2 && (
+        <Paper sx={{ p: 3 }}>
+          {!mqttInitialized ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <Stack spacing={3}>
+              <Alert severity="info">
+                基于 MQTT 协议的远程控制，适用于纯数据物联卡（无短信/通话权限）。
+                设备通过公共 MQTT Broker 收发指令，支持多节点自动故障转移。
+              </Alert>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={mqttConfig.enabled}
+                    onChange={(e) =>
+                      setMqttConfig({ ...mqttConfig, enabled: e.target.checked })
+                    }
+                  />
+                }
+                label="启用 MQTT 远程控制"
+              />
+
+              {/* Connection Status Card */}
+              <Card variant={mqttStatus.connected ? 'outlined' : 'outlined'}>
+                <CardContent>
+                  <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                    连接状态
+                  </Typography>
+                  <Stack spacing={1}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Box
+                        sx={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: '50%',
+                          backgroundColor: mqttStatus.connected ? '#4caf50' : '#f44336',
+                        }}
+                      />
+                      <Typography variant="body2">
+                        {mqttStatus.connected ? '已连接' : '未连接'}
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2">
+                      当前 Broker: {mqttStatus.current_broker || '—'}
+                    </Typography>
+                    <Typography variant="body2">
+                      最后心跳: {mqttStatus.last_heartbeat || '—'}
+                    </Typography>
+                    <Typography variant="body2">
+                      最后指令: {mqttStatus.last_command || '—'}
+                    </Typography>
+                    {mqttStatus.error_message && (
+                      <Alert severity="error" sx={{ mt: 1 }}>
+                        {mqttStatus.error_message}
+                      </Alert>
+                    )}
+                  </Stack>
+                </CardContent>
+              </Card>
+
+              <Divider />
+
+              {/* Broker Configuration */}
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  Broker 节点列表
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: 'block' }}>
+                  按优先级排序，连接失败时自动轮询下一个节点。当前激活: {mqttConfig.active_broker}
+                </Typography>
+                {mqttConfig.broker_list.map((broker, index) => (
+                  <Box key={index} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
+                    <TextField
+                      size="small"
+                      value={broker}
+                      onChange={(e) => {
+                        const newList = [...mqttConfig.broker_list]
+                        newList[index] = e.target.value
+                        setMqttConfig({ ...mqttConfig, broker_list: newList })
+                      }}
+                      sx={{ flex: 1 }}
+                    />
+                    <IconButton
+                      size="small"
+                      color="error"
+                      onClick={() => {
+                        setMqttConfig({
+                          ...mqttConfig,
+                          broker_list: mqttConfig.broker_list.filter((_, i) => i !== index),
+                          active_broker:
+                            mqttConfig.active_broker === broker
+                              ? mqttConfig.broker_list[0] ?? broker
+                              : mqttConfig.active_broker,
+                        })
+                      }}
+                      disabled={mqttConfig.broker_list.length <= 1}
+                    >
+                      <DeleteIcon />
+                    </IconButton>
+                  </Box>
+                ))}
+                <Button
+                  size="small"
+                  startIcon={<AddIcon />}
+                  onClick={() =>
+                    setMqttConfig({
+                      ...mqttConfig,
+                      broker_list: [...mqttConfig.broker_list, ''],
+                    })
+                  }
+                  sx={{ mt: 1 }}
+                >
+                  添加节点
+                </Button>
+              </Box>
+
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <TextField
+                  size="small"
+                  label="端口"
+                  type="number"
+                  value={mqttConfig.port}
+                  onChange={(e) =>
+                    setMqttConfig({ ...mqttConfig, port: parseInt(e.target.value) || 1883 })
+                  }
+                  inputProps={{ min: 1, max: 65535 }}
+                  sx={{ width: 120 }}
+                />
+                <TextField
+                  size="small"
+                  label="订阅主题 (接收指令)"
+                  value={mqttConfig.topic_sub}
+                  onChange={(e) =>
+                    setMqttConfig({ ...mqttConfig, topic_sub: e.target.value })
+                  }
+                  sx={{ flex: 1 }}
+                  helperText="使用 {imei} 作为设备占位符"
+                />
+              </Box>
+
+              <TextField
+                size="small"
+                label="发布主题 (发送状态)"
+                value={mqttConfig.topic_pub}
+                onChange={(e) =>
+                  setMqttConfig({ ...mqttConfig, topic_pub: e.target.value })
+                }
+                helperText="使用 {imei} 作为设备占位符"
+              />
+
+              <TextField
+                size="small"
+                label="鉴权 Token (可选)"
+                value={mqttConfig.auth_token ?? ''}
+                onChange={(e) =>
+                  setMqttConfig({
+                    ...mqttConfig,
+                    auth_token: e.target.value || null,
+                  })
+                }
+                helperText="设置后只有携带正确 token 的指令才会执行"
+              />
+
+              <Alert severity="info">
+                <Typography variant="subtitle2" gutterBottom>
+                  支持的指令（通过 MQTT 发送 JSON 到订阅主题）：
+                </Typography>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+                  <Chip label='{"action":"reboot"}' size="small" color="primary" variant="outlined" />
+                  <Chip label='{"action":"reconnect"}' size="small" color="primary" variant="outlined" />
+                  <Chip label='{"action":"status"}' size="small" color="primary" variant="outlined" />
+                </Box>
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  若配置了 Token，需添加 "token" 字段：{`{"action":"reboot","token":"your-token"}`}
+                </Typography>
+              </Alert>
+
+              <Button
+                variant="contained"
+                startIcon={mqttConfigLoading ? <CircularProgress size={20} /> : <SaveIcon />}
+                onClick={() => void handleSaveMqtt()}
+                disabled={mqttConfigLoading}
+              >
+                {mqttConfigLoading ? '保存中...' : '保存配置'}
               </Button>
             </Stack>
           )}
