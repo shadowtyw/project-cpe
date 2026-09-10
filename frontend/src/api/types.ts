@@ -917,6 +917,7 @@ export interface MqttConfigResponse {
 }
 
 export interface MqttStatusResponse {
+  enabled: boolean
   connected: boolean
   current_broker: string
   last_heartbeat: string | null

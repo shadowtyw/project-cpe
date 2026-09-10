@@ -97,6 +97,7 @@ export default function RemoteControl() {
     auth_token: null,
   })
   const [mqttStatus, setMqttStatus] = useState<MqttStatusResponse>({
+    enabled: false,
     connected: false,
     current_broker: '',
     last_heartbeat: null,

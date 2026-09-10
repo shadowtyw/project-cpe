@@ -3782,6 +3782,7 @@ pub async fn set_mqtt_config_handler(
 pub async fn get_mqtt_status_handler() -> impl IntoResponse {
     let status = crate::mqtt_service::get_mqtt_status().await;
     Json(ApiResponse::success_with_message("Success", MqttStatusResponse {
+        enabled: crate::mqtt_service::is_mqtt_enabled(),
         connected: status.connected,
         current_broker: status.current_broker,
         last_heartbeat: status.last_heartbeat,

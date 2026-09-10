@@ -1425,6 +1425,7 @@ pub struct MqttConfigResponse {
 /// MQTT 状态响应（镜像 mqtt_service::MqttRuntimeState）
 #[derive(Debug, Clone, Serialize)]
 pub struct MqttStatusResponse {
+    pub enabled: bool,
     pub connected: bool,
     pub current_broker: String,
     pub last_heartbeat: Option<String>,

@@ -52,11 +52,11 @@ struct ActiveCall {
 }
 
 /// 待确认命令。
-#[allow(dead_code)]
 struct PendingCommand {
     number: String,
     action: ScheduleAction,
     action_label: String,
+    #[allow(dead_code)]
     duration_secs: u64,
     expires_at: Instant,
 }
