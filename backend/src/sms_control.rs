@@ -14,7 +14,6 @@
 //! - 命中指令的短信不会触发 Webhook/短信推送转发，避免把控制指令泄漏到第三方平台。
 //! - 每条指令执行后都会回复一条确认短信，耗费一条普通短信费。
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{info, warn};

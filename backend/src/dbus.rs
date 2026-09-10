@@ -833,7 +833,7 @@ pub async fn data_connection_watchdog(
             let result = check_and_restore_data_connection(&conn).await;
             if result != last_data_log {
                 info!("Watchdog: data connection: {}", result);
-                last_data_log = result;
+                last_data_log = result.clone();
                 // 重连成功后重套持久化的射频模式 / 频段锁 / 小区锁
                 if result.starts_with("Connection restored") {
                     crate::band_manager::apply_persisted_locks(&conn, &config_manager).await;

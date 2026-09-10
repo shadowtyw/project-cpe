@@ -1394,7 +1394,7 @@ pub struct CallControlTrigger {
 // ============ 短信遥控模型 ============
 
 /// 短信遥控配置响应（白名单复用通话遥控的 numbers）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct SmsControlConfigResponse {
     pub enabled: bool,
     /// 共享的管理员白名单（来自 CallControlConfig.numbers）
