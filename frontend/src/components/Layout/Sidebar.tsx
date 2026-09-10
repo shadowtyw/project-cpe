@@ -97,10 +97,6 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
     }
   })
 
-  useEffect(() => {
-    localStorage.setItem('expandedMenus', JSON.stringify([...effectiveExpandedMenus]))
-  }, [effectiveExpandedMenus])
-
   // 自动展开包含当前路径的父菜单（在 render 期间计算，不在 effect 中）
   const effectiveExpandedMenus = useMemo(() => {
     const next = new Set(expandedMenus)
@@ -114,6 +110,10 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
     }
     return next
   }, [expandedMenus, location.pathname])
+
+  useEffect(() => {
+    localStorage.setItem('expandedMenus', JSON.stringify([...effectiveExpandedMenus]))
+  }, [effectiveExpandedMenus])
 
   const handleNavigation = (path: string): void => {
     void navigate(path)
