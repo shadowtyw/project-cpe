@@ -104,7 +104,7 @@ impl MqttService {
         }
     }
 
-    async fn connect_and_run(&self, config: &MqttConfig) -> Result<(), Box<dyn std::error::Error>> {
+    async fn connect_and_run(&self, config: &MqttConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let broker_list = &config.broker_list;
         let mut broker_index = 0;
 
@@ -138,9 +138,10 @@ impl MqttService {
                     broker_index += 1;
                 }
                 Err(e) => {
-                    error!(broker = %broker, error = %e, "Failed to connect to broker");
+                    let err_msg = format!("{}: {}", broker, e);
+                    error!(broker = %broker, error = %err_msg, "Failed to connect to broker");
                     self.update_state(|state| {
-                        state.error_message = Some(format!("{}: {}", broker, e));
+                        state.error_message = Some(err_msg);
                     }).await;
                     broker_index += 1;
                     sleep(Duration::from_secs(3)).await;
@@ -154,7 +155,7 @@ impl MqttService {
         broker: &str,
         client_id: &str,
         config: &MqttConfig,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut mqttoptions = MqttOptions::new(client_id, broker, config.port);
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_clean_session(true);
@@ -191,10 +192,11 @@ impl MqttService {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    error!(error = %e, "MQTT event loop error");
+                    let err_msg = e.to_string();
+                    error!(error = %err_msg, "MQTT event loop error");
                     self.update_state(|state| {
                         state.connected = false;
-                        state.error_message = Some(e.to_string());
+                        state.error_message = Some(err_msg.clone());
                     }).await;
                     return Err(Box::new(e));
                 }
