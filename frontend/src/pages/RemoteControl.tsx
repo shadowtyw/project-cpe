@@ -59,7 +59,7 @@ export default function RemoteControl() {
   const activeTab = location.pathname.endsWith('/call') ? 1 : 0
 
   const handleTabChange = (_: unknown, newValue: number) => {
-    navigate(newValue === 0 ? '/remote/sms' : '/remote/call')
+    void navigate(newValue === 0 ? '/remote/sms' : '/remote/call')
   }
 
   // SMS Control state
@@ -100,7 +100,7 @@ export default function RemoteControl() {
       if (res.data) {
         setSmsConfig(res.data)
       }
-    } catch (err) {
+    } catch {
       showSnackbar('加载短信遥控配置失败', 'error')
     } finally {
       setSmsInitialized(true)
@@ -120,7 +120,7 @@ export default function RemoteControl() {
       if (statusRes.data) {
         setCallTrigger(statusRes.data)
       }
-    } catch (err) {
+    } catch {
       showSnackbar('加载通话遥控配置失败', 'error')
     } finally {
       setCallInitialized(true)
@@ -128,8 +128,8 @@ export default function RemoteControl() {
   }, [])
 
   useEffect(() => {
-    loadSmsConfig()
-    loadCallConfig()
+    void loadSmsConfig()
+    void loadCallConfig()
   }, [loadSmsConfig, loadCallConfig])
 
   // Save SMS config
@@ -141,7 +141,7 @@ export default function RemoteControl() {
         setSmsConfig(res.data)
         showSnackbar('短信遥控配置已保存', 'success')
       }
-    } catch (err) {
+    } catch {
       showSnackbar('保存短信遥控配置失败', 'error')
     } finally {
       setSmsLoading(false)
@@ -157,7 +157,7 @@ export default function RemoteControl() {
         setCallConfig(res.data)
         showSnackbar('通话遥控配置已保存', 'success')
       }
-    } catch (err) {
+    } catch {
       showSnackbar('保存通话遥控配置失败', 'error')
     } finally {
       setCallLoading(false)
@@ -190,7 +190,7 @@ export default function RemoteControl() {
       if (res.data) {
         setCallTrigger(res.data)
       }
-    } catch (err) {
+    } catch {
       showSnackbar('刷新状态失败', 'error')
     }
   }
@@ -268,7 +268,7 @@ export default function RemoteControl() {
               <Button
                 variant="contained"
                 startIcon={smsLoading ? <CircularProgress size={20} /> : <SaveIcon />}
-                onClick={handleSaveSms}
+                onClick={() => void handleSaveSms()}
                 disabled={smsLoading}
               >
                 {smsLoading ? '保存中...' : '保存配置'}
@@ -310,7 +310,7 @@ export default function RemoteControl() {
                     <Typography variant="subtitle1" fontWeight="bold">
                       上次触发状态
                     </Typography>
-                    <IconButton size="small" onClick={handleRefreshStatus}>
+                    <IconButton size="small" onClick={() => void handleRefreshStatus()}>
                       <RefreshIcon />
                     </IconButton>
                   </Box>
@@ -414,7 +414,7 @@ export default function RemoteControl() {
               <Button
                 variant="contained"
                 startIcon={callLoading ? <CircularProgress size={20} /> : <SaveIcon />}
-                onClick={handleSaveCall}
+                onClick={() => void handleSaveCall()}
                 disabled={callLoading}
               >
                 {callLoading ? '保存中...' : '保存配置'}

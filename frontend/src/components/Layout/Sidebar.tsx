@@ -106,12 +106,15 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
     for (const item of menuItems) {
       if (item.children) {
         const hasMatch = item.children.some((child) => child.path === location.pathname)
-        if (hasMatch && !expandedMenus.has(item.label)) {
-          setExpandedMenus((prev) => new Set([...prev, item.label!]))
+        if (hasMatch) {
+          setExpandedMenus((prev) => {
+            if (prev.has(item.label)) return prev
+            return new Set([...prev, item.label])
+          })
         }
       }
     }
-  }, [location.pathname, expandedMenus])
+  }, [location.pathname])
 
   const handleNavigation = (path: string): void => {
     void navigate(path)
@@ -178,7 +181,7 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
                         <ListItem key={child.path} disablePadding>
                           <ListItemButton
                             selected={location.pathname === child.path}
-                            onClick={() => handleNavigation(child.path!)}
+                            onClick={() => child.path && handleNavigation(child.path)}
                             sx={{ pl: 4 }}
                           >
                             <ListItemIcon>
@@ -200,7 +203,7 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
             <ListItem key={item.path} disablePadding>
               <ListItemButton
                 selected={location.pathname === item.path}
-                onClick={() => handleNavigation(item.path!)}
+                onClick={() => item.path && handleNavigation(item.path)}
               >
                 <ListItemIcon>
                   <IconComponent />
