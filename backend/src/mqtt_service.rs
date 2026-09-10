@@ -341,6 +341,7 @@ pub async fn get_mqtt_status() -> MqttRuntimeState {
 }
 
 /// 检查 MQTT 是否启用
+#[allow(dead_code)]
 pub fn is_mqtt_enabled() -> bool {
     MQTT_ENABLED.load(Ordering::SeqCst)
 }

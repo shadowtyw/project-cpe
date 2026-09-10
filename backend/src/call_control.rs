@@ -52,6 +52,7 @@ struct ActiveCall {
 }
 
 /// 待确认命令。
+#[allow(dead_code)]
 struct PendingCommand {
     number: String,
     action: ScheduleAction,
