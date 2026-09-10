@@ -85,13 +85,17 @@ impl MqttService {
 
             MQTT_ENABLED.store(true, Ordering::SeqCst);
 
-            let result = self.connect_and_run(&config).await;
-            if let Err(ref e) = result {
-                error!(error = %e, "MQTT service error");
-                let err_str = e.to_string();
+            let err_str = match self.connect_and_run(&config).await {
+                Ok(()) => None,
+                Err(e) => {
+                    error!(error = %e, "MQTT service error");
+                    Some(e.to_string())
+                }
+            };
+            if let Some(msg) = err_str {
                 self.update_state(|state| {
                     state.connected = false;
-                    state.error_message = Some(err_str);
+                    state.error_message = Some(msg);
                 }).await;
             }
 

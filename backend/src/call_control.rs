@@ -105,25 +105,32 @@ pub async fn on_incoming_call(
         return false;
     }
 
-    // 二次来电确认：是否存在待确认命令且号码匹配？
-    let (action, label, number) = {
-        let mut state = lock_state();
-        let pending = match state.pending.take() {
-            Some(p) if p.number == normalized => p,
-            _ => {
-                // 覆盖旧活跃通话（同一时刻只跟踪一通），然后退出锁作用域去接听
-                state.active_call = Some(ActiveCall {
-                    number: normalized.clone(),
-                    path: path.to_string(),
-                    begin: Instant::now(),
-                });
-                drop(state);
-                let _ = crate::dbus::answer_call(conn, path).await;
-                return true;
-            }
-        };
-        (pending.action, pending.action_label.clone(), pending.number.clone())
+    // 检查是否为二次确认来电
+    let is_confirmation = { lock_state().pending.as_ref().map_or(false, |p| p.number == normalized) };
+
+    if !is_confirmation {
+        // 首次通话：记录活跃通话并自动接听
+        {
+            let mut state = lock_state();
+            state.active_call = Some(ActiveCall {
+                number: normalized,
+                path: path.to_string(),
+                begin: Instant::now(),
+            });
+        }
+        let _ = crate::dbus::answer_call(conn, path).await;
+        return true;
+    }
+
+    // 二次来电确认：取出待确认命令
+    let pending = match lock_state().pending.take() {
+        Some(p) if p.number == normalized => p,
+        _ => return false,
     };
+
+    let action = pending.action;
+    let label = pending.action_label;
+    let number = pending.number;
 
     send_notification(&serde_json::json!({
         "event": "call_control_confirmed",
@@ -138,7 +145,7 @@ pub async fn on_incoming_call(
 
     // 挂断确认来电
     let _ = crate::dbus::hangup_call(conn, path).await;
-    return true;
+    true
 }
 
 /// 通话结束：测量通话时长，匹配命令，开始确认倒计时。
