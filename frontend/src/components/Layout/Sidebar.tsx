@@ -8,7 +8,7 @@
  *
  * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Drawer,
@@ -98,23 +98,22 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
   })
 
   useEffect(() => {
-    localStorage.setItem('expandedMenus', JSON.stringify([...expandedMenus]))
-  }, [expandedMenus])
+    localStorage.setItem('expandedMenus', JSON.stringify([...effectiveExpandedMenus]))
+  }, [effectiveExpandedMenus])
 
-  // 如果当前路径匹配子菜单项，自动展开父菜单
-  useEffect(() => {
+  // 自动展开包含当前路径的父菜单（在 render 期间计算，不在 effect 中）
+  const effectiveExpandedMenus = useMemo(() => {
+    const next = new Set(expandedMenus)
     for (const item of menuItems) {
       if (item.children) {
         const hasMatch = item.children.some((child) => child.path === location.pathname)
         if (hasMatch) {
-          setExpandedMenus((prev) => {
-            if (prev.has(item.label)) return prev
-            return new Set([...prev, item.label])
-          })
+          next.add(item.label)
         }
       }
     }
-  }, [location.pathname])
+    return next
+  }, [expandedMenus, location.pathname])
 
   const handleNavigation = (path: string): void => {
     void navigate(path)
@@ -156,7 +155,7 @@ export default function Sidebar({ drawerWidth, mobileOpen, desktopOpen, onClose,
 
           // 有子菜单的父级项
           if (item.children) {
-            const isExpanded = expandedMenus.has(item.label)
+            const isExpanded = effectiveExpandedMenus.has(item.label)
             const childActive = isChildActive(item.children)
 
             return (
