@@ -66,9 +66,23 @@ pub struct Database {
 }
 
 impl Database {
+    /// 获取连接锁守卫，毒化时恢复而非 panic。
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// 创建或打开数据库
     pub fn new(db_path: PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
+
+        // 启用 WAL 模式：允许并发读写，读取不再阻塞写入。
+        // embedded 设备上 WAL 也能显著提升多任务并发访问的响应速度。
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA foreign_keys=ON;",
+        )?;
         
         // 创建短信表（如果不存在）
         conn.execute(
@@ -116,12 +130,22 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_call_start_time ON call_history(start_time DESC)",
             [],
         )?;
-        
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_call_phone ON call_history(phone_number)",
             [],
         )?;
-        
+
+        // 创建流量日统计表
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS traffic_daily (
+                date TEXT PRIMARY KEY,
+                rx_bytes INTEGER NOT NULL DEFAULT 0,
+                tx_bytes INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -138,7 +162,7 @@ impl Database {
         status: &str,
         pdu: Option<&str>,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let timestamp = Utc::now().to_rfc3339();
         
         conn.execute(
@@ -153,7 +177,7 @@ impl Database {
     /// 更新短信状态
     #[allow(dead_code)]
     pub fn update_sms_status(&self, id: i64, status: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE sms_messages SET status = ?1 WHERE id = ?2",
             params![status, id],
@@ -163,7 +187,7 @@ impl Database {
     
     /// 获取所有短信（分页）
     pub fn get_sms_messages(&self, limit: i64, offset: i64) -> Result<Vec<SmsMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, direction, phone_number, content, timestamp, status, pdu
              FROM sms_messages
@@ -193,7 +217,7 @@ impl Database {
     
     /// 获取与特定号码的对话历史
     pub fn get_sms_conversation(&self, phone_number: &str, limit: i64) -> Result<Vec<SmsMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, direction, phone_number, content, timestamp, status, pdu
              FROM sms_messages
@@ -224,7 +248,7 @@ impl Database {
     
     /// 获取短信统计
     pub fn get_sms_stats(&self) -> Result<SmsStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         
         let total: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sms_messages",
@@ -251,10 +275,14 @@ impl Database {
         })
     }
     
-    /// 删除旧短信（保留最近 N 条）
-    #[allow(dead_code)]
+    /// 删除旧短信（保留最近 N 条）。
+    ///
+    /// `keep_count <= 0` 时不删除任何记录，避免误清空。
     pub fn cleanup_old_sms(&self, keep_count: i64) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        if keep_count <= 0 {
+            return Ok(0);
+        }
+        let conn = self.lock_conn();
         let deleted = conn.execute(
             "DELETE FROM sms_messages WHERE id NOT IN (
                 SELECT id FROM sms_messages ORDER BY timestamp DESC LIMIT ?1
@@ -266,7 +294,7 @@ impl Database {
     
     /// 删除所有短信
     pub fn clear_all_sms(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM sms_messages", [])?;
         Ok(())
     }
@@ -280,7 +308,7 @@ impl Database {
         phone_number: &str,
         answered: bool,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let start_time = Utc::now().to_rfc3339();
         
         conn.execute(
@@ -294,7 +322,7 @@ impl Database {
     
     /// 更新通话记录（通话结束时调用）
     pub fn update_call_end(&self, id: i64, duration: i64, answered: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let end_time = Utc::now().to_rfc3339();
         
         conn.execute(
@@ -306,7 +334,7 @@ impl Database {
     
     /// 标记通话为未接来电
     pub fn mark_call_missed(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let end_time = Utc::now().to_rfc3339();
         
         conn.execute(
@@ -318,7 +346,7 @@ impl Database {
     
     /// 获取通话记录（分页）
     pub fn get_call_history(&self, limit: i64, offset: i64) -> Result<Vec<CallRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, direction, phone_number, duration, start_time, end_time, answered
              FROM call_history
@@ -349,7 +377,7 @@ impl Database {
     /// 获取与特定号码的通话记录
     #[allow(dead_code)]
     pub fn get_call_history_by_number(&self, phone_number: &str, limit: i64) -> Result<Vec<CallRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, direction, phone_number, duration, start_time, end_time, answered
              FROM call_history
@@ -380,7 +408,7 @@ impl Database {
     
     /// 获取通话统计
     pub fn get_call_stats(&self) -> Result<CallStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         
         let total: i64 = conn.query_row(
             "SELECT COUNT(*) FROM call_history",
@@ -423,16 +451,111 @@ impl Database {
     
     /// 删除单条通话记录
     pub fn delete_call(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM call_history WHERE id = ?1", params![id])?;
         Ok(())
     }
     
     /// 删除所有通话记录
     pub fn clear_all_calls(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM call_history", [])?;
         Ok(())
+    }
+
+    /// 删除旧通话记录（保留最近 N 条）。
+    ///
+    /// `keep_count <= 0` 时不删除任何记录，避免误清空。
+    pub fn cleanup_old_calls(&self, keep_count: i64) -> Result<usize> {
+        if keep_count <= 0 {
+            return Ok(0);
+        }
+        let conn = self.lock_conn();
+        let deleted = conn.execute(
+            "DELETE FROM call_history WHERE id NOT IN (
+                SELECT id FROM call_history ORDER BY start_time DESC LIMIT ?1
+            )",
+            params![keep_count],
+        )?;
+        Ok(deleted)
+    }
+
+    // ==================== 流量统计相关方法 ====================
+
+    /// 将一段时间内的流量增量累加到当日记录
+    pub fn add_traffic_delta(&self, rx_delta: u64, tx_delta: u64) -> Result<()> {
+        let conn = self.lock_conn();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        conn.execute(
+            "INSERT INTO traffic_daily (date, rx_bytes, tx_bytes)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(date) DO UPDATE SET
+                rx_bytes = rx_bytes + excluded.rx_bytes,
+                tx_bytes = tx_bytes + excluded.tx_bytes",
+            params![today, rx_delta as i64, tx_delta as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 读取今日累计 (rx_bytes, tx_bytes)
+    ///
+    /// 当日尚无采样记录时返回 (0, 0)，而不是报错，避免流量统计页在设备刚启动
+    /// 或当天还没有产生任何流量时出现 "Query returned no rows"。
+    pub fn get_todays_traffic(&self) -> Result<(u64, u64)> {
+        let conn = self.lock_conn();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let row = conn.query_row(
+            "SELECT rx_bytes, tx_bytes FROM traffic_daily WHERE date = ?1",
+            params![today],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        );
+
+        match row {
+            Ok((rx, tx)) => Ok((rx.max(0) as u64, tx.max(0) as u64)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, 0)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 读取本月累计 (rx_bytes, tx_bytes)
+    pub fn get_months_traffic(&self) -> Result<(u64, u64)> {
+        let conn = self.lock_conn();
+        let month_prefix = chrono::Local::now().format("%Y-%m").to_string();
+        // SUM 聚合在没有匹配行时返回一行 NULL，COALESCE 后为 0，不会触发 no rows。
+        let row = conn.query_row(
+            "SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
+             FROM traffic_daily WHERE date LIKE ?1",
+            params![format!("{}%", month_prefix)],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        );
+
+        match row {
+            Ok((rx, tx)) => Ok((rx.max(0) as u64, tx.max(0) as u64)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, 0)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 读取最近的流量历史（最近 N 天，按日期升序）
+    pub fn get_traffic_history(&self, days: i64) -> Result<Vec<(String, u64, u64)>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT date, rx_bytes, tx_bytes FROM traffic_daily
+             ORDER BY date DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![days.max(1)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            let (date, rx, tx) = row?;
+            result.push((date, rx.max(0) as u64, tx.max(0) as u64));
+        }
+        // 逆转为按日期升序
+        result.reverse();
+        Ok(result)
     }
 }
 

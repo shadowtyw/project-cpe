@@ -5,14 +5,15 @@ meta {
 }
 
 post {
-  url: http://192.168.66.1:3000/api/ota/apply
+  url: http://192.168.67.1/api/ota/apply
   body: json
   auth: inherit
 }
 
 body:json {
   {
-    "restart_now": false
+    "restart_now": false,
+    "allow_downgrade": false
   }
 }
 
@@ -24,7 +25,7 @@ docs {
   应用已上传的 OTA 更新
   
   参数：
-  - restart_now: 是否立即重启服务（true/false）
+  - allow_downgrade: false（默认；同版本或低版本恢复包必须明确设为 true）
   
   注意：
   - 更新前必须先上传 OTA 包（/api/ota/upload）

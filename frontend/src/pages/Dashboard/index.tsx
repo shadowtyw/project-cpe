@@ -23,6 +23,7 @@ import {
   TemperatureMonitor,
   CellInfo,
   DeviceInfoCard,
+  LogQuickEntry,
 } from './components'
 
 export default function Dashboard() {
@@ -92,6 +93,11 @@ export default function Dashboard() {
         {/* 第四行：设备信息（全宽） */}
         <Grid size={12}>
           <DeviceInfoCard deviceInfo={data.deviceInfo} systemStats={data.systemStats} />
+        </Grid>
+
+        {/* 第五行：系统日志快捷入口（全宽） */}
+        <Grid size={12}>
+          <LogQuickEntry />
         </Grid>
       </Grid>
     </Box>

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use zbus::{proxy, zvariant::OwnedValue, Connection, Proxy};
 
 use crate::config::ConfigManager;
@@ -23,7 +23,7 @@ use crate::models::{
     AirplaneModeResponse, ApnContext, DeviceInfoResponse, NetworkInfoResponse, QosInfoResponse, RadioMode,
     RadioModeResponse, ServingCell, SimInfoResponse,
 };
-use crate::serial::with_serial;
+use crate::serial::{with_serial, with_serial_timeout};
 use crate::state::FrontendRuntime;
 
 /// ofono NetworkMonitor 代理接口
@@ -475,6 +475,47 @@ pub async fn set_roaming_allowed(conn: &Connection, allowed: bool) -> zbus::Resu
     }).await
 }
 
+/// 探测 ofono 服务是否已在 D-Bus 上就绪。
+///
+/// 后端进程往往早于 ofono 启动：此时调用 org.ofono 会得到
+/// `DBus.Error.ServiceUnknown: The name org.ofono was not provided by any .service files`。
+/// 这里通过 org.freedesktop.DBus 的 NameHasOwner 探测名字是否已注册，
+/// 避免在 ofono 尚未就绪时发起注定失败的自动连接。
+///
+/// # Arguments
+/// * `conn` - 系统 D-Bus 连接
+///
+/// # Returns
+/// ofono 名字是否已被占用（即服务已注册）
+pub async fn ofono_ready(conn: &Connection) -> bool {
+    let Ok(proxy) =
+        Proxy::new(conn, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus").await
+    else {
+        return false;
+    };
+    proxy
+        .call::<_, _, bool>("NameHasOwner", &("org.ofono",))
+        .await
+        .unwrap_or(false)
+}
+
+/// 等待 ofono 在 D-Bus 上就绪，最多 `timeout` 秒；就绪返回 true。
+///
+/// 设备重启后 ofono 通常需要几秒到十几秒才能完成注册，本函数以 1 秒
+/// 间隔轮询，避免占用系统资源。
+pub async fn wait_for_ofono(conn: &Connection, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if ofono_ready(conn).await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// 初始化数据连接（程序启动时调用）
 ///
 /// 检查当前数据连接状态，如果未激活则尝试自动激活。
@@ -486,6 +527,37 @@ pub async fn set_roaming_allowed(conn: &Connection, allowed: bool) -> zbus::Resu
 /// # Returns
 /// 初始化结果消息
 pub async fn init_data_connection(conn: &Connection) -> String {
+    // ofono 名字就绪后，其内部 RIL / ConnectionManager 仍可能处于初始化窗口，
+    // 此时调用 GetContexts 会瞬时失败。对这类错误做有限重试，避免启动即丢连接。
+    const MAX_ATTEMPTS: usize = 5;
+    let mut last = String::new();
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        last = init_data_connection_attempt(conn).await;
+        if !is_ofono_transient_error(&last) {
+            return last;
+        }
+    }
+    last
+}
+
+/// 判断自动连接结果是否为 ofono 尚未就绪的瞬时错误（值得重试）。
+///
+/// 只有 ServiceUnknown / 名字未提供的错误才重试；「网络未注册」「APN 未配置」
+/// 「已激活」等确定性结果不重试，交给 watchdog 按各自语义处理。
+fn is_ofono_transient_error(result: &str) -> bool {
+    result.contains("not provided by any .service files")
+        || result.contains("ServiceUnknown")
+        || result.contains("Failed to find internet context")
+        || result.contains("Failed to create context proxy")
+        || result.contains("Failed to build context path")
+        || result.contains("Failed to get context properties")
+}
+
+/// 单次数据连接初始化尝试（原 init_data_connection 主体）。
+async fn init_data_connection_attempt(conn: &Connection) -> String {
     // 1. 先检查网络注册状态
     match NetworkRegistrationProxy::new(conn).await {
         Ok(net_proxy) => {
@@ -630,6 +702,22 @@ async fn auto_configure_apn(conn: &Connection, context_path: &str) -> Result<Str
     Ok(format!("Auto-configured APN: {} ({})", apn, protocol))
 }
 
+/// 获取当前网络注册状态字符串。
+///
+/// 返回 ofono NetworkRegistration 的 `Status` 值（如 "registered"/"roaming"/
+/// "searching"/"denied"/"unknown"）。proxy 创建失败时返回 None。
+///
+/// # Arguments
+/// * `conn` - D-Bus 连接
+pub async fn get_registration_status(conn: &Connection) -> Option<String> {
+    let net_proxy = NetworkRegistrationProxy::new(conn).await.ok()?;
+    let props = net_proxy.get_properties().await.ok()?;
+    props
+        .get("Status")
+        .and_then(|v| String::try_from(v.clone()).ok())
+        .or_else(|| Some("unknown".to_string()))
+}
+
 /// 检查并恢复数据连接
 ///
 /// 这个函数被 watchdog 调用，检查数据连接状态并在需要时恢复
@@ -641,19 +729,10 @@ async fn auto_configure_apn(conn: &Connection, context_path: &str) -> Result<Str
 /// 当前状态描述字符串
 async fn check_and_restore_data_connection(conn: &Connection) -> String {
     // 1. 检查网络注册状态
-    let net_status = match NetworkRegistrationProxy::new(conn).await {
-        Ok(net_proxy) => {
-            match net_proxy.get_properties().await {
-                Ok(props) => props
-                    .get("Status")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                Err(_) => "unknown".to_string(),
-            }
-        }
-        Err(_) => return "Network proxy unavailable".to_string(),
+    let Some(net_status) = get_registration_status(conn).await else {
+        return "Network proxy unavailable".to_string();
     };
-    
+
     // 网络未注册时不尝试恢复
     if net_status != "registered" && net_status != "roaming" {
         return format!("Waiting for network (status: {})", net_status);
@@ -731,11 +810,10 @@ pub async fn data_connection_watchdog(
     config_manager: Arc<ConfigManager>,
     frontend_runtime: Arc<FrontendRuntime>,
 ) {
-    use crate::iptables::{flush_iptables, get_iptables_rule_count};
-    
     let mut last_data_log = String::new();
-    let mut last_iptables_action = false; // 上次是否清空了 iptables
-    
+    // 首次进入循环前先检查一次，避免设备刚启动、连接已断时还要再等满一个 interval。
+    let mut first_round = true;
+
     loop {
         let refresh = config_manager.get_refresh();
         let heartbeat_timeout = Duration::from_millis(refresh.heartbeat_timeout_ms());
@@ -745,44 +823,22 @@ pub async fn data_connection_watchdog(
             Duration::from_millis(refresh.idle_watchdog_interval_ms())
         };
 
-        tokio::time::sleep(interval).await;
-        
-        // 1. 检查并清空 iptables 规则
-        match get_iptables_rule_count().await {
-            Ok(count) => {
-                if count.has_rules() {
-                    // 有规则，执行清空
-                    if let Err(e) = flush_iptables().await {
-                        warn!(error = %e, "Watchdog: iptables flush failed");
-                    } else {
-                        if !last_iptables_action {
-                            // 只在首次清空时打印日志
-                            info!(
-                                total = count.total(),
-                                ipv4 = count.ipv4_rules,
-                                ipv6 = count.ipv6_rules,
-                                "Watchdog: iptables flushed"
-                            );
-                        }
-                        last_iptables_action = true;
-                    }
-                } else {
-                    // 无规则，重置标志
-                    last_iptables_action = false;
+        if !first_round {
+            tokio::time::sleep(interval).await;
+        }
+        first_round = false;
+
+        // ofono 尚未就绪时先不检查，等下一个周期；真实状态变化才打印日志，避免刷屏。
+        if ofono_ready(&conn).await {
+            let result = check_and_restore_data_connection(&conn).await;
+            if result != last_data_log {
+                info!("Watchdog: data connection: {}", result);
+                last_data_log = result;
+                // 重连成功后重套持久化的射频模式 / 频段锁 / 小区锁
+                if result.starts_with("Connection restored") {
+                    crate::band_manager::apply_persisted_locks(&conn, &config_manager).await;
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "Watchdog: iptables check failed");
-            }
-        }
-        
-        // 2. 检查并恢复数据连接
-        let result = check_and_restore_data_connection(&conn).await;
-        
-        // 只在状态变化时打印日志，避免刷屏
-        if result != last_data_log {
-            info!(status = %result, "Watchdog: data connection");
-            last_data_log = result;
         }
     }
 }
@@ -1523,7 +1579,9 @@ pub async fn get_operators(conn: &Connection) -> zbus::Result<OperatorListRespon
 
 /// 扫描运营商（慢，返回所有可用）
 pub async fn scan_operators(conn: &Connection) -> zbus::Result<OperatorListResponse> {
-    with_serial(async {
+    // `Scan` 可以在较差的射频环境下耗时 120s 以上，超出默认 30s 串行超时会被
+    // 误判为 ofono 挂死而 abort 整个进程。这里使用单独的更长超时。
+    with_serial_timeout(std::time::Duration::from_secs(150), async {
         let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.NetworkRegistration").await?;
         let result: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
             proxy.call("Scan", &()).await?;

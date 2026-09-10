@@ -32,8 +32,11 @@ import {
   Sms as SmsIcon,
   GitHub as GitHubIcon,
   WebAsset as WebTerminalIcon,
+  Memory as MemoryIcon,
   SystemUpdateAlt as OtaIcon,
   RocketLaunch as InitScriptIcon,
+  Article as LogsIcon,
+  Build as ToolsIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -53,6 +56,9 @@ const menuItems = [
   { path: '/config', label: '系统配置', icon: SettingsIcon },
   { path: '/init-script', label: '开机脚本', icon: InitScriptIcon },
   { path: '/ota', label: 'OTA 更新', icon: OtaIcon },
+  { path: '/memory-processes', label: '内存进程', icon: MemoryIcon },
+  { path: '/logs', label: '系统日志', icon: LogsIcon },
+  { path: '/tools', label: '高级工具', icon: ToolsIcon },
   { path: '/at-console', label: 'AT 控制台', icon: TerminalIcon },
   { path: '/terminal', label: 'Web 终端', icon: WebTerminalIcon },
 ]

@@ -179,6 +179,31 @@ export interface MemoryInfo {
   used_percent: number
   cached_bytes: number
   buffers_bytes: number
+  available_percent?: number
+  free_bytes?: number
+  reclaimable_bytes?: number
+  buff_cache_bytes?: number
+  shared_bytes?: number
+  process_non_reclaimable_used_bytes?: number
+  available_estimated?: boolean
+  available_source?: 'kernel' | 'simple_estimate'
+}
+
+export interface MemoryProcess {
+  pid: number
+  name: string
+  command: string
+  rss_bytes: number
+  virtual_bytes: number
+  memory_percent: number
+  threads: number
+}
+
+export interface MemoryProcessesResponse {
+  sampled_at: string
+  total_processes: number
+  total_memory_bytes: number
+  processes: MemoryProcess[]
 }
 
 // 运行时间信息
@@ -695,6 +720,32 @@ export const DEFAULT_SMS_PUSH_BODY_TEMPLATE = `时间: {{timestamp}}
 
 {{content}}`
 
+export interface RestartConfig {
+  schedule_enabled: boolean
+  schedule_interval_days: number
+  low_memory_enabled: boolean
+  low_memory_threshold_percent: number
+}
+
+// ========== 网络健康自愈配置 ==========
+
+export interface NetHealthConfig {
+  enabled: boolean
+  interval_secs: number
+  ping_timeout_secs: number
+  l1_failures: number
+  l2_failures: number
+  l3_failures: number
+  cooldown_secs: number
+}
+
+// ========== 短信遥控配置 ==========
+
+export interface SmsControlConfigResponse {
+  enabled: boolean
+  numbers: string[]  // 共享通话遥控白名单
+}
+
 // ========== OTA 更新类型 ==========
 
 // OTA 元数据
@@ -723,6 +774,8 @@ export interface OtaValidation {
   binary_md5_match: boolean
   frontend_md5_match: boolean
   arch_match: boolean
+  version_relation: 'upgrade' | 'same' | 'downgrade' | 'unknown'
+  min_version_match: boolean
   error?: string
 }
 
@@ -732,6 +785,9 @@ export interface OtaStatusResponse {
   current_commit: string
   pending_update: boolean
   pending_meta?: OtaMeta
+  pending_validation?: OtaValidation
+  rollback_available: boolean
+  rollback_meta?: OtaMeta
 }
 
 // OTA 上传响应
@@ -743,5 +799,88 @@ export interface OtaUploadResponse {
 // OTA 应用请求
 export interface OtaApplyRequest {
   restart_now: boolean
+  allow_downgrade?: boolean
+}
+
+export interface OtaRollbackRequest {
+  restart_now: boolean
+}
+
+// ========== 运行日志类型 ==========
+
+export interface LogEntry {
+  timestamp: string
+  level: 'debug' | 'info' | 'warn' | 'error'
+  module: string
+  message: string
+}
+
+export interface LogsResponse {
+  entries: LogEntry[]
+  total: number
+}
+
+// ========== 一键诊断类型 ==========
+
+export interface DiagnosticReport {
+  generated_at: string
+  version: string
+  commit: string
+  device?: DeviceInfo
+  network?: NetworkInfo
+  system_stats?: SystemStatsResponse
+  recent_logs: LogEntry[]
+}
+
+// ========== 配置备份类型 ==========
+
+export type ConfigBackupMap = Record<string, unknown>
+
+// ========== 流量统计类型 ==========
+
+export interface TrafficDayRecord {
+  date: string
+  rx_bytes: number
+  tx_bytes: number
+}
+
+export interface TrafficStatsResponse {
+  today_rx_bytes: number
+  today_tx_bytes: number
+  month_rx_bytes: number
+  month_tx_bytes: number
+  alert_enabled: boolean
+  daily_threshold_bytes: number
+  history: TrafficDayRecord[]
+}
+
+export interface TrafficAlertRequest {
+  enabled: boolean
+  daily_threshold_bytes: number
+}
+
+// ========== 定时计划类型 ==========
+
+export type ScheduleAction =
+  | 'airplane_on'
+  | 'airplane_off'
+  | 'data_on'
+  | 'data_off'
+  | 'radio_lte'
+  | 'radio_nr'
+  | 'radio_auto'
+  | 'radio_off'
+  | 'reboot'
+
+export interface ScheduleEntry {
+  enabled: boolean
+  time: string
+  weekdays: number[]
+  action: ScheduleAction
+}
+
+export interface ScheduleConfig {
+  entries: ScheduleEntry[]
+  tolerance_min: number
 }
 

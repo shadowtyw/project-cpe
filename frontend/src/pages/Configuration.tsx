@@ -49,11 +49,13 @@ import {
   Sms,
   Add,
   PlayArrow,
+  RestartAlt,
+  NetworkCheck,
 } from '@mui/icons-material'
-import { api } from '../api'
+import { api, getApiToken, setApiToken } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
 import { useRefreshInterval } from '../contexts/RefreshContext'
-import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider } from '../api/types'
+import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider, RestartConfig, NetHealthConfig, SmsControlConfigResponse } from '../api/types'
 import { DEFAULT_SMS_TEMPLATE, DEFAULT_CALL_TEMPLATE, DEFAULT_SMS_PUSH_TITLE_TEMPLATE, DEFAULT_SMS_PUSH_BODY_TEMPLATE } from '../api/types'
 
 interface HealthStatus {
@@ -161,6 +163,8 @@ export default function ConfigurationPage() {
   const [useHotSwitch, setUseHotSwitch] = useState<boolean>(false)
   const [rebooting, setRebooting] = useState(false)
   const [hotSwitching, setHotSwitching] = useState(false)
+  const [apiToken, setApiTokenValue] = useState(() => getApiToken())
+  const [apiTokenSaved, setApiTokenSaved] = useState(Boolean(getApiToken()))
   
   // 飞行模式状态
   const [airplaneMode, setAirplaneMode] = useState<AirplaneModeResponse | null>(null)
@@ -191,6 +195,31 @@ export default function ConfigurationPage() {
   const [smsPushLoading, setSmsPushLoading] = useState(false)
   const [smsPushTesting, setSmsPushTesting] = useState(false)
 
+  const [restartConfig, setRestartConfig] = useState<RestartConfig>({
+    schedule_enabled: false,
+    schedule_interval_days: 7,
+    low_memory_enabled: false,
+    low_memory_threshold_percent: 10,
+  })
+  const [restartConfigLoading, setRestartConfigLoading] = useState(false)
+
+  const [netHealthConfig, setNetHealthConfig] = useState<NetHealthConfig>({
+    enabled: false,
+    interval_secs: 60,
+    ping_timeout_secs: 2,
+    l1_failures: 3,
+    l2_failures: 6,
+    l3_failures: 10,
+    cooldown_secs: 30,
+  })
+  const [netHealthLoading, setNetHealthLoading] = useState(false)
+
+  const [smsControlConfig, setSmsControlConfig] = useState<SmsControlConfigResponse>({
+    enabled: false,
+    numbers: [],
+  })
+  const [smsControlLoading, setSmsControlLoading] = useState(false)
+
   const checkHealth = useCallback(async () => {
     setHealthLoading(true)
     try {
@@ -214,12 +243,15 @@ export default function ConfigurationPage() {
     setError(null)
     
     try {
-      const [dataRes, usbRes, airplaneModeRes, webhookRes, smsPushRes] = await Promise.all([
+      const [dataRes, usbRes, airplaneModeRes, webhookRes, smsPushRes, restartRes, netHealthRes, smsControlRes] = await Promise.all([
         api.getDataStatus(),
         api.getUsbMode(),
         api.getAirplaneMode(),
         api.getWebhookConfig(),
         api.getSmsPushConfig(),
+        api.getRestartConfig(),
+        api.getNetHealthConfig(),
+        api.getSmsControlConfig(),
       ])
       
       if (dataRes.data) setDataStatus(dataRes.data.active)
@@ -230,6 +262,9 @@ export default function ConfigurationPage() {
       if (airplaneModeRes.data) setAirplaneMode(airplaneModeRes.data)
       if (webhookRes.data) setWebhookConfig(webhookRes.data)
       if (smsPushRes.data) setSmsPushConfig(normalizeSmsPushConfig(smsPushRes.data))
+      if (restartRes.data) setRestartConfig(restartRes.data)
+      if (netHealthRes.data) setNetHealthConfig(netHealthRes.data)
+      if (smsControlRes.data) setSmsControlConfig(smsControlRes.data)
 
       // 加载健康检查
       await checkHealth()
@@ -483,6 +518,68 @@ export default function ConfigurationPage() {
     }
   }
 
+  const handleApiTokenSave = () => {
+    setApiToken(apiToken)
+    setApiTokenValue(getApiToken())
+    setApiTokenSaved(Boolean(getApiToken()))
+    setSuccess(apiToken.trim() ? '管理 API Token 已保存在当前浏览器' : '已清除管理 API Token')
+  }
+
+  const handleApiTokenClear = () => {
+    setApiToken('')
+    setApiTokenValue('')
+    setApiTokenSaved(false)
+    setSuccess('已清除管理 API Token')
+  }
+
+  const handleSaveRestartConfig = async () => {
+    setRestartConfigLoading(true)
+    setError(null)
+    try {
+      const response = await api.setRestartConfig(restartConfig)
+      if (response.data) {
+        setRestartConfig(response.data)
+        setSuccess('自动重启配置已保存')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRestartConfigLoading(false)
+    }
+  }
+
+  const handleSaveNetHealthConfig = async () => {
+    setNetHealthLoading(true)
+    setError(null)
+    try {
+      const response = await api.setNetHealthConfig(netHealthConfig)
+      if (response.data) {
+        setNetHealthConfig(response.data)
+        setSuccess('网络健康自愈配置已保存')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setNetHealthLoading(false)
+    }
+  }
+
+  const handleSaveSmsControlConfig = async () => {
+    setSmsControlLoading(true)
+    setError(null)
+    try {
+      const response = await api.setSmsControlConfig(smsControlConfig.enabled)
+      if (response.data) {
+        setSmsControlConfig(response.data)
+        setSuccess('短信遥控配置已保存')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSmsControlLoading(false)
+    }
+  }
+
   const currentSmsPushProvider = getSmsPushProviderOption(smsPushConfig.provider)
   const smsPushCanTest = smsPushConfig.enabled
     && (!currentSmsPushProvider.credentialRequired || !!smsPushConfig.credential.trim())
@@ -607,6 +704,38 @@ export default function ConfigurationPage() {
 
       {/* 配置面板 */}
       <Box>
+        {/* 管理 API 认证 */}
+        <Accordion
+          expanded={expanded === 'apiAuth'}
+          onChange={handleAccordionChange('apiAuth')}
+        >
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Box display="flex" alignItems="center" gap={1} width="100%">
+              <HealthAndSafety color="primary" />
+              <Typography fontWeight={600}>管理 API 认证</Typography>
+              <Box flexGrow={1} />
+              <Chip label={apiTokenSaved ? 'Token 已保存' : '未配置'} color={apiTokenSaved ? 'success' : 'default'} size="small" />
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              当设备服务使用 UDX710_API_TOKEN 启动时，在此输入同一 Token。Token 只保存在当前浏览器，不会发送到设备保存。
+            </Typography>
+            <TextField
+              fullWidth
+              type="password"
+              label="管理 API Token"
+              value={apiToken}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setApiTokenValue(event.target.value)}
+              autoComplete="off"
+            />
+            <Box display="flex" gap={1} mt={2}>
+              <Button variant="contained" onClick={handleApiTokenSave}>保存 Token</Button>
+              <Button variant="outlined" color="error" onClick={handleApiTokenClear} disabled={!apiTokenSaved && !apiToken}>清除</Button>
+            </Box>
+          </AccordionDetails>
+        </Accordion>
+
         {/* 数据连接配置 */}
         <Accordion
           expanded={expanded === 'dataConnection'}
@@ -730,6 +859,316 @@ export default function ConfigurationPage() {
             <Alert severity="warning" sx={{ mt: 2 }}>
               注意：飞行模式通过设置 Modem 的 Online 属性来控制射频，与手机的飞行模式效果相同。
             </Alert>
+          </AccordionDetails>
+        </Accordion>
+
+        {/* 自动重启配置 */}
+        <Accordion
+          expanded={expanded === 'restartConfig'}
+          onChange={handleAccordionChange('restartConfig')}
+        >
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Box display="flex" alignItems="center" gap={1} width="100%">
+              <RestartAlt color={(restartConfig.schedule_enabled || restartConfig.low_memory_enabled) ? 'warning' : 'primary'} />
+              <Typography fontWeight={600}>自动重启</Typography>
+              <Box flexGrow={1} />
+              <Chip
+                label={(restartConfig.schedule_enabled || restartConfig.low_memory_enabled) ? '已启用' : '已关闭'}
+                color={(restartConfig.schedule_enabled || restartConfig.low_memory_enabled) ? 'warning' : 'default'}
+                size="small"
+                onClick={(event: MouseEvent) => event.stopPropagation()}
+              />
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              自动重启会中断当前网络、通话和 USB 连接。所有策略默认关闭；周期按设备连续运行天数计算，而非固定日历时间。
+            </Alert>
+
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={restartConfig.schedule_enabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, schedule_enabled: event.target.checked })}
+                  color="warning"
+                />
+              )}
+              label="按连续运行天数自动重启"
+            />
+            <TextField
+              fullWidth
+              type="number"
+              label="重启间隔（天）"
+              value={restartConfig.schedule_interval_days}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, schedule_interval_days: Number(event.target.value) })}
+              disabled={!restartConfig.schedule_enabled}
+              inputProps={{ min: 1, max: 365 }}
+              helperText="范围 1–365 天；达到间隔后，设备会在下一次检查时重启。"
+              sx={{ mt: 1, mb: 2 }}
+            />
+
+            <Divider sx={{ my: 2 }} />
+
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={restartConfig.low_memory_enabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, low_memory_enabled: event.target.checked })}
+                  color="warning"
+                />
+              )}
+              label="可用内存过低时自动重启"
+            />
+            <TextField
+              fullWidth
+              type="number"
+              label="可用内存阈值（%）"
+              value={restartConfig.low_memory_threshold_percent}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setRestartConfig({ ...restartConfig, low_memory_threshold_percent: Number(event.target.value) })}
+              disabled={!restartConfig.low_memory_enabled}
+              inputProps={{ min: 5, max: 50 }}
+              helperText="范围 5–50%。仅当 MemAvailable 连续 3 次低于此值才会重启；启动后前 10 分钟不触发，24 小时内最多自动重启一次。"
+              sx={{ mt: 1, mb: 2 }}
+            />
+
+            <Button
+              variant="contained"
+              color="warning"
+              onClick={() => void handleSaveRestartConfig()}
+              disabled={restartConfigLoading}
+              startIcon={restartConfigLoading ? <CircularProgress size={20} /> : <RestartAlt />}
+            >
+              {restartConfigLoading ? '保存中...' : '保存自动重启配置'}
+            </Button>
+          </AccordionDetails>
+        </Accordion>
+
+        {/* 网络健康自愈配置 */}
+        <Accordion
+          expanded={expanded === 'netHealth'}
+          onChange={handleAccordionChange('netHealth')}
+        >
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Box display="flex" alignItems="center" gap={1} width="100%">
+              <NetworkCheck color={netHealthConfig.enabled ? 'success' : 'primary'} />
+              <Typography fontWeight={600}>网络健康自愈</Typography>
+              <Box flexGrow={1} />
+              <Chip
+                label={netHealthConfig.enabled ? '已启用' : '已关闭'}
+                color={netHealthConfig.enabled ? 'success' : 'default'}
+                size="small"
+                onClick={(event: MouseEvent) => event.stopPropagation()}
+              />
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              启用后设备会周期性 ping 外网（223.5.5.5、119.29.29.29）检测真实连通性。
+              当连续失败达到阈值时按分级阶梯自动恢复：重置数据连接 → 飞行模式复位基带 → 系统重启。
+              默认关闭，请确认理解后果后再开启。
+            </Alert>
+
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={netHealthConfig.enabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, enabled: event.target.checked })}
+                  color="success"
+                />
+              )}
+              label={(
+                <Box>
+                  <Typography variant="body1" fontWeight={600}>
+                    {netHealthConfig.enabled ? '外网探活自愈已启用' : '外网探活自愈已禁用'}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    仅在 ofono 注册状态为 registered/roaming 时才判定断网
+                  </Typography>
+                </Box>
+              )}
+              sx={{ mb: 2 }}
+            />
+
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              <Grid size={{ xs: 12, md: 6 }}>
+                <TextField
+                  fullWidth
+                  type="number"
+                  label="探测周期（秒）"
+                  value={netHealthConfig.interval_secs}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, interval_secs: Number(event.target.value) })}
+                  disabled={!netHealthConfig.enabled}
+                  inputProps={{ min: 10, max: 3600 }}
+                  helperText="范围 10–3600 秒，默认 60 秒"
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 6 }}>
+                <TextField
+                  fullWidth
+                  type="number"
+                  label="Ping 超时（秒）"
+                  value={netHealthConfig.ping_timeout_secs}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, ping_timeout_secs: Number(event.target.value) })}
+                  disabled={!netHealthConfig.enabled}
+                  inputProps={{ min: 1, max: 10 }}
+                  helperText="范围 1–10 秒，默认 2 秒"
+                />
+              </Grid>
+            </Grid>
+
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" gutterBottom>分级恢复阈值（连续失败次数）</Typography>
+
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth
+                  type="number"
+                  label="Level 1：重置数据连接"
+                  value={netHealthConfig.l1_failures}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, l1_failures: Number(event.target.value) })}
+                  disabled={!netHealthConfig.enabled}
+                  inputProps={{ min: 1, max: 100 }}
+                  helperText="默认 3 次"
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth
+                  type="number"
+                  label="Level 2：飞行模式复位"
+                  value={netHealthConfig.l2_failures}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, l2_failures: Number(event.target.value) })}
+                  disabled={!netHealthConfig.enabled}
+                  inputProps={{ min: 1, max: 100 }}
+                  helperText="默认 6 次（≥ Level 1）"
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 4 }}>
+                <TextField
+                  fullWidth
+                  type="number"
+                  label="Level 3：系统重启"
+                  value={netHealthConfig.l3_failures}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, l3_failures: Number(event.target.value) })}
+                  disabled={!netHealthConfig.enabled}
+                  inputProps={{ min: 1, max: 100 }}
+                  helperText="默认 10 次（≥ Level 2）"
+                />
+              </Grid>
+            </Grid>
+
+            <TextField
+              fullWidth
+              type="number"
+              label="动作静默期（秒）"
+              value={netHealthConfig.cooldown_secs}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setNetHealthConfig({ ...netHealthConfig, cooldown_secs: Number(event.target.value) })}
+              disabled={!netHealthConfig.enabled}
+              inputProps={{ min: 0, max: 600 }}
+              helperText="每级恢复动作执行后暂停探测，给基带重连留时间。范围 0–600 秒，默认 30 秒"
+              sx={{ mb: 2 }}
+            />
+
+            <Button
+              variant="contained"
+              color="success"
+              onClick={() => void handleSaveNetHealthConfig()}
+              disabled={netHealthLoading}
+              startIcon={netHealthLoading ? <CircularProgress size={20} /> : <NetworkCheck />}
+            >
+              {netHealthLoading ? '保存中...' : '保存网络健康自愈配置'}
+            </Button>
+          </AccordionDetails>
+        </Accordion>
+
+        {/* 短信遥控配置 */}
+        <Accordion
+          expanded={expanded === 'smsControl'}
+          onChange={handleAccordionChange('smsControl')}
+        >
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Box display="flex" alignItems="center" gap={1} width="100%">
+              <Sms color={smsControlConfig.enabled ? 'success' : 'primary'} />
+              <Typography fontWeight={600}>短信遥控</Typography>
+              <Box flexGrow={1} />
+              <Chip
+                label={smsControlConfig.enabled ? '已启用' : '已关闭'}
+                color={smsControlConfig.enabled ? 'success' : 'default'}
+                size="small"
+                onClick={(event: MouseEvent) => event.stopPropagation()}
+              />
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Alert severity="info" sx={{ mb: 2 }}>
+              当设备断网、Web 界面无法访问时，用管理员手机号给设备发送短信指令即可遥控。
+              白名单与通话遥控共享，在通话遥控配置中管理。
+            </Alert>
+
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={smsControlConfig.enabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setSmsControlConfig({ ...smsControlConfig, enabled: event.target.checked })}
+                  color="success"
+                />
+              )}
+              label={(
+                <Box>
+                  <Typography variant="body1" fontWeight={600}>
+                    {smsControlConfig.enabled ? '短信遥控已启用' : '短信遥控已禁用'}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    启用后白名单号码可发送指令短信控制设备
+                  </Typography>
+                </Box>
+              )}
+              sx={{ mb: 2 }}
+            />
+
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" gutterBottom>支持的短信指令</Typography>
+
+            <Box sx={{ mb: 2 }}>
+              {[
+                { cmd: '#REBOOT#', desc: '延迟 3 秒重启系统' },
+                { cmd: '#RECONNECT#', desc: '重置数据连接（断开→重连）' },
+                { cmd: '#STATUS#', desc: '回复设备运行状态（信号、上网、运行时间、内存）' },
+              ].map(({ cmd, desc }) => (
+                <Box key={cmd} display="flex" alignItems="center" gap={1} mb={0.5}>
+                  <Chip label={cmd} size="small" color="primary" variant="outlined" />
+                  <Typography variant="body2" color="text.secondary">{desc}</Typography>
+                </Box>
+              ))}
+            </Box>
+
+            {smsControlConfig.numbers.length > 0 ? (
+              <Alert severity="success" sx={{ mb: 2 }}>
+                <Typography variant="body2">
+                  <strong>当前白名单号码：</strong>{smsControlConfig.numbers.join(', ')}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  前往「通话遥控」配置中添加或修改管理员号码
+                </Typography>
+              </Alert>
+            ) : (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                <Typography variant="body2">
+                  <strong>未配置白名单号码。</strong>请先在「通话遥控」中添加管理员号码，否则短信遥控不会生效。
+                </Typography>
+              </Alert>
+            )}
+
+            <Button
+              variant="contained"
+              color="success"
+              onClick={() => void handleSaveSmsControlConfig()}
+              disabled={smsControlLoading}
+              startIcon={smsControlLoading ? <CircularProgress size={20} /> : <Sms />}
+            >
+              {smsControlLoading ? '保存中...' : '保存短信遥控配置'}
+            </Button>
           </AccordionDetails>
         </Accordion>
 
