@@ -1445,6 +1445,8 @@ pub struct RemoteControlPushConfigResponse {
     pub headers: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub secret: String,
+    #[serde(default)]
+    pub template: String,
     #[serde(default = "default_true")]
     pub forward_sms_control: bool,
     #[serde(default = "default_true")]

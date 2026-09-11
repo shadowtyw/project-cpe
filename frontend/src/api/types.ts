@@ -682,6 +682,7 @@ export interface RemoteControlPushConfig {
   webhook_url: string
   headers: Record<string, string>
   secret: string
+  template: string
   forward_sms_control: boolean
   forward_call_control: boolean
   forward_mqtt_control: boolean

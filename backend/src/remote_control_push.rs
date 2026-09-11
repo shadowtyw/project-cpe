@@ -39,7 +39,8 @@ impl RemoteControlPushSender {
             return Ok(());
         }
 
-        self.send_webhook_raw(&config, payload).await
+        let rendered = render_remote_control_template(&config.template, payload);
+        self.send_webhook_raw(&config, &rendered).await
     }
 
     /// 发送通话遥控事件推送
@@ -50,7 +51,8 @@ impl RemoteControlPushSender {
             return Ok(());
         }
 
-        self.send_webhook_raw(&config, payload).await
+        let rendered = render_remote_control_template(&config.template, payload);
+        self.send_webhook_raw(&config, &rendered).await
     }
 
     /// 发送 MQTT 遥控事件推送
@@ -61,7 +63,8 @@ impl RemoteControlPushSender {
             return Ok(());
         }
 
-        self.send_webhook_raw(&config, payload).await
+        let rendered = render_remote_control_template(&config.template, payload);
+        self.send_webhook_raw(&config, &rendered).await
     }
 
     /// 发送原始 JSON payload 到 Webhook
@@ -136,4 +139,55 @@ fn compute_hmac(secret: &str, data: &str) -> String {
     mac.update(data.as_bytes());
     let result = mac.finalize();
     hex::encode(result.into_bytes())
+}
+
+/// 渲染遥控推送模板，替换 {{变量名}} 占位符。
+///
+/// payload 是原始 JSON 字符串，内含 `timestamp`、`type`、`data` 等字段。
+/// 模板中可引用这些字段的任意嵌套路径，如 `{{data.message}}`、`{{data.command}}`。
+fn render_remote_control_template(template: &str, payload: &str) -> String {
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return payload.to_string(),
+    };
+
+    let mut result = template.to_string();
+
+    // 提取顶层和 data 下一级字段
+    if let Some(ts) = value["timestamp"].as_str() {
+        result = result.replace("{{timestamp}}", ts);
+    }
+    if let Some(t) = value["type"].as_str() {
+        result = result.replace("{{type}}", t);
+    }
+
+    // 展开 data 下的所有一级字段
+    if let Some(data) = value.get("data") {
+        if let Some(obj) = data.as_object() {
+            for (key, val) in obj {
+                let placeholder = format!("{{{{data_{}}}}}", key);
+                let text = match val {
+                    serde_json::Value::String(s) => escape_json_string(s),
+                    other => escape_json_string(&other.to_string()),
+                };
+                result = result.replace(&placeholder, &text);
+            }
+        }
+        // data_message: 优先取 data.message，否则取整个 data 的 JSON 字符串
+        let data_message = data["message"]
+            .as_str()
+            .unwrap_or("");
+        result = result.replace("{{data_message}}", &escape_json_string(data_message));
+    }
+
+    result
+}
+
+/// 转义 JSON 字符串中的特殊字符
+fn escape_json_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }

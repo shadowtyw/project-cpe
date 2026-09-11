@@ -60,6 +60,9 @@ pub struct RemoteControlPushConfig {
     /// 签名密钥
     #[serde(default)]
     pub secret: String,
+    /// 推送 payload 模板，支持 {{变量}} 替换
+    #[serde(default = "default_remote_control_push_template")]
+    pub template: String,
     /// 是否推送短信遥控事件
     #[serde(default = "default_true")]
     pub forward_sms_control: bool,
@@ -69,6 +72,16 @@ pub struct RemoteControlPushConfig {
     /// 是否推送 MQTT 遥控事件
     #[serde(default = "default_true")]
     pub forward_mqtt_control: bool,
+}
+
+fn default_remote_control_push_template() -> String {
+    r#"{
+  "msg_type": "text",
+  "content": {
+    "text": "🔔 {{data_message}}\n时间: {{timestamp}}\n类型: {{type}}"
+  }
+}"#
+    .to_string()
 }
 
 /// 默认短信模板 (飞书机器人格式)
@@ -113,6 +126,7 @@ impl Default for RemoteControlPushConfig {
             webhook_url: String::new(),
             headers: HashMap::new(),
             secret: String::new(),
+            template: default_remote_control_push_template(),
             forward_sms_control: true,
             forward_call_control: true,
             forward_mqtt_control: true,

@@ -117,6 +117,12 @@ export default function RemoteControl() {
     webhook_url: '',
     headers: {},
     secret: '',
+    template: `{
+  "msg_type": "text",
+  "content": {
+    "text": "🔔 {{data_message}}\\n时间: {{timestamp}}\\n类型: {{type}}"
+  }
+}`,
     forward_sms_control: true,
     forward_call_control: true,
     forward_mqtt_control: true,
@@ -914,6 +920,21 @@ export default function RemoteControl() {
                 placeholder="用于 HMAC-SHA256 签名"
                 helperText="设置后会在 X-Signature 请求头中携带签名"
                 disabled={!pushConfig.enabled}
+              />
+
+              <TextField
+                label="推送模板"
+                value={pushConfig.template}
+                onChange={(e) =>
+                  setPushConfig({ ...pushConfig, template: e.target.value })
+                }
+                multiline
+                minRows={6}
+                maxRows={12}
+                placeholder='{"msg_type":"text","content":{"text":"..."}}'
+                helperText='支持 {{timestamp}} {{type}} {{data_message}} {{data_event}} {{data_command}} 等变量'
+                disabled={!pushConfig.enabled}
+                sx={{ '& .MuiInputBase-root': { fontFamily: 'monospace', fontSize: '0.8rem' } }}
               />
 
               <Divider />
