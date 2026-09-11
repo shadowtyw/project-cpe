@@ -263,7 +263,7 @@ fn send_notification(payload: &serde_json::Value) {
 async fn execute_action(conn: &Connection, action: ScheduleAction) {
     match action {
         ScheduleAction::Reboot => {
-            let _ = crate::restart::schedule_reboot("call_control", 3);
+            let _ = crate::restart::schedule_reboot("call_control", 10);
         }
         ScheduleAction::AirplaneOn => {
             let _ = crate::dbus::set_airplane_mode(conn, true).await;

@@ -389,15 +389,15 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
             send_mqtt_notification(
                 "mqtt_command_executed",
                 "reboot",
-                "MQTT 远程指令: 设备将在 3 秒后重启",
+                "MQTT 远程遥控：收到重启指令，设备将在 10 秒后重启",
             );
-            crate::restart::schedule_reboot("mqtt", 3);
+            crate::restart::schedule_reboot("mqtt", 10);
         }
         "reconnect" => {
             send_mqtt_notification(
                 "mqtt_command_executed",
                 "reconnect",
-                "MQTT 远程指令: 正在重置数据连接",
+                "MQTT 远程遥控：收到重置数据连接指令，正在执行…",
             );
             if let Err(e) = crate::dbus::set_data_connection(dbus_conn, false).await {
                 error!(error = %e, "Failed to disconnect data");
@@ -409,7 +409,7 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
             send_mqtt_notification(
                 "mqtt_command_executed",
                 "status",
-                "MQTT 远程指令: 已请求状态上报",
+                "MQTT 远程遥控：收到状态查询指令，正在上报…",
             );
             publish_status(dbus_conn).await;
         }

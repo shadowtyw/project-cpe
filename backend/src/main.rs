@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
     let sms_push_sender = Arc::new(SmsPushSender::new(Arc::clone(&config_manager)));
     let frontend_runtime = Arc::new(FrontendRuntime::new());
 
-    // 初始化通话遥控通知器（Webhook + 短信推送双通道）
+    // 初始化遥控通知器（通话/短信/MQTT 统一走 Webhook + 短信推送双通道）
     {
         struct CompositeNotifier {
             webhook: Arc<WebhookSender>,
@@ -277,10 +277,25 @@ async fn main() -> Result<()> {
                 let payload = json_payload.to_string();
                 tokio::spawn(async move {
                     let _ = webhook.forward_call_control(&payload).await;
-                    // 提取 message 字段作为推送正文
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                         if let Some(msg) = v["data"]["message"].as_str() {
                             let _ = sms_push.push_notification("通话遥控", msg).await;
+                        }
+                    }
+                });
+            }
+        }
+        impl sms_control::SmsControlNotifier for CompositeNotifier {
+            fn notify(&self, json_payload: &str) {
+                let webhook = Arc::clone(&self.webhook);
+                let sms_push = Arc::clone(&self.sms_push);
+                let payload = json_payload.to_string();
+                tokio::spawn(async move {
+                    // 短信遥控使用独立的转发开关（forward_sms 复用，因为短信遥控触发源就是短信）
+                    let _ = webhook.forward_call_control(&payload).await;
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(msg) = v["data"]["message"].as_str() {
+                            let _ = sms_push.push_notification("短信遥控", msg).await;
                         }
                     }
                 });
@@ -293,7 +308,6 @@ async fn main() -> Result<()> {
                 let payload = json_payload.to_string();
                 tokio::spawn(async move {
                     let _ = webhook.forward_mqtt_control(&payload).await;
-                    // 提取 message 字段作为推送正文
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                         if let Some(msg) = v["data"]["message"].as_str() {
                             let _ = sms_push.push_notification("MQTT 远程遥控", msg).await;
@@ -307,6 +321,7 @@ async fn main() -> Result<()> {
             sms_push: Arc::clone(&sms_push_sender),
         });
         call_control::set_notifier(notifier.clone());
+        sms_control::set_notifier(notifier.clone());
         mqtt_service::set_notifier(notifier);
     }
     

@@ -5,7 +5,7 @@
 //!
 //! ## 支持的指令（中英文均可）
 //! - `#STATUS#` / `#状态#` — 回复设备当前运行状态（信号强度、上网状态、运行时间等）
-//! - `#REBOOT#` / `#重启#` — 延迟 3 秒重启系统
+//! - `#REBOOT#` / `#重启#` — 延迟 10 秒重启系统（留时间给 webhook 推送）
 //! - `#RECONNECT#` / `#重连#` — 重置数据连接（断开→重连）
 //! - `#FLIGHTON#` / `#飞行开#` — 开启飞行模式
 //! - `#FLIGHTOFF#` / `#飞行关#` — 关闭飞行模式
@@ -23,12 +23,35 @@
 //! - 每条指令执行后都会回复一条确认短信，耗费一条普通短信费。
 //! - 开启飞行模式（#飞行开# / #关射频#）后 10 秒自动恢复网络，防止设备永久断网。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{info, warn};
 use zbus::Connection;
 
 use crate::config::{normalize_phone_number, ConfigManager};
+
+// ── 通知发送器 trait（由 main.rs 注入） ──────────────────────
+
+/// 短信遥控通知回调：接收 JSON 字符串推送到 Webhook 和短信推送平台。
+pub trait SmsControlNotifier: Send + Sync {
+    fn notify(&self, json_payload: &str);
+}
+
+/// 全局通知器，由 main.rs 在启动时设置一次。
+static NOTIFIER: std::sync::OnceLock<Arc<dyn SmsControlNotifier>> = std::sync::OnceLock::new();
+
+pub fn set_notifier(n: Arc<dyn SmsControlNotifier>) {
+    let _ = NOTIFIER.set(n);
+}
+
+fn notify(payload: &serde_json::Value) {
+    if let Some(n) = NOTIFIER.get() {
+        if let Ok(json) = serde_json::to_string(payload) {
+            n.notify(&json);
+        }
+    }
+}
 
 /// 指令映射：统一的管理名称 → (英文关键词, 中文关键词)
 /// 英文关键词用于向后兼容，中文关键词用于用户易用性。
@@ -122,6 +145,24 @@ pub async fn handle_incoming_sms(
         "SMS control: executing command from whitelisted number"
     );
 
+    // 推送通知：告知管理员有人通过短信遥控执行了指令
+    {
+        let cmd_name = command_display_name(command);
+        let ts = chrono::Utc::now().to_rfc3339();
+        let msg = serde_json::json!({
+            "timestamp": ts,
+            "type": "sms_control",
+            "data": {
+                "event": "sms_command_executed",
+                "command": command,
+                "command_name": cmd_name,
+                "source": sender,
+                "message": format!("短信遥控：号码 {} 执行了「{}」指令", sender, cmd_name),
+            },
+        });
+        notify(&msg);
+    }
+
     let reply = execute_command(conn, command).await;
 
     // 发送确认短信回复管理员
@@ -133,13 +174,31 @@ pub async fn handle_incoming_sms(
     true
 }
 
+/// 将指令常量翻译为中文显示名（用于 webhook/推送通知）
+fn command_display_name(cmd: &str) -> &str {
+    match cmd {
+        "STATUS" => "查询状态",
+        "REBOOT" => "重启设备",
+        "RECONNECT" => "重置数据连接",
+        "FLIGHTON" => "开启飞行模式",
+        "FLIGHTOFF" => "关闭飞行模式",
+        "DATAON" => "开启数据连接",
+        "DATAOFF" => "关闭数据连接",
+        "RADIOLTE" => "切换仅 4G",
+        "RADIONR" => "切换仅 5G",
+        "RADIOAUTO" => "切换自动模式",
+        "RADIOOFF" => "关闭射频",
+        _ => "未知指令",
+    }
+}
+
 /// 执行指令并返回回复短信内容。
 async fn execute_command(conn: &Connection, command: &str) -> String {
     match command {
         "STATUS" => build_status_reply(conn).await,
         "REBOOT" => {
-            if crate::restart::schedule_reboot("sms_control", 3) {
-                "[UDX710] 重启指令已收到，设备将在 3 秒后重启。".to_string()
+            if crate::restart::schedule_reboot("sms_control", 10) {
+                "[UDX710] 重启指令已收到，设备将在 10 秒后重启。".to_string()
             } else {
                 "[UDX710] 重启指令被拒绝：设备可能正在处理其他重启请求。".to_string()
             }
