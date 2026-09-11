@@ -61,6 +61,7 @@ const appRoutes: AppRouteConfig[] = [
   { path: 'remote/sms', component: RemoteControl },
   { path: 'remote/call', component: RemoteControl },
   { path: 'remote/mqtt', component: RemoteControl },
+  { path: 'remote/push', component: RemoteControl },
   { path: 'memory-processes', component: MemoryProcesses },
   { path: 'logs', component: Logs },
   { path: 'tools', component: Tools },

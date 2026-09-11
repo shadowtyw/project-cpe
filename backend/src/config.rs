@@ -35,12 +35,6 @@ pub struct WebhookConfig {
     pub url: String,
     pub forward_sms: bool,
     pub forward_calls: bool,
-    /// 是否转发通话遥控事件（检测/确认/取消），独立于普通通话记录转发
-    #[serde(default = "default_true")]
-    pub forward_call_control: bool,
-    /// 是否转发 MQTT 远程遥控事件（指令执行/状态发布），独立于通话遥控转发
-    #[serde(default = "default_true")]
-    pub forward_mqtt_control: bool,
     #[serde(default)]
     pub headers: HashMap<String, String>,
     #[serde(default)]
@@ -49,6 +43,32 @@ pub struct WebhookConfig {
     pub sms_template: String,  // 短信 payload 模板
     #[serde(default = "default_call_template")]
     pub call_template: String,  // 通话 payload 模板
+}
+
+/// 远程遥控推送配置（独立于 WebhookConfig）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteControlPushConfig {
+    /// 是否启用远程遥控推送
+    #[serde(default)]
+    pub enabled: bool,
+    /// Webhook URL
+    #[serde(default)]
+    pub webhook_url: String,
+    /// 自定义请求头
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// 签名密钥
+    #[serde(default)]
+    pub secret: String,
+    /// 是否推送短信遥控事件
+    #[serde(default = "default_true")]
+    pub forward_sms_control: bool,
+    /// 是否推送通话遥控事件
+    #[serde(default = "default_true")]
+    pub forward_call_control: bool,
+    /// 是否推送 MQTT 遥控事件
+    #[serde(default = "default_true")]
+    pub forward_mqtt_control: bool,
 }
 
 /// 默认短信模板 (飞书机器人格式)
@@ -78,12 +98,24 @@ impl Default for WebhookConfig {
             url: String::new(),
             forward_sms: true,
             forward_calls: true,
-            forward_call_control: true,
-            forward_mqtt_control: true,
             headers: HashMap::new(),
             secret: String::new(),
             sms_template: default_sms_template(),
             call_template: default_call_template(),
+        }
+    }
+}
+
+impl Default for RemoteControlPushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+            headers: HashMap::new(),
+            secret: String::new(),
+            forward_sms_control: true,
+            forward_call_control: true,
+            forward_mqtt_control: true,
         }
     }
 }
@@ -721,6 +753,8 @@ pub struct AppConfig {
     pub cell_lock: CellLockConfig,
     #[serde(default)]
     pub mqtt: MqttConfig,
+    #[serde(default)]
+    pub remote_control_push: RemoteControlPushConfig,
 }
 
 
@@ -960,6 +994,18 @@ impl ConfigManager {
         {
             let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
             config.mqtt = mqtt.sanitize();
+        }
+        self.save()
+    }
+
+    pub fn get_remote_control_push(&self) -> RemoteControlPushConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).remote_control_push.clone()
+    }
+
+    pub fn set_remote_control_push(&self, config: RemoteControlPushConfig) -> Result<(), String> {
+        {
+            let mut app_config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            app_config.remote_control_push = config;
         }
         self.save()
     }

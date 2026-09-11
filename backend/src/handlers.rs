@@ -3828,3 +3828,62 @@ pub async fn get_mqtt_status_handler() -> impl IntoResponse {
         broker_index: status.broker_index,
     }))
 }
+
+// ============ 远程遥控推送 API ============
+
+/// GET /api/remote-control-push/config - 获取远程遥控推送配置
+pub async fn get_remote_control_push_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> impl IntoResponse {
+    let config = config_manager.get_remote_control_push();
+    Json(ApiResponse::success_with_message("Success", RemoteControlPushConfigResponse {
+        enabled: config.enabled,
+        webhook_url: config.webhook_url,
+        headers: config.headers,
+        secret: config.secret,
+        forward_sms_control: config.forward_sms_control,
+        forward_call_control: config.forward_call_control,
+        forward_mqtt_control: config.forward_mqtt_control,
+    }))
+}
+
+/// POST /api/remote-control-push/config - 更新远程遥控推送配置
+pub async fn set_remote_control_push_config_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    Json(config): Json<RemoteControlPushConfigResponse>,
+) -> impl IntoResponse {
+    let remote_control_push_config = crate::config::RemoteControlPushConfig {
+        enabled: config.enabled,
+        webhook_url: config.webhook_url.clone(),
+        headers: config.headers.clone(),
+        secret: config.secret.clone(),
+        forward_sms_control: config.forward_sms_control,
+        forward_call_control: config.forward_call_control,
+        forward_mqtt_control: config.forward_mqtt_control,
+    };
+
+    let resp = RemoteControlPushConfigResponse {
+        enabled: remote_control_push_config.enabled,
+        webhook_url: remote_control_push_config.webhook_url.clone(),
+        headers: remote_control_push_config.headers.clone(),
+        secret: remote_control_push_config.secret.clone(),
+        forward_sms_control: remote_control_push_config.forward_sms_control,
+        forward_call_control: remote_control_push_config.forward_call_control,
+        forward_mqtt_control: remote_control_push_config.forward_mqtt_control,
+    };
+
+    match config_manager.set_remote_control_push(remote_control_push_config) {
+        Ok(_) => Json(ApiResponse::success_with_message("Remote control push configuration updated", resp)),
+        Err(e) => Json(ApiResponse::error(format!("Failed to save remote control push config: {}", e))),
+    }
+}
+
+/// POST /api/remote-control-push/test - 测试远程遥控推送
+pub async fn test_remote_control_push_handler(
+    State(remote_control_push_sender): State<Arc<crate::remote_control_push::RemoteControlPushSender>>,
+) -> impl IntoResponse {
+    match remote_control_push_sender.test_push().await {
+        Ok(_) => Json(ApiResponse::success_with_message("Test message sent successfully", json!({}))),
+        Err(e) => Json(ApiResponse::error(format!("Failed to send test message: {}", e))),
+    }
+}

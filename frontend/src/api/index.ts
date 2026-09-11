@@ -85,6 +85,7 @@ import type {
   ScheduleConfig,
   MqttConfigResponse,
   MqttStatusResponse,
+  RemoteControlPushConfig,
 } from './types'
 
 // API 基础配置
@@ -866,6 +867,25 @@ class UDX710API {
 
   async getMqttStatus() {
     return request<ApiResponse<MqttStatusResponse>>('/mqtt/status')
+  }
+
+  // ========== 远程遥控推送 ==========
+
+  async getRemoteControlPushConfig() {
+    return request<ApiResponse<RemoteControlPushConfig>>('/remote-control-push/config')
+  }
+
+  async setRemoteControlPushConfig(config: RemoteControlPushConfig) {
+    return request<ApiResponse<RemoteControlPushConfig>>('/remote-control-push/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  async testRemoteControlPush() {
+    return request<ApiResponse<Record<string, unknown>>>('/remote-control-push/test', {
+      method: 'POST',
+    })
   }
 
 }

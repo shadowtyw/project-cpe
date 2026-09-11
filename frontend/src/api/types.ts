@@ -670,12 +670,21 @@ export interface WebhookConfig {
   url: string
   forward_sms: boolean
   forward_calls: boolean
-  forward_call_control: boolean  // 是否转发通话遥控事件
-  forward_mqtt_control: boolean  // 是否转发 MQTT 远程遥控事件
   headers: Record<string, string>
   secret: string
   sms_template: string    // 短信 payload 模板
   call_template: string   // 通话 payload 模板
+}
+
+// 远程遥控推送配置（独立于 WebhookConfig）
+export interface RemoteControlPushConfig {
+  enabled: boolean
+  webhook_url: string
+  headers: Record<string, string>
+  secret: string
+  forward_sms_control: boolean
+  forward_call_control: boolean
+  forward_mqtt_control: boolean
 }
 
 // 默认短信模板 (飞书机器人格式)

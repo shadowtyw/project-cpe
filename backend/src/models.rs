@@ -1434,3 +1434,26 @@ pub struct MqttStatusResponse {
     pub broker_index: usize,
 }
 
+// ============ 远程遥控推送模型 ============
+
+/// 远程遥控推送配置响应
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoteControlPushConfigResponse {
+    pub enabled: bool,
+    pub webhook_url: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub secret: String,
+    #[serde(default = "default_true")]
+    pub forward_sms_control: bool,
+    #[serde(default = "default_true")]
+    pub forward_call_control: bool,
+    #[serde(default = "default_true")]
+    pub forward_mqtt_control: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+

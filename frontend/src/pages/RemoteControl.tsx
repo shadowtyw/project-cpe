@@ -31,6 +31,8 @@ import {
   Phone as PhoneIcon,
   Refresh as RefreshIcon,
   CloudQueue as CloudIcon,
+  Notifications as NotificationsIcon,
+  Send as SendIcon,
 } from '@mui/icons-material'
 import { api } from '../api'
 import type {
@@ -41,6 +43,7 @@ import type {
   ScheduleAction,
   MqttConfigResponse,
   MqttStatusResponse,
+  RemoteControlPushConfig,
 } from '../api/types'
 
 const ACTION_LABELS: Record<ScheduleAction, string> = {
@@ -59,11 +62,11 @@ export default function RemoteControl() {
   const location = useLocation()
   const navigate = useNavigate()
 
-  const activeTabMap: Record<string, number> = { '/remote/sms': 0, '/remote/call': 1, '/remote/mqtt': 2 }
+  const activeTabMap: Record<string, number> = { '/remote/sms': 0, '/remote/call': 1, '/remote/mqtt': 2, '/remote/push': 3 }
   const activeTab = activeTabMap[location.pathname] ?? 0
 
   const handleTabChange = (_: unknown, newValue: number) => {
-    const paths = ['/remote/sms', '/remote/call', '/remote/mqtt']
+    const paths = ['/remote/sms', '/remote/call', '/remote/mqtt', '/remote/push']
     void navigate(paths[newValue] || '/remote/sms')
   }
 
@@ -107,6 +110,22 @@ export default function RemoteControl() {
   })
   const [mqttConfigLoading, setMqttConfigLoading] = useState(false)
   const [mqttInitialized, setMqttInitialized] = useState(false)
+
+  // Push Notification state
+  const [pushConfig, setPushConfig] = useState<RemoteControlPushConfig>({
+    enabled: false,
+    webhook_url: '',
+    headers: {},
+    secret: '',
+    forward_sms_control: true,
+    forward_call_control: true,
+    forward_mqtt_control: true,
+  })
+  const [pushLoading, setPushLoading] = useState(false)
+  const [pushInitialized, setPushInitialized] = useState(false)
+  const [pushTesting, setPushTesting] = useState(false)
+  const [newPushHeaderKey, setNewPushHeaderKey] = useState('')
+  const [newPushHeaderValue, setNewPushHeaderValue] = useState('')
 
   // Snackbar state
   const [snackbar, setSnackbar] = useState<{
@@ -191,6 +210,53 @@ export default function RemoteControl() {
     }, 5000)
     return () => clearInterval(timer)
   }, [activeTab])
+
+  // Load push config
+  const loadPushConfig = useCallback(async () => {
+    try {
+      const res = await api.getRemoteControlPushConfig()
+      if (res.data) setPushConfig(res.data)
+    } catch {
+      showSnackbar('加载推送配置失败', 'error')
+    } finally {
+      setPushInitialized(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 3 && !pushInitialized) {
+      void loadPushConfig()
+    }
+  }, [activeTab, pushInitialized, loadPushConfig])
+
+  // Save push config
+  const handleSavePush = async () => {
+    setPushLoading(true)
+    try {
+      const res = await api.setRemoteControlPushConfig(pushConfig)
+      if (res.data) {
+        setPushConfig(res.data)
+        showSnackbar('推送配置已保存', 'success')
+      }
+    } catch {
+      showSnackbar('保存推送配置失败', 'error')
+    } finally {
+      setPushLoading(false)
+    }
+  }
+
+  // Test push
+  const handleTestPush = async () => {
+    setPushTesting(true)
+    try {
+      await api.testRemoteControlPush()
+      showSnackbar('测试消息已发送', 'success')
+    } catch {
+      showSnackbar('测试消息发送失败', 'error')
+    } finally {
+      setPushTesting(false)
+    }
+  }
 
   // Save MQTT config
   const handleSaveMqtt = async () => {
@@ -281,6 +347,7 @@ export default function RemoteControl() {
         <Tab icon={<SmsIcon />} iconPosition="start" label="短信遥控" />
         <Tab icon={<PhoneIcon />} iconPosition="start" label="通话遥控" />
         <Tab icon={<CloudIcon />} iconPosition="start" label="MQTT" />
+        <Tab icon={<NotificationsIcon />} iconPosition="start" label="推送通知" />
       </Tabs>
 
       {/* SMS Control Panel */}
@@ -796,6 +863,186 @@ export default function RemoteControl() {
               >
                 {mqttConfigLoading ? '保存中...' : '保存配置'}
               </Button>
+            </Stack>
+          )}
+        </Paper>
+      )}
+
+      {/* Push Notification Panel */}
+      {activeTab === 3 && (
+        <Paper sx={{ p: 3 }}>
+          {!pushInitialized ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <Stack spacing={3}>
+              <Alert severity="info">
+                远程遥控推送通知独立配置。当通过短信/通话/MQTT 执行遥控指令时，
+                设备会向此处配置的 Webhook 地址发送中文可读的推送通知。
+              </Alert>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={pushConfig.enabled}
+                    onChange={(e) =>
+                      setPushConfig({ ...pushConfig, enabled: e.target.checked })
+                    }
+                  />
+                }
+                label="启用远程遥控推送"
+              />
+
+              <TextField
+                label="Webhook URL"
+                value={pushConfig.webhook_url}
+                onChange={(e) =>
+                  setPushConfig({ ...pushConfig, webhook_url: e.target.value })
+                }
+                placeholder="https://your-server.com/webhook"
+                helperText="支持任意 HTTP 服务器，推送 JSON 格式的中文通知"
+                disabled={!pushConfig.enabled}
+              />
+
+              <TextField
+                label="签名密钥（可选）"
+                value={pushConfig.secret}
+                onChange={(e) =>
+                  setPushConfig({ ...pushConfig, secret: e.target.value })
+                }
+                placeholder="用于 HMAC-SHA256 签名"
+                helperText="设置后会在 X-Signature 请求头中携带签名"
+                disabled={!pushConfig.enabled}
+              />
+
+              <Divider />
+
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  自定义请求头
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+                  <TextField
+                    size="small"
+                    label="Header 名称"
+                    value={newPushHeaderKey}
+                    onChange={(e) => setNewPushHeaderKey(e.target.value)}
+                    sx={{ flex: 1 }}
+                    disabled={!pushConfig.enabled}
+                  />
+                  <TextField
+                    size="small"
+                    label="Header 值"
+                    value={newPushHeaderValue}
+                    onChange={(e) => setNewPushHeaderValue(e.target.value)}
+                    sx={{ flex: 2 }}
+                    disabled={!pushConfig.enabled}
+                  />
+                  <IconButton
+                    color="primary"
+                    onClick={() => {
+                      const k = newPushHeaderKey.trim()
+                      if (k) {
+                        setPushConfig({
+                          ...pushConfig,
+                          headers: { ...pushConfig.headers, [k]: newPushHeaderValue },
+                        })
+                        setNewPushHeaderKey('')
+                        setNewPushHeaderValue('')
+                      }
+                    }}
+                    disabled={!pushConfig.enabled || !newPushHeaderKey.trim()}
+                  >
+                    <AddIcon />
+                  </IconButton>
+                </Box>
+                {Object.keys(pushConfig.headers).length > 0 && (
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                    {Object.entries(pushConfig.headers).map(([key, value]) => (
+                      <Chip
+                        key={key}
+                        label={`${key}: ${value}`}
+                        onDelete={() => {
+                          const newHeaders = { ...pushConfig.headers }
+                          delete newHeaders[key]
+                          setPushConfig({ ...pushConfig, headers: newHeaders })
+                        }}
+                        deleteIcon={<DeleteIcon />}
+                        disabled={!pushConfig.enabled}
+                      />
+                    ))}
+                  </Box>
+                )}
+              </Box>
+
+              <Divider />
+
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  推送转发开关
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: 'block' }}>
+                  选择需要推送通知的遥控指令来源
+                </Typography>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={pushConfig.forward_sms_control}
+                      onChange={(e) =>
+                        setPushConfig({ ...pushConfig, forward_sms_control: e.target.checked })
+                      }
+                      disabled={!pushConfig.enabled}
+                    />
+                  }
+                  label="短信遥控通知"
+                />
+                <br />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={pushConfig.forward_call_control}
+                      onChange={(e) =>
+                        setPushConfig({ ...pushConfig, forward_call_control: e.target.checked })
+                      }
+                      disabled={!pushConfig.enabled}
+                    />
+                  }
+                  label="通话遥控通知"
+                />
+                <br />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={pushConfig.forward_mqtt_control}
+                      onChange={(e) =>
+                        setPushConfig({ ...pushConfig, forward_mqtt_control: e.target.checked })
+                      }
+                      disabled={!pushConfig.enabled}
+                    />
+                  }
+                  label="MQTT 遥控通知"
+                />
+              </Box>
+
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <Button
+                  variant="contained"
+                  startIcon={pushLoading ? <CircularProgress size={20} /> : <SaveIcon />}
+                  onClick={() => void handleSavePush()}
+                  disabled={pushLoading}
+                >
+                  {pushLoading ? '保存中...' : '保存配置'}
+                </Button>
+                <Button
+                  variant="outlined"
+                  startIcon={pushTesting ? <CircularProgress size={20} /> : <SendIcon />}
+                  onClick={() => void handleTestPush()}
+                  disabled={pushTesting || !pushConfig.enabled || !pushConfig.webhook_url}
+                >
+                  {pushTesting ? '测试中...' : '测试推送'}
+                </Button>
+              </Box>
             </Stack>
           )}
         </Paper>

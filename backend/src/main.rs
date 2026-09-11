@@ -48,6 +48,7 @@ mod iptables;
 mod log_buffer;
 mod models;
 mod mqtt_service;
+mod remote_control_push;
 mod net_health;
 mod ota;
 mod process_monitor;
@@ -262,21 +263,22 @@ async fn main() -> Result<()> {
     // 初始化 Webhook 发送器
     let webhook_sender = Arc::new(WebhookSender::new(Arc::clone(&config_manager)));
     let sms_push_sender = Arc::new(SmsPushSender::new(Arc::clone(&config_manager)));
+    let remote_control_push_sender = Arc::new(remote_control_push::RemoteControlPushSender::new(Arc::clone(&config_manager)));
     let frontend_runtime = Arc::new(FrontendRuntime::new());
 
-    // 初始化遥控通知器（通话/短信/MQTT 统一走 Webhook + 短信推送双通道）
+    // 初始化遥控通知器（通话/短信/MQTT 统一走独立的远程遥控推送 + 短信推送双通道）
     {
         struct CompositeNotifier {
-            webhook: Arc<WebhookSender>,
+            remote_push: Arc<remote_control_push::RemoteControlPushSender>,
             sms_push: Arc<SmsPushSender>,
         }
         impl call_control::CallControlNotifier for CompositeNotifier {
             fn notify(&self, json_payload: &str) {
-                let webhook = Arc::clone(&self.webhook);
+                let remote_push = Arc::clone(&self.remote_push);
                 let sms_push = Arc::clone(&self.sms_push);
                 let payload = json_payload.to_string();
                 tokio::spawn(async move {
-                    let _ = webhook.forward_call_control(&payload).await;
+                    let _ = remote_push.forward_call_control(&payload).await;
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                         if let Some(msg) = v["data"]["message"].as_str() {
                             let _ = sms_push.push_notification("通话遥控", msg).await;
@@ -287,12 +289,11 @@ async fn main() -> Result<()> {
         }
         impl sms_control::SmsControlNotifier for CompositeNotifier {
             fn notify(&self, json_payload: &str) {
-                let webhook = Arc::clone(&self.webhook);
+                let remote_push = Arc::clone(&self.remote_push);
                 let sms_push = Arc::clone(&self.sms_push);
                 let payload = json_payload.to_string();
                 tokio::spawn(async move {
-                    // 短信遥控使用独立的转发开关（forward_sms 复用，因为短信遥控触发源就是短信）
-                    let _ = webhook.forward_call_control(&payload).await;
+                    let _ = remote_push.forward_sms_control(&payload).await;
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                         if let Some(msg) = v["data"]["message"].as_str() {
                             let _ = sms_push.push_notification("短信遥控", msg).await;
@@ -303,11 +304,11 @@ async fn main() -> Result<()> {
         }
         impl mqtt_service::MqttNotifier for CompositeNotifier {
             fn notify(&self, json_payload: &str) {
-                let webhook = Arc::clone(&self.webhook);
+                let remote_push = Arc::clone(&self.remote_push);
                 let sms_push = Arc::clone(&self.sms_push);
                 let payload = json_payload.to_string();
                 tokio::spawn(async move {
-                    let _ = webhook.forward_mqtt_control(&payload).await;
+                    let _ = remote_push.forward_mqtt_control(&payload).await;
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                         if let Some(msg) = v["data"]["message"].as_str() {
                             let _ = sms_push.push_notification("MQTT 远程遥控", msg).await;
@@ -317,7 +318,7 @@ async fn main() -> Result<()> {
             }
         }
         let notifier = Arc::new(CompositeNotifier {
-            webhook: Arc::clone(&webhook_sender),
+            remote_push: Arc::clone(&remote_control_push_sender),
             sms_push: Arc::clone(&sms_push_sender),
         });
         call_control::set_notifier(notifier.clone());
@@ -583,6 +584,7 @@ async fn main() -> Result<()> {
         config_manager,
         webhook_sender,
         sms_push_sender,
+        remote_control_push_sender,
         frontend_runtime,
     );
 
@@ -692,6 +694,9 @@ async fn main() -> Result<()> {
         // ========== MQTT 远程控制接口 ==========
         .route("/api/mqtt/config", get(get_mqtt_config_handler).post(set_mqtt_config_handler).options(options_handler))
         .route("/api/mqtt/status", get(get_mqtt_status_handler).options(options_handler))
+        // ========== 远程遥控推送接口 ==========
+        .route("/api/remote-control-push/config", get(get_remote_control_push_config_handler).post(set_remote_control_push_config_handler).options(options_handler))
+        .route("/api/remote-control-push/test", post(test_remote_control_push_handler).options(options_handler))
         // ========== 统一状态和中间件 ==========
         .with_state(app_state)
         .layer(middleware::from_fn(move |request, next| api_auth(api_token.clone(), request, next)))

@@ -17,6 +17,7 @@ use zbus::Connection;
 
 use crate::config::ConfigManager;
 use crate::db::Database;
+use crate::remote_control_push::RemoteControlPushSender;
 use crate::sms_push::SmsPushSender;
 use crate::webhook::WebhookSender;
 
@@ -53,6 +54,7 @@ pub struct AppState {
     pub config_manager: Arc<ConfigManager>,
     pub webhook_sender: Arc<WebhookSender>,
     pub sms_push_sender: Arc<SmsPushSender>,
+    pub remote_control_push_sender: Arc<RemoteControlPushSender>,
     pub frontend_runtime: Arc<FrontendRuntime>,
 }
 
@@ -63,6 +65,7 @@ impl AppState {
         config_manager: Arc<ConfigManager>,
         webhook_sender: Arc<WebhookSender>,
         sms_push_sender: Arc<SmsPushSender>,
+        remote_control_push_sender: Arc<RemoteControlPushSender>,
         frontend_runtime: Arc<FrontendRuntime>,
     ) -> Self {
         Self {
@@ -71,6 +74,7 @@ impl AppState {
             config_manager,
             webhook_sender,
             sms_push_sender,
+            remote_control_push_sender,
             frontend_runtime,
         }
     }
@@ -103,6 +107,12 @@ impl FromRef<AppState> for Arc<WebhookSender> {
 impl FromRef<AppState> for Arc<SmsPushSender> {
     fn from_ref(state: &AppState) -> Self {
         state.sms_push_sender.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<RemoteControlPushSender> {
+    fn from_ref(state: &AppState) -> Self {
+        state.remote_control_push_sender.clone()
     }
 }
 

@@ -180,8 +180,6 @@ export default function ConfigurationPage() {
     url: '',
     forward_sms: true,
     forward_calls: true,
-    forward_call_control: true,
-    forward_mqtt_control: true,
     headers: {},
     secret: '',
     sms_template: DEFAULT_SMS_TEMPLATE,
@@ -1324,26 +1322,6 @@ export default function ConfigurationPage() {
                   />
                 }
                 label="转发来电"
-              />
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={webhookConfig.forward_call_control}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, forward_call_control: e.target.checked })}
-                    disabled={!webhookConfig.enabled}
-                  />
-                }
-                label="转发通话遥控"
-              />
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={webhookConfig.forward_mqtt_control}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setWebhookConfig({ ...webhookConfig, forward_mqtt_control: e.target.checked })}
-                    disabled={!webhookConfig.enabled}
-                  />
-                }
-                label="转发 MQTT 遥控"
               />
             </Box>
 

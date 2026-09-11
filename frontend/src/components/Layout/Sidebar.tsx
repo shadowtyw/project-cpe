@@ -43,6 +43,7 @@ import {
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
   CloudQueue as CloudQueueIcon,
+  Notifications as NotificationsIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -76,6 +77,7 @@ const menuItems: MenuItem[] = [
       { path: '/remote/sms', label: '短信遥控', icon: SmsIcon },
       { path: '/remote/call', label: '通话遥控', icon: PhoneIcon },
       { path: '/remote/mqtt', label: 'MQTT 遥控', icon: CloudQueueIcon },
+      { path: '/remote/push', label: '推送通知', icon: NotificationsIcon },
     ],
   },
   { path: '/memory-processes', label: '内存进程', icon: MemoryIcon },
