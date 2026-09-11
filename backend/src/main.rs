@@ -286,10 +286,28 @@ async fn main() -> Result<()> {
                 });
             }
         }
-        call_control::set_notifier(Arc::new(CompositeNotifier {
+        impl mqtt_service::MqttNotifier for CompositeNotifier {
+            fn notify(&self, json_payload: &str) {
+                let webhook = Arc::clone(&self.webhook);
+                let sms_push = Arc::clone(&self.sms_push);
+                let payload = json_payload.to_string();
+                tokio::spawn(async move {
+                    let _ = webhook.forward_mqtt_control(&payload).await;
+                    // 提取 message 字段作为推送正文
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(msg) = v["data"]["message"].as_str() {
+                            let _ = sms_push.push_notification("MQTT 远程遥控", msg).await;
+                        }
+                    }
+                });
+            }
+        }
+        let notifier = Arc::new(CompositeNotifier {
             webhook: Arc::clone(&webhook_sender),
             sms_push: Arc::clone(&sms_push_sender),
-        }));
+        });
+        call_control::set_notifier(notifier.clone());
+        mqtt_service::set_notifier(notifier);
     }
     
     // 启动 SMS 监听线程

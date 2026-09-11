@@ -10,6 +10,42 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 use zbus::Connection;
 
+// ── 通知发送器 trait（由 main.rs 注入） ──────────────────────
+
+/// MQTT 远程遥控通知回调：接收 JSON 字符串推送到 Webhook 和短信推送平台。
+pub trait MqttNotifier: Send + Sync {
+    fn notify(&self, json_payload: &str);
+}
+
+/// 全局通知器，由 main.rs 在启动时设置一次。
+static NOTIFIER: std::sync::OnceLock<Arc<dyn MqttNotifier>> = std::sync::OnceLock::new();
+
+pub fn set_notifier(n: Arc<dyn MqttNotifier>) {
+    let _ = NOTIFIER.set(n);
+}
+
+fn notify(payload: &serde_json::Value) {
+    if let Some(n) = NOTIFIER.get() {
+        if let Ok(json) = serde_json::to_string(payload) {
+            n.notify(&json);
+        }
+    }
+}
+
+fn send_mqtt_notification(event: &str, command: &str, message: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let msg = serde_json::json!({
+        "timestamp": ts,
+        "type": "mqtt_control",
+        "data": {
+            "event": event,
+            "command": command,
+            "message": message,
+        },
+    });
+    notify(&msg);
+}
+
 /// MQTT 运行时状态
 #[derive(Debug, Clone, Serialize)]
 pub struct MqttRuntimeState {
@@ -224,7 +260,33 @@ impl MqttService {
         }
 
         // 连接成功后存储客户端以供 publish 复用
-        MQTT_CLIENT.lock().await.replace((client.clone(), topic_pub));
+        MQTT_CLIENT.lock().await.replace((client.clone(), topic_pub.clone()));
+
+        // 发布初始上线状态
+        send_mqtt_notification(
+            "mqtt_connected",
+            "connect",
+            &format!("MQTT 已连接至 {}", broker),
+        );
+        {
+            let dbus_clone = Arc::clone(&self.dbus_conn);
+            tokio::spawn(async move {
+                publish_status(&dbus_clone).await;
+            });
+        }
+
+        // 启动周期性心跳（独立 task，不阻塞 EventLoop）
+        let heartbeat_dbus = Arc::clone(&self.dbus_conn);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(120)).await;
+                // 检查客户端是否仍然有效
+                if MQTT_CLIENT.lock().await.is_none() {
+                    break;
+                }
+                publish_status(&heartbeat_dbus).await;
+            }
+        });
 
         // 事件循环：保持连接，处理下行指令。
         //
@@ -324,9 +386,19 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
 
     match cmd.action.as_str() {
         "reboot" => {
+            send_mqtt_notification(
+                "mqtt_command_executed",
+                "reboot",
+                "MQTT 远程指令: 设备将在 3 秒后重启",
+            );
             crate::restart::schedule_reboot("mqtt", 3);
         }
         "reconnect" => {
+            send_mqtt_notification(
+                "mqtt_command_executed",
+                "reconnect",
+                "MQTT 远程指令: 正在重置数据连接",
+            );
             if let Err(e) = crate::dbus::set_data_connection(dbus_conn, false).await {
                 error!(error = %e, "Failed to disconnect data");
             } else if let Err(e) = crate::dbus::set_data_connection(dbus_conn, true).await {
@@ -334,6 +406,11 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
             }
         }
         "status" => {
+            send_mqtt_notification(
+                "mqtt_command_executed",
+                "status",
+                "MQTT 远程指令: 已请求状态上报",
+            );
             publish_status(dbus_conn).await;
         }
         _ => {

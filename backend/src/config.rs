@@ -38,6 +38,9 @@ pub struct WebhookConfig {
     /// 是否转发通话遥控事件（检测/确认/取消），独立于普通通话记录转发
     #[serde(default = "default_true")]
     pub forward_call_control: bool,
+    /// 是否转发 MQTT 远程遥控事件（指令执行/状态发布），独立于通话遥控转发
+    #[serde(default = "default_true")]
+    pub forward_mqtt_control: bool,
     #[serde(default)]
     pub headers: HashMap<String, String>,
     #[serde(default)]
@@ -76,6 +79,7 @@ impl Default for WebhookConfig {
             forward_sms: true,
             forward_calls: true,
             forward_call_control: true,
+            forward_mqtt_control: true,
             headers: HashMap::new(),
             secret: String::new(),
             sms_template: default_sms_template(),
