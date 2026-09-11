@@ -71,6 +71,15 @@ impl Database {
         self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 健康检查：执行 `SELECT 1` 验证数据库可访问。
+    pub fn health_check(&self) -> Result<bool> {
+        let conn = self.lock_conn();
+        let result: bool = conn.query_row("SELECT 1", [], |row| {
+            row.get::<_, i32>(0)
+        })? == 1;
+        Ok(result)
+    }
+
     /// 创建或打开数据库
     pub fn new(db_path: PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;

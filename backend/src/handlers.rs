@@ -488,22 +488,59 @@ pub async fn get_airplane_mode_handler(State(conn): State<Arc<Connection>>) -> i
 
 /// GET /api/health - Health check endpoint
 ///
-/// # Response example
-/// ```json
-/// {
-///   "status": "ok",
-///   "message": "Service is running"
-/// }
-/// ```
-pub async fn health_check() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "ok",
-            "message": "Service is running",
-            "version": env!("CARGO_PKG_VERSION"),
-        })),
-    )
+/// 探测三项核心依赖的真实健康状态：
+/// 1. ofono D-Bus 是否可达
+/// 2. SQLite 数据库是否可读写
+/// 3. MQTT broker 是否已连接（如启用）
+///
+/// 任意一项不健康返回 503，而非 200 OK 假阳性。
+pub async fn health_check(
+    State(conn): State<Arc<Connection>>,
+    State(db): State<Arc<crate::db::Database>>,
+) -> impl IntoResponse {
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+    let mut healthy = true;
+
+    // 1. ofono D-Bus 可达性
+    let ofono_ok = crate::dbus::ofono_ready(&conn).await;
+    checks.push(json!({
+        "component": "ofono",
+        "status": if ofono_ok { "ok" } else { "unavailable" }
+    }));
+    if !ofono_ok {
+        healthy = false;
+    }
+
+    // 2. 数据库读写检查
+    let db_ok = db.health_check().unwrap_or(false);
+    checks.push(json!({
+        "component": "database",
+        "status": if db_ok { "ok" } else { "error" }
+    }));
+    if !db_ok {
+        healthy = false;
+    }
+
+    // 3. MQTT 连接状态（已启用但未连接视为不健康）
+    let mqtt_enabled = crate::mqtt_service::is_mqtt_enabled();
+    let mqtt_connected = crate::mqtt_service::is_mqtt_connected().await;
+    let mqtt_healthy = !mqtt_enabled || mqtt_connected;
+    checks.push(json!({
+        "component": "mqtt",
+        "status": if mqtt_connected { "connected" } else if mqtt_enabled { "disconnected" } else { "disabled" }
+    }));
+    if !mqtt_healthy {
+        healthy = false;
+    }
+
+    let status_code = if healthy { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let body = json!({
+        "status": if healthy { "ok" } else { "degraded" },
+        "version": env!("CARGO_PKG_VERSION"),
+        "checks": checks,
+    });
+
+    (status_code, Json(body))
 }
 
 /// GET /api/sim - Get SIM card information

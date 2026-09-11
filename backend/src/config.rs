@@ -35,6 +35,9 @@ pub struct WebhookConfig {
     pub url: String,
     pub forward_sms: bool,
     pub forward_calls: bool,
+    /// 是否转发通话遥控事件（检测/确认/取消），独立于普通通话记录转发
+    #[serde(default = "default_true")]
+    pub forward_call_control: bool,
     #[serde(default)]
     pub headers: HashMap<String, String>,
     #[serde(default)]
@@ -72,12 +75,17 @@ impl Default for WebhookConfig {
             url: String::new(),
             forward_sms: true,
             forward_calls: true,
+            forward_call_control: true,
             headers: HashMap::new(),
             secret: String::new(),
             sms_template: default_sms_template(),
             call_template: default_call_template(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 短信推送服务提供商
@@ -713,6 +721,10 @@ pub struct AppConfig {
 
 
 /// 配置管理器
+///
+/// 注意：当前每次 setter 都同步写盘（原子写）。未来可改为去抖动保存
+/// 以减少 UBIFS 闪存写入次数，但需要在 ConfigManager 中引入 Arc<AtomicBool>
+/// 共享状态并改用 Arc<ConfigManager> 接口，属于 P2 优化项。
 pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
@@ -750,12 +762,12 @@ impl ConfigManager {
             config: Arc::new(RwLock::new(config)),
             config_path,
         };
-        
+
         // 保存默认配置（如果文件不存在）
         if !manager.config_path.exists() {
             let _ = manager.save();
         }
-        
+
         manager
     }
     

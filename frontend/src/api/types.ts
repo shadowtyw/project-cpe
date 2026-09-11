@@ -670,6 +670,7 @@ export interface WebhookConfig {
   url: string
   forward_sms: boolean
   forward_calls: boolean
+  forward_call_control: boolean  // 是否转发通话遥控事件
   headers: Record<string, string>
   secret: string
   sms_template: string    // 短信 payload 模板

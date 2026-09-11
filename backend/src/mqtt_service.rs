@@ -1,11 +1,12 @@
 use crate::config::{ConfigManager, MqttConfig};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde::{Deserialize, Serialize};
+use std::cmp::min;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 use zbus::Connection;
 
@@ -36,6 +37,9 @@ impl Default for MqttRuntimeState {
 /// 全局运行时状态
 static MQTT_STATE: Mutex<Option<MqttRuntimeState>> = Mutex::const_new(None);
 static MQTT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 已连接的 MQTT 客户端（用于发布消息，避免每次创建临时客户端）
+static MQTT_CLIENT: Mutex<Option<(AsyncClient, String)>> = Mutex::const_new(None);
 
 /// MQTT 指令
 #[derive(Debug, Deserialize)]
@@ -93,7 +97,7 @@ impl MqttService {
                 }
             };
             if let Some(msg) = err_str {
-                self.update_state(|state| {
+                Self::update_state_static(|state| {
                     state.connected = false;
                     state.error_message = Some(msg);
                 }).await;
@@ -107,8 +111,9 @@ impl MqttService {
     async fn connect_and_run(&self, config: &MqttConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let broker_list = &config.broker_list;
         let mut broker_index = 0;
+        let mut consecutive_failures: u32 = 0;
 
-        // 从当前 active_broker 开始（如果还在列表中的话）
+        // 从当前 active_broker 开始
         if let Some(idx) = broker_list.iter().position(|b| b == &config.active_broker) {
             broker_index = idx;
         }
@@ -116,8 +121,6 @@ impl MqttService {
         loop {
             if broker_index >= broker_list.len() {
                 broker_index = 0;
-                warn!("All brokers failed, retrying from start");
-                sleep(Duration::from_secs(10)).await;
             }
 
             let broker = &broker_list[broker_index];
@@ -125,7 +128,7 @@ impl MqttService {
 
             info!(broker = %broker, client_id = %client_id, "Connecting to MQTT broker");
 
-            self.update_state(|state| {
+            Self::update_state_static(|state| {
                 state.current_broker = broker.clone();
                 state.broker_index = broker_index;
                 state.connected = false;
@@ -133,18 +136,37 @@ impl MqttService {
             }).await;
 
             match self.connect_broker(broker, &client_id, config).await {
-                Ok(_) => {
-                    info!(broker = %broker, "MQTT connection closed, trying next broker");
+                Ok(()) => {
+                    // 成功连接并正常运行直到断开，重置退避
+                    consecutive_failures = 0;
+                    info!(broker = %broker, "MQTT connection closed gracefully, trying next broker");
                     broker_index += 1;
                 }
                 Err(e) => {
                     let err_msg = format!("{}: {}", broker, e);
                     error!(broker = %broker, error = %err_msg, "Failed to connect to broker");
-                    self.update_state(|state| {
+                    Self::update_state_static(|state| {
                         state.error_message = Some(err_msg);
                     }).await;
+
+                    consecutive_failures += 1;
                     broker_index += 1;
-                    sleep(Duration::from_secs(3)).await;
+
+                    // 所有节点都试过且全部失败 → 指数退避
+                    if broker_index >= broker_list.len() {
+                        let wait = min(Duration::from_secs(3)
+                            .saturating_mul(2u32.saturating_pow(consecutive_failures.min(5))),
+                            Duration::from_secs(60));
+                        warn!(
+                            successive_failures = consecutive_failures,
+                            backoff_secs = wait.as_secs(),
+                            "All MQTT brokers unreachable, backing off"
+                        );
+                        sleep(wait).await;
+                    } else {
+                        // 当前节点失败但还有剩余节点，快速尝试下一个
+                        sleep(Duration::from_millis(500)).await;
+                    }
                 }
             }
         }
@@ -156,6 +178,9 @@ impl MqttService {
         client_id: &str,
         config: &MqttConfig,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 清除上一个连接的客户端，避免在新连接建立期间误用旧连接发布
+        MQTT_CLIENT.lock().await.take();
+
         let mut mqttoptions = MqttOptions::new(client_id, broker, config.port);
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_clean_session(true);
@@ -167,38 +192,79 @@ impl MqttService {
         client.subscribe(&topic_sub, QoS::AtLeastOnce).await?;
         info!(topic = %topic_sub, "Subscribed to command topic");
 
-        self.update_state(|state| {
+        // 计算发布主题
+        let topic_pub = config.topic_pub.replace("{imei}", &self.imei);
+
+        Self::update_state_static(|state| {
             state.connected = true;
             state.error_message = None;
         }).await;
 
-        // 事件循环
+        // 连接阶段：等待 ConnAck，超时则快速失败以切换下一个节点
+        let connect_deadline = Duration::from_secs(8);
+        let conn_ack = async {
+            // 可能先收到其它包（如 SubAck），循环直到 ConnAck 或超时
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Packet::ConnAck(_))) => return Ok::<(), String>(()),
+                    Ok(_) => continue,
+                    Err(e) => return Err(format!("{broker}: {e}")),
+                }
+            }
+        };
+        match timeout(connect_deadline, conn_ack).await {
+            Ok(Ok(())) => {
+                info!(broker = %broker, "MQTT connected");
+                Self::update_state_static(|state| {
+                    state.connected = true;
+                }).await;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(format!("connect timeout to {broker}").into()),
+        }
+
+        // 连接成功后存储客户端以供 publish 复用
+        MQTT_CLIENT.lock().await.replace((client.clone(), topic_pub));
+
+        // 事件循环：保持连接，处理下行指令。
+        //
+        // 关键设计：收到的 Publish 消息 spawn 到独立 task 处理，不能在当前 poll 回调中
+        // await handle_command。原因是 handle_command 里的 status 命令需要调用
+        // client.publish() 把回复发出去，而 AsyncClient::publish() 依赖 EventLoop 轮询
+        // 来完成网络 I/O —— 如果在这里同步 await，EventLoop 被阻塞等待 handle_command
+        // 返回，publish 就永远发不出去，造成死锁。
+        let dbus_conn = Arc::clone(&self.dbus_conn);
+        let config_clone = config.clone();
         loop {
             match eventloop.poll().await {
-                Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                    info!("MQTT connected to {}", broker);
-                    self.update_state(|state| {
-                        state.connected = true;
-                    }).await;
-                }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
                     if publish.topic == topic_sub {
-                        self.handle_command(&publish.payload, config).await;
+                        let payload = publish.payload;
+                        let conn = Arc::clone(&dbus_conn);
+                        let cfg = config_clone.clone();
+                        tokio::spawn(async move {
+                            handle_command_spawned(&payload, &cfg, &conn).await;
+                        });
                     }
                 }
                 Ok(Event::Incoming(Packet::Disconnect)) => {
-                    warn!("MQTT disconnected by broker");
+                    warn!(broker = %broker, "MQTT disconnected by broker");
+                    MQTT_CLIENT.lock().await.take();
                     break;
+                }
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    // 重连后的 ConnAck，忽略
                 }
                 Ok(_) => {}
                 Err(e) => {
                     let err_msg = e.to_string();
-                    error!(error = %err_msg, "MQTT event loop error");
-                    self.update_state(|state| {
+                    error!(broker = %broker, error = %err_msg, "MQTT event loop error");
+                    MQTT_CLIENT.lock().await.take();
+                    Self::update_state_static(|state| {
                         state.connected = false;
                         state.error_message = Some(err_msg.clone());
                     }).await;
-                    return Err(Box::new(e));
+                    return Err(format!("{broker}: {err_msg}").into());
                 }
             }
         }
@@ -206,131 +272,136 @@ impl MqttService {
         Ok(())
     }
 
-    async fn handle_command(&self, payload: &[u8], config: &MqttConfig) {
-        let payload_str = match std::str::from_utf8(payload) {
-            Ok(s) => s,
-            Err(e) => {
-                error!(error = %e, "Invalid UTF-8 in MQTT payload");
-                return;
-            }
-        };
-
-        debug!(payload = %payload_str, "Received MQTT command");
-
-        let cmd: MqttCommand = match serde_json::from_str(payload_str) {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, "Failed to parse MQTT command");
-                return;
-            }
-        };
-
-        // Token 校验
-        if let Some(ref expected_token) = config.auth_token {
-            match &cmd.token {
-                Some(token) if token == expected_token => {}
-                _ => {
-                    error!("Invalid or missing token, ignoring command");
-                    return;
-                }
-            }
-        }
-
-        self.update_state(|state| {
-            state.last_command = Some(chrono::Utc::now().to_rfc3339());
-        }).await;
-
-        info!(action = %cmd.action, "Executing MQTT command");
-
-        match cmd.action.as_str() {
-            "reboot" => {
-                crate::restart::schedule_reboot("mqtt", 3);
-            }
-            "reconnect" => {
-                if let Err(e) = crate::dbus::set_data_connection(&self.dbus_conn, false).await {
-                    error!(error = %e, "Failed to disconnect data");
-                } else if let Err(e) = crate::dbus::set_data_connection(&self.dbus_conn, true).await {
-                    error!(error = %e, "Failed to reconnect data");
-                }
-            }
-            "status" => {
-                self.publish_status(config).await;
-            }
-            _ => {
-                warn!(action = %cmd.action, "Unknown MQTT command");
-            }
-        }
-    }
-
-    async fn publish_status(&self, config: &MqttConfig) {
-        let status = self.collect_system_status().await;
-        let payload = match serde_json::to_string(&status) {
-            Ok(p) => p,
-            Err(e) => {
-                error!(error = %e, "Failed to serialize status");
-                return;
-            }
-        };
-
-        let topic_pub = config.topic_pub.replace("{imei}", &self.imei);
-
-        // 创建临时客户端发布消息
-        let pub_client_id = format!("udx710_pub_{}", self.imei);
-        let mut mqttoptions = MqttOptions::new(&pub_client_id, &config.active_broker, config.port);
-        mqttoptions.set_keep_alive(Duration::from_secs(60));
-        mqttoptions.set_clean_session(true);
-
-        let (client, _eventloop) = AsyncClient::new(mqttoptions, 10);
-
-        match client.publish(&topic_pub, QoS::AtLeastOnce, false, payload.as_bytes()).await {
-            Ok(_) => {
-                info!(topic = %topic_pub, "Published status");
-                self.update_state(|state| {
-                    state.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
-                }).await;
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to publish status");
-            }
-        }
-    }
-
-    async fn collect_system_status(&self) -> SystemStatus {
-        // 信号强度 (异步函数)
-        let signal_strength = crate::dbus::get_signal_strength(&self.dbus_conn)
-            .await
-            .ok()
-            .and_then(|s| serde_json::to_value(s).ok());
-
-        // 内存 (同步函数)
-        let memory = crate::utils::read_memory_info()
-            .ok()
-            .and_then(|m| serde_json::to_value(m).ok());
-
-        // 运行时长 (同步函数)
-        let uptime = crate::utils::read_uptime()
-            .ok()
-            .and_then(|u| serde_json::to_value(u).ok());
-
-        // 温度 (同步函数)
-        let thermal = serde_json::to_value(crate::handlers::read_temperature_sensors()).unwrap_or_default();
-
-        SystemStatus {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            signal_strength,
-            memory,
-            uptime,
-            thermal,
-        }
-    }
-
-    async fn update_state<F>(&self, f: F)
+    async fn update_state_static<F>(f: F)
     where
         F: FnOnce(&mut MqttRuntimeState),
     {
         let mut state_guard = MQTT_STATE.lock().await;
         let state = state_guard.get_or_insert_with(MqttRuntimeState::default);
         f(state);
+    }
+}
+
+/// 在独立 task 中处理 MQTT 指令（由 EventLoop spawn 调用）。
+///
+/// 此函数不能 running 在与 EventLoop 相同的 task 中，否则 publish_status 里
+/// client.publish() 会死锁（publish 依赖 EventLoop 轮询来完成网络 I/O）。
+async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: &Connection) {
+    let payload_str = match std::str::from_utf8(payload) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "Invalid UTF-8 in MQTT payload");
+            return;
+        }
+    };
+
+    debug!(payload = %payload_str, "Received MQTT command");
+
+    let cmd: MqttCommand = match serde_json::from_str(payload_str) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "Failed to parse MQTT command");
+            return;
+        }
+    };
+
+    // Token 校验
+    if let Some(ref expected_token) = config.auth_token {
+        match &cmd.token {
+            Some(token) if token == expected_token => {}
+            _ => {
+                error!("Invalid or missing token, ignoring command");
+                return;
+            }
+        }
+    }
+
+    MqttService::update_state_static(|state| {
+        state.last_command = Some(chrono::Utc::now().to_rfc3339());
+    }).await;
+
+    info!(action = %cmd.action, "Executing MQTT command");
+
+    match cmd.action.as_str() {
+        "reboot" => {
+            crate::restart::schedule_reboot("mqtt", 3);
+        }
+        "reconnect" => {
+            if let Err(e) = crate::dbus::set_data_connection(dbus_conn, false).await {
+                error!(error = %e, "Failed to disconnect data");
+            } else if let Err(e) = crate::dbus::set_data_connection(dbus_conn, true).await {
+                error!(error = %e, "Failed to reconnect data");
+            }
+        }
+        "status" => {
+            publish_status(dbus_conn).await;
+        }
+        _ => {
+            warn!(action = %cmd.action, "Unknown MQTT command");
+        }
+    }
+}
+
+/// 发布系统状态到 MQTT（独立函数，不依赖 MqttService 实例）。
+async fn publish_status(dbus_conn: &Connection) {
+    let status = collect_system_status(dbus_conn).await;
+    let payload = match serde_json::to_string(&status) {
+        Ok(p) => p,
+        Err(e) => {
+            error!(error = %e, "Failed to serialize status");
+            return;
+        }
+    };
+
+    // 复用当前已连接的客户端发布，避免用可能已过期的 active_broker 重新连一个新临时客户端
+    let (client, topic_pub) = match MQTT_CLIENT.lock().await.clone() {
+        Some(entry) => entry,
+        None => {
+            error!("No active MQTT client, cannot publish status");
+            return;
+        }
+    };
+
+    match client.publish(&topic_pub, QoS::AtLeastOnce, false, payload.as_bytes()).await {
+        Ok(_) => {
+            info!(topic = %topic_pub, "Published status");
+            MqttService::update_state_static(|state| {
+                state.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
+            }).await;
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to publish status");
+        }
+    }
+}
+
+/// 收集系统状态快照。
+async fn collect_system_status(dbus_conn: &Connection) -> SystemStatus {
+    // 信号强度 (异步函数)
+    let signal_strength = crate::dbus::get_signal_strength(dbus_conn)
+        .await
+        .ok()
+        .and_then(|s| serde_json::to_value(s).ok());
+
+    // 内存 (同步函数)
+    let memory = crate::utils::read_memory_info()
+        .ok()
+        .and_then(|m| serde_json::to_value(m).ok());
+
+    // 运行时长 (同步函数)
+    let uptime = crate::utils::read_uptime()
+        .ok()
+        .and_then(|u| serde_json::to_value(u).ok());
+
+    // 温度 (同步函数)
+    let thermal = serde_json::to_value(crate::handlers::read_temperature_sensors()).unwrap_or_default();
+
+    SystemStatus {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        signal_strength,
+        memory,
+        uptime,
+        thermal,
     }
 }
 
@@ -343,4 +414,10 @@ pub async fn get_mqtt_status() -> MqttRuntimeState {
 /// 检查 MQTT 是否启用
 pub fn is_mqtt_enabled() -> bool {
     MQTT_ENABLED.load(Ordering::SeqCst)
+}
+
+/// 检查 MQTT 是否已连接
+pub async fn is_mqtt_connected() -> bool {
+    let state_guard = MQTT_STATE.lock().await;
+    state_guard.as_ref().map_or(false, |s| s.connected)
 }

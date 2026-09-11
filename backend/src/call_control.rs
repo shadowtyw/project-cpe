@@ -185,10 +185,13 @@ pub async fn on_call_removed(_conn: &Connection, config: &CallControlConfig, pat
         cmd.label.clone()
     };
 
+    // 记录触发状态：检测到命令即视为一次触发，前端"上次触发状态"据此显示
+    record_trigger(&active.number, cmd.action);
+
     // 通知：检测到命令
     send_notification(&serde_json::json!({
         "event": "call_control_detected",
-        "number": active.number,
+        "number": active.number.clone(),
         "duration_secs": duration,
         "action": format!("{:?}", cmd.action),
         "action_label": label,
@@ -294,10 +297,24 @@ async fn execute_action(conn: &Connection, action: ScheduleAction) {
 fn spawn_airplane_recovery(conn: &Connection) {
     let conn = conn.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        tracing::info!("Call control airplane auto-recovery");
-        let _ = crate::dbus::set_airplane_mode(&conn, false).await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let _ = crate::dbus::set_data_connection(&conn, true).await;
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            tracing::info!("Call control airplane auto-recovery");
+            let _ = crate::dbus::set_airplane_mode(&conn, false).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = crate::dbus::set_data_connection(&conn, true).await;
+        });
+        match handle.await {
+            Ok(_) => {
+                tracing::info!("Airplane recovery completed successfully");
+            }
+            Err(e) if e.is_panic() => {
+                tracing::error!("Airplane recovery task panicked: {:?}", e);
+                // 内层 task panic 后 conn 已不可用，依赖 net_health watchdog 恢复
+            }
+            Err(e) => {
+                tracing::warn!("Airplane recovery task was cancelled: {:?}", e);
+            }
+        }
     });
 }

@@ -218,13 +218,27 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
 fn spawn_airplane_recovery(conn: &Connection) {
     let conn = conn.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        info!("Airplane mode auto-recovery: turning off airplane mode");
-        let _ = crate::dbus::set_airplane_mode(&conn, false).await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        info!("Airplane mode auto-recovery: enabling data connection");
-        let _ = crate::dbus::set_data_connection(&conn, true).await;
-        info!("Airplane mode auto-recovery completed");
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            info!("Airplane mode auto-recovery: turning off airplane mode");
+            let _ = crate::dbus::set_airplane_mode(&conn, false).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            info!("Airplane mode auto-recovery: enabling data connection");
+            let _ = crate::dbus::set_data_connection(&conn, true).await;
+            info!("Airplane mode auto-recovery completed");
+        });
+        match handle.await {
+            Ok(_) => {
+                info!("Airplane recovery completed successfully");
+            }
+            Err(e) if e.is_panic() => {
+                tracing::error!("Airplane recovery task panicked: {:?}", e);
+                // 内层 task panic 后 conn 已不可用，依赖 net_health watchdog 恢复
+            }
+            Err(e) => {
+                tracing::warn!("Airplane recovery task was cancelled: {:?}", e);
+            }
+        }
     });
 }
 

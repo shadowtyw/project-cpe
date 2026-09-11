@@ -27,12 +27,29 @@ pub fn schedule_reboot(reason: &'static str, delay_seconds: u64) -> bool {
     }
 
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
-        match std::process::Command::new("reboot").spawn() {
-            Ok(_) => info!(reason, "System reboot requested"),
-            Err(error) => {
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
+            match std::process::Command::new("reboot").spawn() {
+                Ok(_) => info!(reason, "System reboot requested"),
+                Err(error) => {
+                    REBOOT_PENDING.store(false, Ordering::SeqCst);
+                    warn!(reason, error = %error, "Failed to request system reboot");
+                }
+            }
+        });
+        match handle.await {
+            Ok(_) => {
+                // 正常完成或已重置 REBOOT_PENDING
+            }
+            Err(e) if e.is_panic() => {
+                // Task panic，重置标志防止永久卡死
                 REBOOT_PENDING.store(false, Ordering::SeqCst);
-                warn!(reason, error = %error, "Failed to request system reboot");
+                warn!(reason, "Reboot task panicked: {:?}; REBOOT_PENDING flag reset", e);
+            }
+            Err(e) => {
+                // Task 被取消
+                REBOOT_PENDING.store(false, Ordering::SeqCst);
+                warn!(reason, "Reboot task was cancelled: {:?}; REBOOT_PENDING flag reset", e);
             }
         }
     });

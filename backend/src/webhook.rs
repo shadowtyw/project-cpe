@@ -108,7 +108,7 @@ impl WebhookSender {
     pub async fn forward_call_control(&self, payload: &str) -> Result<(), String> {
         let config = self.get_config();
 
-        if !config.enabled || !config.forward_calls || config.url.is_empty() {
+        if !config.enabled || !config.forward_call_control || config.url.is_empty() {
             return Ok(());
         }
 
