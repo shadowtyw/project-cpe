@@ -74,7 +74,7 @@ impl RemoteControlPushSender {
         config: &RemoteControlPushConfig,
         payload: &str,
     ) -> Result<(), String> {
-        info!(url = %config.webhook_url, "Remote control push sending");
+        info!("Remote control push sending to {} payload={}", config.webhook_url, payload);
 
         let mut request = self.client.post(&config.webhook_url);
 
@@ -98,26 +98,27 @@ impl RemoteControlPushSender {
             .send()
             .await
             .map_err(|e| {
-                warn!(error = %e, "Remote control push request failed");
+                warn!("Remote control push request failed: {}", e);
                 format!("Failed to send remote control webhook: {}", e)
             })?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
-        info!(status = %status, body_len = body.len(), "Remote control push response");
+        info!("Remote control push response: status={} body={}", status.as_u16(), body);
 
         if !status.is_success() {
-            warn!(status = %status, body = %body, "Remote control push HTTP error");
+            warn!("Remote control push HTTP error: status={} body={}", status.as_u16(), body);
             return Err(format!(
                 "Remote control webhook returned error status {}: {}",
-                status, body
+                status.as_u16(), body
             ));
         }
 
         // 企业微信/钉钉等机器人返回 HTTP 200 但 errcode != 0 表示失败
         check_bot_errcode(&body)?;
 
+        info!("Remote control push sent successfully");
         Ok(())
     }
 
@@ -141,15 +142,14 @@ impl RemoteControlPushSender {
         let payload_str = serde_json::to_string(&test_payload)
             .map_err(|e| format!("Failed to serialize test payload: {}", e))?;
 
-        info!(template = %config.template, "Remote control push test — template");
-        info!(payload = %payload_str, "Remote control push test — raw payload");
+        info!("Remote control push test — config: enabled={} url={}", config.enabled, config.webhook_url);
+        info!("Remote control push test — template: {}", config.template);
+        info!("Remote control push test — raw payload: {}", payload_str);
 
         // 走模板渲染路径，与 forward_* 方法保持一致
         let rendered = render_remote_control_template(&config.template, &payload_str);
 
-        info!(rendered = %rendered, "Remote control push test — rendered payload");
-        info!(url = %config.webhook_url, "Remote control push test — URL");
-        info!(enabled = config.enabled, "Remote control push test — config");
+        info!("Remote control push test — rendered payload: {}", rendered);
 
         self.send_webhook_raw(&config, &rendered).await?;
 
@@ -167,7 +167,7 @@ fn check_bot_errcode(body: &str) -> Result<(), String> {
         if let Some(code) = v["errcode"].as_i64() {
             if code != 0 {
                 let errmsg = v["errmsg"].as_str().unwrap_or("unknown");
-                warn!(errcode = code, errmsg = errmsg, "Bot returned error");
+                warn!("Remote control push bot error: errcode={} errmsg={}", code, errmsg);
                 return Err(format!("Bot error {}: {}", code, errmsg));
             }
         }
@@ -197,7 +197,7 @@ fn render_remote_control_template(template: &str, payload: &str) -> String {
     let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => {
-            warn!(error = %e, payload = %payload, "Failed to parse remote control payload JSON");
+            warn!("Failed to parse remote control payload JSON: {} payload={}", e, payload);
             return payload.to_string();
         }
     };
