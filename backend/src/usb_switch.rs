@@ -619,59 +619,60 @@ fn recover_usb_after_failed_switch(udc_name: &str, usb_interface_ip: &str, error
 /// 创建多功能模式的符号链接
 /// 
 /// 包含：网络功能 + ADB + 多个串口 + vser
+#[cfg(unix)]
 fn create_multi_function_links(config: &UsbModeConfig) -> Result<(), String> {
-    // f1: 主网络功能 (ncm/ecm/rndis)
-    std::os::unix::fs::symlink(
+    use std::os::unix::fs::symlink;
+
+    symlink(
         format!("{}/{}", FUNCTIONS_PATH, config.functions),
         format!("{}/f1", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link main function: {}", e))?;
-    
-    // f2: gser.gs2 (AT 指令通道)
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/gser.gs2", FUNCTIONS_PATH),
         format!("{}/f2", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link gser.gs2: {}", e))?;
-    
-    // f3: gser.gs0 (诊断通道)
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/gser.gs0", FUNCTIONS_PATH),
         format!("{}/f3", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link gser.gs0: {}", e))?;
-    
-    // f4: vser.gs0 (虚拟串口/IQ 日志)
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/vser.gs0", FUNCTIONS_PATH),
         format!("{}/f4", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link vser.gs0: {}", e))?;
-    
-    // f5: gser.gs3
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/gser.gs3", FUNCTIONS_PATH),
         format!("{}/f5", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link gser.gs3: {}", e))?;
-    
-    // f6: ffs.adb (Android Debug Bridge)
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/ffs.adb", FUNCTIONS_PATH),
         format!("{}/f6", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link ffs.adb: {}", e))?;
-    
-    // f7-f9: 更多串口通道
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/gser.gs4", FUNCTIONS_PATH),
         format!("{}/f7", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link gser.gs4: {}", e))?;
-    
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/gser.gs5", FUNCTIONS_PATH),
         format!("{}/f8", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link gser.gs5: {}", e))?;
-    
-    std::os::unix::fs::symlink(
+
+    symlink(
         format!("{}/gser.gs6", FUNCTIONS_PATH),
         format!("{}/f9", CONFIG_PATH)
     ).map_err(|e| format!("Failed to link gser.gs6: {}", e))?;
-    
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_multi_function_links(_config: &UsbModeConfig) -> Result<(), String> {
     Ok(())
 }
 fn get_udc_name() -> String {

@@ -671,16 +671,16 @@ fn detect_zip_format(data: &[u8]) -> bool {
     data.len() >= 4 && data[0..4] == [0x50, 0x4B, 0x03, 0x04]
 }
 
-fn set_file_mode(path: &Path, mode: u32) -> Result<(), String> {
+fn set_file_mode(_path: &Path, _mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)
-            .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?
+        let mut permissions = fs::metadata(_path)
+            .map_err(|e| format!("Failed to read metadata for {}: {}", _path.display(), e))?
             .permissions();
-        permissions.set_mode(mode);
-        fs::set_permissions(path, permissions)
-            .map_err(|e| format!("Failed to set permissions for {}: {}", path.display(), e))?;
+        permissions.set_mode(_mode);
+        fs::set_permissions(_path, permissions)
+            .map_err(|e| format!("Failed to set permissions for {}: {}", _path.display(), e))?;
     }
     Ok(())
 }

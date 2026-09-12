@@ -115,7 +115,7 @@ impl MqttService {
         info!("MQTT service started");
 
         loop {
-            let config = self.config_manager.get_mqtt();
+            let config = self.config_manager.get_mqtt().sanitize();
 
             if !config.enabled {
                 MQTT_ENABLED.store(false, Ordering::SeqCst);
@@ -162,7 +162,7 @@ impl MqttService {
             let broker = &broker_list[broker_index];
             let client_id = format!("udx710_{}", self.imei);
 
-            info!(broker = %broker, client_id = %client_id, "Connecting to MQTT broker");
+            info!("Connecting to MQTT broker: {} client_id={}", broker, client_id);
 
             Self::update_state_static(|state| {
                 state.current_broker = broker.clone();
@@ -232,14 +232,14 @@ impl MqttService {
         // TLS
         if use_tls {
             mqttoptions.set_transport(Transport::tls_with_default_config());
-            info!("MQTT TLS enabled for broker: {}", host);
+            info!("MQTT TLS enabled for broker: {} (system CA certs)", host);
         }
 
         // 用户名密码认证
         if let Some(ref user) = config.username {
             let pass = config.password.as_deref().unwrap_or("");
             mqttoptions.set_credentials(user, pass);
-            info!(user = user, "MQTT credentials set");
+            info!("MQTT credentials set user={}", user);
         }
 
         let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
@@ -519,3 +519,4 @@ pub async fn is_mqtt_connected() -> bool {
     let state_guard = MQTT_STATE.lock().await;
     state_guard.as_ref().map_or(false, |s| s.connected)
 }
+

@@ -494,6 +494,7 @@ mod memory_tests {
 ///
 /// # Returns
 /// 包含各个分区信息的 Vec<DiskInfo>
+#[cfg(unix)]
 pub fn read_disk_info() -> Vec<crate::models::DiskInfo> {
     use std::collections::HashMap;
     use std::ffi::CString;
@@ -616,6 +617,11 @@ pub fn read_disk_info() -> Vec<crate::models::DiskInfo> {
     });
     
     disks
+}
+
+#[cfg(not(unix))]
+pub fn read_disk_info() -> Vec<crate::models::DiskInfo> {
+    Vec::new()
 }
 
 /// 从 /proc/uptime 读取系统运行时间
@@ -932,6 +938,7 @@ pub fn read_cpu_info() -> Result<crate::models::CpuInfo, String> {
 ///
 /// # Returns
 /// SystemInfo 结构
+#[cfg(unix)]
 pub fn read_system_info() -> Result<crate::models::SystemInfo, String> {
     use crate::models::SystemInfo;
     use std::ffi::CStr;
@@ -983,6 +990,11 @@ pub fn read_system_info() -> Result<crate::models::SystemInfo, String> {
             full_info,
         })
     }
+}
+
+#[cfg(not(unix))]
+pub fn read_system_info() -> Result<crate::models::SystemInfo, String> {
+    Err("read_system_info: not available on non-unix platforms".to_string())
 }
 
 /// 根据 implementer 和 part 识别 CPU 型号

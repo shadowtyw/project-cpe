@@ -744,9 +744,9 @@ impl MqttConfig {
         if self.broker_list.is_empty() {
             self.broker_list = default_broker_list();
         }
-        // 确保 active_broker 在列表中
+        // 确保 active_broker 在列表中；若不在则插入到列表最前面
         if !self.broker_list.contains(&self.active_broker) {
-            self.active_broker = self.broker_list[0].clone();
+            self.broker_list.insert(0, self.active_broker.clone());
         }
         self
     }
@@ -1137,17 +1137,17 @@ pub fn get_default_config_path() -> PathBuf {
     get_persistent_root_dir().join("config.json")
 }
 
-fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut permissions = fs::metadata(path)
-            .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?
+        let mut permissions = fs::metadata(_path)
+            .map_err(|e| format!("Failed to read metadata for {}: {}", _path.display(), e))?
             .permissions();
         permissions.set_mode(0o600);
-        fs::set_permissions(path, permissions)
-            .map_err(|e| format!("Failed to protect {}: {}", path.display(), e))?;
+        fs::set_permissions(_path, permissions)
+            .map_err(|e| format!("Failed to protect {}: {}", _path.display(), e))?;
     }
     Ok(())
 }
@@ -1256,17 +1256,17 @@ fn loader_is_plain_legacy_bootstrap(content: &str) -> bool {
         .all(|line| *line == INIT_SCRIPT_LOADER_COMMAND)
 }
 
-fn set_executable_permissions(path: &Path) -> Result<(), String> {
+fn set_executable_permissions(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut permissions = fs::metadata(path)
-            .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?
+        let mut permissions = fs::metadata(_path)
+            .map_err(|e| format!("Failed to read metadata for {}: {}", _path.display(), e))?
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)
-            .map_err(|e| format!("Failed to set permissions for {}: {}", path.display(), e))?;
+        fs::set_permissions(_path, permissions)
+            .map_err(|e| format!("Failed to set permissions for {}: {}", _path.display(), e))?;
     }
 
     Ok(())

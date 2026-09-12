@@ -23,6 +23,18 @@ import {
   CardContent,
   Divider,
 } from '@mui/material'
+const PRESET_BROKERS = [
+  { host: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn', port: 8883, label: 'EMQX 杭州 (TLS)' },
+  { host: 'broker.emqx.io', port: 1883, label: 'EMQX 公共 (明文)' },
+  { host: 'broker-cn.emqx.io', port: 1883, label: 'EMQX 中国 (明文)' },
+  { host: 'ssl://broker.emqx.io', port: 8883, label: 'EMQX 公共 (TLS)' },
+  { host: 'test.mosquitto.org', port: 1883, label: 'Mosquitto 测试 (明文)' },
+  { host: 'ssl://test.mosquitto.org', port: 8883, label: 'Mosquitto 测试 (TLS)' },
+  { host: 'mqtt.eclipseprojects.io', port: 1883, label: 'Eclipse IoT (明文)' },
+  { host: 'ssl://mqtt.eclipseprojects.io', port: 8883, label: 'Eclipse IoT (TLS)' },
+  { host: 'broker.hivemq.com', port: 1883, label: 'HiveMQ 公共 (明文)' },
+]
+
 import {
   Add as AddIcon,
   Delete as DeleteIcon,
@@ -33,6 +45,8 @@ import {
   CloudQueue as CloudIcon,
   Notifications as NotificationsIcon,
   Send as SendIcon,
+  Star as StarIcon,
+  StarBorder as StarBorderIcon,
 } from '@mui/icons-material'
 import { api } from '../api'
 import type {
@@ -92,7 +106,11 @@ export default function RemoteControl() {
   // MQTT Control state
   const [mqttConfig, setMqttConfig] = useState<MqttConfigResponse>({
     enabled: false,
-    broker_list: ['broker.emqx.io', 'broker-cn.emqx.io', 'test.mosquitto.org'],
+    broker_list: [
+      'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn',
+      'broker.emqx.io',
+      'broker-cn.emqx.io',
+    ],
     active_broker: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn',
     port: 8883,
     topic_sub: 'cpe/{imei}/cmd',
@@ -208,17 +226,21 @@ export default function RemoteControl() {
     }
   }, [activeTab, mqttInitialized, loadMqttConfig])
 
-  // Poll MQTT status every 5 seconds when on MQTT tab
+  // Poll MQTT status every 2 seconds when on MQTT tab
+  const refreshMqttStatus = useCallback(async () => {
+    try {
+      const res = await api.getMqttStatus()
+      if (res.data) setMqttStatus(res.data)
+    } catch { /* ignore poll errors */ }
+  }, [])
+
   useEffect(() => {
     if (activeTab !== 2) return
-    const timer = setInterval(async () => {
-      try {
-        const res = await api.getMqttStatus()
-        if (res.data) setMqttStatus(res.data)
-      } catch { /* ignore poll errors */ }
-    }, 5000)
+    // 立即拉一次
+    void refreshMqttStatus()
+    const timer = setInterval(() => { void refreshMqttStatus() }, 2000)
     return () => clearInterval(timer)
-  }, [activeTab])
+  }, [activeTab, refreshMqttStatus])
 
   // Load push config
   const loadPushConfig = useCallback(async () => {
@@ -274,7 +296,13 @@ export default function RemoteControl() {
       const res = await api.setMqttConfig(mqttConfig)
       if (res.data) {
         setMqttConfig(res.data)
-        showSnackbar('MQTT 配置已保存', 'success')
+        showSnackbar('MQTT 配置已保存，服务将自动重连', 'success')
+        // 立即拉取一次状态，然后持续 2s 轮询等待连接结果
+        void refreshMqttStatus()
+        for (let i = 0; i < 5; i++) {
+          await new Promise(r => setTimeout(r, 2000))
+          void refreshMqttStatus()
+        }
       }
     } catch {
       showSnackbar('保存 MQTT 配置失败', 'error')
@@ -754,52 +782,122 @@ export default function RemoteControl() {
                 <Typography variant="subtitle2" gutterBottom>
                   Broker 节点列表
                 </Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: 'block' }}>
-                  按优先级排序，连接失败时自动轮询下一个节点。当前激活: {mqttConfig.active_broker}
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  <Typography variant="body2">
+                    <strong>连接格式：</strong><br />
+                    • 明文：<code>broker.emqx.io</code>（端口 1883）<br />
+                    • TLS：<code>ssl://broker.emqx.io</code>（端口 8883）<br />
+                    • 端口在下方统一配置，双击预设节点可设为当前激活
+                  </Typography>
+                </Alert>
+
+                {/* Preset Brokers */}
+                <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+                  公共服务（点击加入列表，已加入的再点移除）：
                 </Typography>
-                {mqttConfig.broker_list.map((broker, index) => (
-                  <Box key={index} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                    <TextField
-                      size="small"
-                      value={broker}
-                      onChange={(e) => {
-                        const newList = [...mqttConfig.broker_list]
-                        newList[index] = e.target.value
-                        setMqttConfig({ ...mqttConfig, broker_list: newList })
-                      }}
-                      sx={{ flex: 1 }}
-                    />
-                    <IconButton
-                      size="small"
-                      color="error"
-                      onClick={() => {
-                        setMqttConfig({
-                          ...mqttConfig,
-                          broker_list: mqttConfig.broker_list.filter((_, i) => i !== index),
-                          active_broker:
-                            mqttConfig.active_broker === broker
-                              ? mqttConfig.broker_list[0] ?? broker
-                              : mqttConfig.active_broker,
-                        })
-                      }}
-                      disabled={mqttConfig.broker_list.length <= 1}
-                    >
-                      <DeleteIcon />
-                    </IconButton>
-                  </Box>
-                ))}
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 2 }}>
+                  {PRESET_BROKERS.map((pb) => {
+                    const inList = mqttConfig.broker_list.includes(pb.host)
+                    return (
+                      <Chip
+                        key={pb.host}
+                        label={pb.label}
+                        size="small"
+                        color={inList ? 'primary' : 'default'}
+                        variant={inList ? 'filled' : 'outlined'}
+                        onClick={() => {
+                          if (inList) {
+                            const rest = mqttConfig.broker_list.filter(b => b !== pb.host)
+                            setMqttConfig({
+                              ...mqttConfig,
+                              broker_list: rest.length ? rest : [''],
+                              active_broker: mqttConfig.active_broker === pb.host ? (rest[0] ?? '') : mqttConfig.active_broker,
+                            })
+                          } else {
+                            setMqttConfig({
+                              ...mqttConfig,
+                              broker_list: [...mqttConfig.broker_list.filter(b => b), pb.host],
+                              active_broker: mqttConfig.active_broker || pb.host,
+                              port: pb.port,
+                              tls: pb.host.startsWith('ssl://'),
+                            })
+                          }
+                        }}
+                      />
+                    )
+                  })}
+                </Box>
+
+                <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+                  当前节点列表（★ = 当前激活，拖拽不可用请删除后重新添加以便排序）：
+                </Typography>
+                {mqttConfig.broker_list.map((broker, index) => {
+                  const preset = PRESET_BROKERS.find(p => p.host === broker)
+                  return (
+                    <Box key={index} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
+                      {preset ? (
+                        <Chip
+                          label={`${preset.label}${broker === mqttConfig.active_broker ? ' ★' : ''}`}
+                          size="small"
+                          color={broker === mqttConfig.active_broker ? 'primary' : 'default'}
+                          variant="filled"
+                          sx={{ flex: 1, justifyContent: 'flex-start' }}
+                        />
+                      ) : (
+                        <TextField
+                          size="small"
+                          value={broker}
+                          onChange={(e) => {
+                            const newList = [...mqttConfig.broker_list]
+                            newList[index] = e.target.value
+                            setMqttConfig({
+                              ...mqttConfig,
+                              broker_list: newList,
+                              active_broker: mqttConfig.active_broker === broker ? e.target.value : mqttConfig.active_broker,
+                            })
+                          }}
+                          sx={{ flex: 1 }}
+                          placeholder="ssl://custom.broker.com"
+                        />
+                      )}
+                      <IconButton
+                        size="small"
+                        color={broker === mqttConfig.active_broker ? 'primary' : 'default'}
+                        onClick={() => setMqttConfig({ ...mqttConfig, active_broker: broker })}
+                        title="设为当前激活节点"
+                      >
+                        {broker === mqttConfig.active_broker ? <StarIcon fontSize="small" /> : <StarBorderIcon fontSize="small" />}
+                      </IconButton>
+                      <IconButton
+                        size="small"
+                        color="error"
+                        onClick={() => {
+                          const rest = mqttConfig.broker_list.filter((_, i) => i !== index)
+                          setMqttConfig({
+                            ...mqttConfig,
+                            broker_list: rest.length ? rest : [''],
+                            active_broker: mqttConfig.active_broker === broker ? (rest[0] ?? '') : mqttConfig.active_broker,
+                          })
+                        }}
+                        disabled={mqttConfig.broker_list.length <= 1}
+                      >
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </Box>
+                  )
+                })}
                 <Button
                   size="small"
                   startIcon={<AddIcon />}
                   onClick={() =>
                     setMqttConfig({
                       ...mqttConfig,
-                      broker_list: [...mqttConfig.broker_list, ''],
+                      broker_list: [...mqttConfig.broker_list.filter(b => b), ''],
                     })
                   }
                   sx={{ mt: 1 }}
                 >
-                  添加节点
+                  添加自定义节点
                 </Button>
               </Box>
 
