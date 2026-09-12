@@ -662,11 +662,13 @@ pub fn normalize_phone_number(number: &str) -> String {
 ///
 /// 用于国内蜂窝网络与纯数据物联卡的远程运维场景。
 /// 支持多 Broker 节点容灾轮询，Client ID 动态拼接 IMEI 避免重名。
+/// 支持 SSL/TLS 加密连接（使用 `ssl://` 前缀）及用户名/密码认证。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MqttConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Broker 节点列表（按优先级排序，失败时自动轮询）
+    /// Broker 节点列表（按优先级排序，失败时自动轮询）。
+    /// 以 `ssl://` 开头时启用 TLS 加密。
     #[serde(default = "default_broker_list")]
     pub broker_list: Vec<String>,
     /// 当前使用的 Broker（初始值，运行时可能切换）
@@ -684,6 +686,15 @@ pub struct MqttConfig {
     /// 指令鉴权 Token（防止公共 Broker 上被误触）
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// 是否启用 TLS（当 broker 以 ssl:// 开头时自动启用；也可独立控制）
+    #[serde(default)]
+    pub tls: bool,
+    /// MQTT 用户名（可选）
+    #[serde(default)]
+    pub username: Option<String>,
+    /// MQTT 密码（可选）
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 fn default_broker_list() -> Vec<String> {
@@ -720,6 +731,9 @@ impl Default for MqttConfig {
             topic_sub: default_topic_sub(),
             topic_pub: default_topic_pub(),
             auth_token: None,
+            tls: false,
+            username: None,
+            password: None,
         }
     }
 }
@@ -1013,7 +1027,23 @@ impl ConfigManager {
     }
 
     pub fn get_remote_control_push(&self) -> RemoteControlPushConfig {
-        self.config.read().unwrap_or_else(|p| p.into_inner()).remote_control_push.clone()
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner()).remote_control_push.clone();
+        // 修复旧模板：若保存的模板是旧格式（含 msg_type 而非 msgtype），自动替换为企业微信格式并持久化
+        if config.template.contains("msg_type") {
+            let new_template = default_remote_control_push_template();
+            warn!("Remote control push template was old format (msg_type), auto-upgrading to wecom msgtype format");
+            drop(config);
+            // 短暂升级为写锁，修复模板
+            {
+                let mut app = self.config.write().unwrap_or_else(|p| p.into_inner());
+                if app.remote_control_push.template.contains("msg_type") {
+                    app.remote_control_push.template = new_template;
+                }
+            }
+            let _ = self.save();
+            return self.config.read().unwrap_or_else(|p| p.into_inner()).remote_control_push.clone();
+        }
+        config
     }
 
     pub fn set_remote_control_push(&self, config: RemoteControlPushConfig) -> Result<(), String> {

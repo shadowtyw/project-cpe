@@ -3781,6 +3781,9 @@ pub async fn get_mqtt_config_handler(
         topic_sub: config.topic_sub,
         topic_pub: config.topic_pub,
         auth_token: config.auth_token,
+        tls: config.tls,
+        username: config.username,
+        password: config.password,
     }))
 }
 
@@ -3797,6 +3800,9 @@ pub async fn set_mqtt_config_handler(
         topic_sub: config.topic_sub,
         topic_pub: config.topic_pub,
         auth_token: config.auth_token,
+        tls: config.tls,
+        username: config.username,
+        password: config.password,
     };
 
     let resp = MqttConfigResponse {
@@ -3807,6 +3813,9 @@ pub async fn set_mqtt_config_handler(
         topic_sub: mqtt_config.topic_sub.clone(),
         topic_pub: mqtt_config.topic_pub.clone(),
         auth_token: mqtt_config.auth_token.clone(),
+        tls: mqtt_config.tls,
+        username: mqtt_config.username.clone(),
+        password: mqtt_config.password.clone(),
     };
 
     match config_manager.set_mqtt(mqtt_config) {

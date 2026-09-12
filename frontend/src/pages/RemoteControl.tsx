@@ -93,11 +93,14 @@ export default function RemoteControl() {
   const [mqttConfig, setMqttConfig] = useState<MqttConfigResponse>({
     enabled: false,
     broker_list: ['broker.emqx.io', 'broker-cn.emqx.io', 'test.mosquitto.org'],
-    active_broker: 'broker.emqx.io',
-    port: 1883,
+    active_broker: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn',
+    port: 8883,
     topic_sub: 'cpe/{imei}/cmd',
     topic_pub: 'cpe/{imei}/status',
     auth_token: null,
+    tls: true,
+    username: null,
+    password: null,
   })
   const [mqttStatus, setMqttStatus] = useState<MqttStatusResponse>({
     enabled: false,
@@ -847,7 +850,54 @@ export default function RemoteControl() {
                 helperText="设置后只有携带正确 token 的指令才会执行"
               />
 
-              <Alert severity="info">
+              <Divider sx={{ my: 1 }} />
+              <Typography variant="subtitle2">连接安全</Typography>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={mqttConfig.tls}
+                    onChange={(e) => {
+                      const tls = e.target.checked
+                      setMqttConfig({
+                        ...mqttConfig,
+                        tls,
+                        port: tls ? 8883 : 1883,
+                      })
+                    }}
+                  />
+                }
+                label="启用 TLS (SSL)"
+              />
+
+              <TextField
+                size="small"
+                label="用户名 (可选)"
+                value={mqttConfig.username ?? ''}
+                onChange={(e) =>
+                  setMqttConfig({
+                    ...mqttConfig,
+                    username: e.target.value || null,
+                  })
+                }
+                helperText="EMQX 等自建 Broker 认证用"
+              />
+
+              <TextField
+                size="small"
+                type="password"
+                label="密码 (可选)"
+                value={mqttConfig.password ?? ''}
+                onChange={(e) =>
+                  setMqttConfig({
+                    ...mqttConfig,
+                    password: e.target.value || null,
+                  })
+                }
+                helperText="与用户名配合使用"
+              />
+
+              <Divider />
                 <Typography variant="subtitle2" gutterBottom>
                   支持的指令（通过 MQTT 发送 JSON 到订阅主题）：
                 </Typography>

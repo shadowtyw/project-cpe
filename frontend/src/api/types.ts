@@ -926,6 +926,9 @@ export interface MqttConfigResponse {
   topic_sub: string
   topic_pub: string
   auth_token: string | null
+  tls: boolean
+  username: string | null
+  password: string | null
 }
 
 export interface MqttStatusResponse {

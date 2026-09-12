@@ -1,5 +1,5 @@
 use crate::config::{ConfigManager, MqttConfig};
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -217,9 +217,30 @@ impl MqttService {
         // 清除上一个连接的客户端，避免在新连接建立期间误用旧连接发布
         MQTT_CLIENT.lock().await.take();
 
-        let mut mqttoptions = MqttOptions::new(client_id, broker, config.port);
+        // 解析 ssl:// 前缀 → 剥掉前缀，启用 TLS
+        let (host, use_tls) = if let Some(host) = broker.strip_prefix("ssl://") {
+            (host, true)
+        } else {
+            (broker, config.tls)
+        };
+
+        let port = config.port;
+        let mut mqttoptions = MqttOptions::new(client_id, host, port);
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_clean_session(true);
+
+        // TLS
+        if use_tls {
+            mqttoptions.set_transport(Transport::tls_with_default_config());
+            info!("MQTT TLS enabled for broker: {}", host);
+        }
+
+        // 用户名密码认证
+        if let Some(ref user) = config.username {
+            let pass = config.password.as_deref().unwrap_or("");
+            mqttoptions.set_credentials(user, pass);
+            info!(user = user, "MQTT credentials set");
+        }
 
         let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
 

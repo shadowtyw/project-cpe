@@ -1420,6 +1420,12 @@ pub struct MqttConfigResponse {
     pub topic_sub: String,
     pub topic_pub: String,
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub tls: bool,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// MQTT 状态响应（镜像 mqtt_service::MqttRuntimeState）
