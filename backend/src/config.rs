@@ -76,9 +76,9 @@ pub struct RemoteControlPushConfig {
 
 fn default_remote_control_push_template() -> String {
     r#"{
-  "msg_type": "text",
-  "content": {
-    "text": "🔔 {{data_message}}\n时间: {{timestamp}}\n类型: {{type}}"
+  "msgtype": "text",
+  "text": {
+    "content": "🔔 {{data_message}}\n时间: {{timestamp}}"
   }
 }"#
     .to_string()

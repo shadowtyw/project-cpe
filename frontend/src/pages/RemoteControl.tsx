@@ -118,9 +118,9 @@ export default function RemoteControl() {
     headers: {},
     secret: '',
     template: `{
-  "msg_type": "text",
-  "content": {
-    "text": "🔔 {{data_message}}\\n时间: {{timestamp}}\\n类型: {{type}}"
+  "msgtype": "text",
+  "text": {
+    "content": "🔔 {{data_message}}\\n时间: {{timestamp}}"
   }
 }`,
     forward_sms_control: true,

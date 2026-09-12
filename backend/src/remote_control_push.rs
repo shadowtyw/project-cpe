@@ -101,7 +101,7 @@ impl RemoteControlPushSender {
         }
     }
 
-    /// 测试远程遥控推送（发送测试消息）
+    /// 测试远程遥控推送（发送测试消息，走模板渲染路径）
     pub async fn test_push(&self) -> Result<String, String> {
         let config = self.get_config();
 
@@ -121,7 +121,9 @@ impl RemoteControlPushSender {
         let payload_str = serde_json::to_string(&test_payload)
             .map_err(|e| format!("Failed to serialize test payload: {}", e))?;
 
-        self.send_webhook_raw(&config, &payload_str).await?;
+        // 走模板渲染路径，与 forward_* 方法保持一致
+        let rendered = render_remote_control_template(&config.template, &payload_str);
+        self.send_webhook_raw(&config, &rendered).await?;
 
         Ok("Remote control push test successful".to_string())
     }
