@@ -898,6 +898,8 @@ export default function RemoteControl() {
               />
 
               <Divider />
+
+              <Alert severity="info">
                 <Typography variant="subtitle2" gutterBottom>
                   支持的指令（通过 MQTT 发送 JSON 到订阅主题）：
                 </Typography>
