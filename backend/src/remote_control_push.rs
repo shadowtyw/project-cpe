@@ -7,6 +7,7 @@ use crate::config::{ConfigManager, RemoteControlPushConfig};
 use chrono::Utc;
 use reqwest::Client;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 /// 远程遥控推送发送器
 pub struct RemoteControlPushSender {
@@ -68,7 +69,13 @@ impl RemoteControlPushSender {
     }
 
     /// 发送原始 JSON payload 到 Webhook
-    async fn send_webhook_raw(&self, config: &RemoteControlPushConfig, payload: &str) -> Result<(), String> {
+    async fn send_webhook_raw(
+        &self,
+        config: &RemoteControlPushConfig,
+        payload: &str,
+    ) -> Result<(), String> {
+        info!(url = %config.webhook_url, "Remote control push sending");
+
         let mut request = self.client.post(&config.webhook_url);
 
         // 添加自定义请求头
@@ -90,15 +97,28 @@ impl RemoteControlPushSender {
             .body(payload.to_string())
             .send()
             .await
-            .map_err(|e| format!("Failed to send remote control webhook: {}", e))?;
+            .map_err(|e| {
+                warn!(error = %e, "Remote control push request failed");
+                format!("Failed to send remote control webhook: {}", e)
+            })?;
 
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            Err(format!("Remote control webhook returned error status {}: {}", status, body))
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        info!(status = %status, body_len = body.len(), "Remote control push response");
+
+        if !status.is_success() {
+            warn!(status = %status, body = %body, "Remote control push HTTP error");
+            return Err(format!(
+                "Remote control webhook returned error status {}: {}",
+                status, body
+            ));
         }
+
+        // 企业微信/钉钉等机器人返回 HTTP 200 但 errcode != 0 表示失败
+        check_bot_errcode(&body)?;
+
+        Ok(())
     }
 
     /// 测试远程遥控推送（发送测试消息，走模板渲染路径）
@@ -121,12 +141,38 @@ impl RemoteControlPushSender {
         let payload_str = serde_json::to_string(&test_payload)
             .map_err(|e| format!("Failed to serialize test payload: {}", e))?;
 
+        info!(template = %config.template, "Remote control push test — template");
+        info!(payload = %payload_str, "Remote control push test — raw payload");
+
         // 走模板渲染路径，与 forward_* 方法保持一致
         let rendered = render_remote_control_template(&config.template, &payload_str);
+
+        info!(rendered = %rendered, "Remote control push test — rendered payload");
+        info!(url = %config.webhook_url, "Remote control push test — URL");
+        info!(enabled = config.enabled, "Remote control push test — config");
+
         self.send_webhook_raw(&config, &rendered).await?;
 
         Ok("Remote control push test successful".to_string())
     }
+}
+
+/// 检查机器人（企业微信/钉钉）返回的 errcode 字段。
+/// 这些平台无论成功失败都返回 HTTP 200，错误码在 body 的 errcode 中。
+fn check_bot_errcode(body: &str) -> Result<(), String> {
+    if body.is_empty() {
+        return Ok(());
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(code) = v["errcode"].as_i64() {
+            if code != 0 {
+                let errmsg = v["errmsg"].as_str().unwrap_or("unknown");
+                warn!(errcode = code, errmsg = errmsg, "Bot returned error");
+                return Err(format!("Bot error {}: {}", code, errmsg));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 计算 HMAC-SHA256 签名
@@ -136,8 +182,8 @@ fn compute_hmac(secret: &str, data: &str) -> String {
 
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take a key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take a key of any size");
     mac.update(data.as_bytes());
     let result = mac.finalize();
     hex::encode(result.into_bytes())
@@ -146,16 +192,19 @@ fn compute_hmac(secret: &str, data: &str) -> String {
 /// 渲染遥控推送模板，替换 {{变量名}} 占位符。
 ///
 /// payload 是原始 JSON 字符串，内含 `timestamp`、`type`、`data` 等字段。
-/// 模板中可引用这些字段的任意嵌套路径，如 `{{data.message}}`、`{{data.command}}`。
+/// 模板中可引用这些字段的任意嵌套路径。
 fn render_remote_control_template(template: &str, payload: &str) -> String {
     let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
-        Err(_) => return payload.to_string(),
+        Err(e) => {
+            warn!(error = %e, payload = %payload, "Failed to parse remote control payload JSON");
+            return payload.to_string();
+        }
     };
 
     let mut result = template.to_string();
 
-    // 提取顶层和 data 下一级字段
+    // 替换顶层字段
     if let Some(ts) = value["timestamp"].as_str() {
         result = result.replace("{{timestamp}}", ts);
     }
@@ -163,8 +212,9 @@ fn render_remote_control_template(template: &str, payload: &str) -> String {
         result = result.replace("{{type}}", t);
     }
 
-    // 展开 data 下的所有一级字段
+    // data 字段展开
     if let Some(data) = value.get("data") {
+        // 展开 data 下每个字段为 {{data_fieldname}}
         if let Some(obj) = data.as_object() {
             for (key, val) in obj {
                 let placeholder = format!("{{{{data_{}}}}}", key);
@@ -175,10 +225,9 @@ fn render_remote_control_template(template: &str, payload: &str) -> String {
                 result = result.replace(&placeholder, &text);
             }
         }
-        // data_message: 优先取 data.message，否则取整个 data 的 JSON 字符串
-        let data_message = data["message"]
-            .as_str()
-            .unwrap_or("");
+
+        // {{data_message}} 快捷占位符 → data.message
+        let data_message = data["message"].as_str().unwrap_or("");
         result = result.replace("{{data_message}}", &escape_json_string(data_message));
     }
 
