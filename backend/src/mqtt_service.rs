@@ -435,11 +435,15 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
             }
         }
         "status" => {
+            // 先收集状态，再发一条含数据的推送（而不是两条分开的推送）
+            let status = collect_system_status(dbus_conn).await;
+            let summary = format_status_summary(&status);
             send_mqtt_notification(
                 "mqtt_command_executed",
                 "status",
-                "MQTT 远程遥控：收到状态查询指令，正在上报…",
+                &summary,
             );
+            // 同时发布完整 JSON 到 MQTT topic_pub 供外部系统消费
             publish_status(dbus_conn).await;
         }
         _ => {
@@ -509,6 +513,71 @@ async fn collect_system_status(dbus_conn: &Connection) -> SystemStatus {
         uptime,
         thermal,
     }
+}
+
+/// 将系统状态格式化为中文可读摘要（用于 WeCom 推送）
+fn format_status_summary(status: &SystemStatus) -> String {
+    let mut lines = Vec::new();
+    lines.push("📊 设备状态报告".to_string());
+
+    // 信号强度
+    let sig = status.signal_strength.as_ref()
+        .and_then(|v| v["strength"].as_i64());
+    let sig_str = match sig {
+        Some(s) if s >= 80 => format!("📶 信号: {}% █████ (极好)", s),
+        Some(s) if s >= 60 => format!("📶 信号: {}% ████ (良好)", s),
+        Some(s) if s >= 40 => format!("📶 信号: {}% ███ (一般)", s),
+        Some(s) if s >= 20 => format!("📶 信号: {}% ██ (较弱)", s),
+        Some(s) => format!("📶 信号: {}% █ (弱)", s),
+        None => "📶 信号: 未知".to_string(),
+    };
+    lines.push(sig_str);
+
+    // 内存
+    if let Some(mem) = &status.memory {
+        let total = mem["total_bytes"].as_u64().unwrap_or(0);
+        let avail = mem["available_bytes"].as_u64().unwrap_or(0);
+        let used = total.saturating_sub(avail);
+        let pct = mem["used_percent"].as_f64().unwrap_or(0.0);
+        if total > 0 {
+            let total_mb = total / 1024 / 1024;
+            let used_mb = used / 1024 / 1024;
+            lines.push(format!(
+                "💾 内存: {:.0}% (已用 {:.0}MB / 总计 {:.0}MB)",
+                pct, used_mb, total_mb
+            ));
+        }
+    }
+
+    // 温度
+    if let Some(arr) = status.thermal.as_array() {
+        for tz in arr {
+            if let (Some(t), Some(name)) = (
+                tz["temperature"].as_f64(),
+                tz["sensor_type"].as_str(),
+            ) {
+                let emoji = if t >= 75.0 { "🔥" } else if t >= 55.0 { "🌡️" } else { "❄️" };
+                lines.push(format!("{} {}: {:.1}°C", emoji, name, t));
+            }
+        }
+    }
+
+    // 运行时长
+    if let Some(up) = &status.uptime {
+        if let Some(secs) = up.as_array().and_then(|a| a.first()?.as_u64()) {
+            let days = secs / 86400;
+            let hours = (secs % 86400) / 3600;
+            let mins = (secs % 3600) / 60;
+            if days > 0 {
+                lines.push(format!("⏱️ 已运行: {}天{}小时{}分钟", days, hours, mins));
+            } else {
+                lines.push(format!("⏱️ 已运行: {}小时{}分钟", hours, mins));
+            }
+        }
+    }
+
+    lines.push(format!("🕐 {}", status.timestamp));
+    lines.join("\n")
 }
 
 /// 获取 MQTT 运行时状态
