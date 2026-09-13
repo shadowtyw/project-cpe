@@ -78,7 +78,7 @@ fn default_remote_control_push_template() -> String {
     r#"{
   "msgtype": "text",
   "text": {
-    "content": "🔔 {{data_message}}\n时间: {{timestamp}}"
+    "content": "🔔 MQTT 远程控制通知\n━━━━━━━━━━━━━━━\n📡 事件: {{data_event}}\n⚙️ 指令: {{data_command}}\n💬 内容: {{data_message}}\n🕐 时间: {{timestamp}}"
   }
 }"#
     .to_string()

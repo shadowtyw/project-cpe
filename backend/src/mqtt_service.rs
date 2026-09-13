@@ -296,58 +296,66 @@ impl MqttService {
             });
         }
 
-        // 启动周期性心跳（独立 task，不阻塞 EventLoop）
-        let heartbeat_dbus = Arc::clone(&self.dbus_conn);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(120)).await;
-                // 检查客户端是否仍然有效
-                if MQTT_CLIENT.lock().await.is_none() {
-                    break;
-                }
-                publish_status(&heartbeat_dbus).await;
-            }
-        });
-
-        // 事件循环：保持连接，处理下行指令。
+        // 事件循环：保持连接，处理下行指令 + 周期性心跳。
         //
-        // 关键设计：收到的 Publish 消息 spawn 到独立 task 处理，不能在当前 poll 回调中
-        // await handle_command。原因是 handle_command 里的 status 命令需要调用
-        // client.publish() 把回复发出去，而 AsyncClient::publish() 依赖 EventLoop 轮询
-        // 来完成网络 I/O —— 如果在这里同步 await，EventLoop 被阻塞等待 handle_command
-        // 返回，publish 就永远发不出去，造成死锁。
+        // 关键设计：
+        // 1. 心跳定时器集成在事件循环内（tokio::select!），不再 spawn 独立 task。
+        //    之前每次 connect_broker() 都会 spawn 心跳 task，断连重连后旧 task 未退出
+        //    导致多个心跳 task 叠加，状态发布频率翻倍。
+        // 2. 收到的 Publish 消息 spawn 到独立 task 处理，因为 handle_command 里的
+        //    publish 需要 EventLoop 轮询来完成网络 I/O，不能在 poll 回调中 await。
+        // 3. 过滤 topic_pub 上的自回环：如果 topic_pub == topic_sub，忽略自己发布的消息。
+        let heartbeat_interval = Duration::from_secs(300);
+        let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
+        // 第一次 tick 立即触发，跳过它
+        heartbeat_timer.tick().await;
+
         let dbus_conn = Arc::clone(&self.dbus_conn);
         let config_clone = config.clone();
         loop {
-            match eventloop.poll().await {
-                Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    if publish.topic == topic_sub {
-                        let payload = publish.payload;
-                        let conn = Arc::clone(&dbus_conn);
-                        let cfg = config_clone.clone();
-                        tokio::spawn(async move {
-                            handle_command_spawned(&payload, &cfg, &conn).await;
-                        });
+            tokio::select! {
+                event = eventloop.poll() => {
+                    match event {
+                        Ok(Event::Incoming(Packet::Publish(publish))) => {
+                            // 过滤自回环：忽略自己发布到 topic_pub 的状态消息
+                            if publish.topic == topic_pub {
+                                continue;
+                            }
+                            if publish.topic == topic_sub {
+                                let payload = publish.payload;
+                                let conn = Arc::clone(&dbus_conn);
+                                let cfg = config_clone.clone();
+                                tokio::spawn(async move {
+                                    handle_command_spawned(&payload, &cfg, &conn).await;
+                                });
+                            }
+                        }
+                        Ok(Event::Incoming(Packet::Disconnect)) => {
+                            warn!(broker = %broker, "MQTT disconnected by broker");
+                            MQTT_CLIENT.lock().await.take();
+                            break;
+                        }
+                        Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                            // 重连后的 ConnAck，忽略
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            error!(broker = %broker, error = %err_msg, "MQTT event loop error");
+                            MQTT_CLIENT.lock().await.take();
+                            Self::update_state_static(|state| {
+                                state.connected = false;
+                                state.error_message = Some(err_msg.clone());
+                            }).await;
+                            return Err(format!("{broker}: {err_msg}").into());
+                        }
                     }
                 }
-                Ok(Event::Incoming(Packet::Disconnect)) => {
-                    warn!(broker = %broker, "MQTT disconnected by broker");
-                    MQTT_CLIENT.lock().await.take();
-                    break;
-                }
-                Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                    // 重连后的 ConnAck，忽略
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    error!(broker = %broker, error = %err_msg, "MQTT event loop error");
-                    MQTT_CLIENT.lock().await.take();
-                    Self::update_state_static(|state| {
-                        state.connected = false;
-                        state.error_message = Some(err_msg.clone());
-                    }).await;
-                    return Err(format!("{broker}: {err_msg}").into());
+                _ = heartbeat_timer.tick() => {
+                    let dbus_clone = Arc::clone(&self.dbus_conn);
+                    tokio::spawn(async move {
+                        publish_status(&dbus_clone).await;
+                    });
                 }
             }
         }
