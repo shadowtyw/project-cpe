@@ -2,7 +2,7 @@
 
 面向成品 5G CPE / 通讯壳的 Web 管理系统。后端采用 Rust + Axum + zbus，通过 ofono D-Bus 管理 5G/LTE 调制解调器；前端基于 React + Vite + @tanstack/react-query，提供网络、短信、电话、频段、小区、USB、OTA、Webhook 和系统状态管理界面。
 
-> 当前版本：`3.6.1`  
+> 当前版本：`3.6.2`  
 > 目标平台：`aarch64-unknown-linux-musl`（展锐 UDX710 SoC）  
 > 授权协议：[GNU GPLv3](LICENSE)
 
@@ -462,14 +462,15 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 
 ### 2. 后台任务监督
 
-9 个后台任务通过 `supervise()` 封装，panic 或意外退出后自动重启：
+11 个后台任务通过 `supervise()` 封装，panic 或意外退出后自动重启：
 
 | 任务 | 功能 | 重启间隔 |
 |------|------|----------|
 | `sms_listener` | 监听 D-Bus 短信信号 | 5s |
 | `call_listener` | 监听 D-Bus 通话信号 | 5s |
-| `call_control_poll` | 通话遥控轮询（1s） | 2s |
-| `data_connection_watchdog` | 数据连接保活（15s） | 2s |
+| `call_cleanup_loop` | 孤儿通话条目周期清理（60s） | 2s |
+| `call_control_poll` | 通话遥控轮询（按待确认命令到期时间精确定时唤醒，空闲 5s 兜底） | 2s |
+| `data_connection_watchdog` | 数据连接保活（前台 5s / 后台 ≥60s 自适应） | 2s |
 | `net_health_watchdog` | 外网探活与分级断网自愈 | 2s |
 | `restart_watchdog` | 自动重启策略（60s） | 2s |
 | `schedule_watchdog` | 定时计划执行 | 2s |
@@ -482,6 +483,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **WAL 模式**：读写不再互相阻塞，提升并发性能
 - **busy_timeout=5s**：写锁冲突时等待而非立即报错
 - **synchronous=NORMAL**：平衡性能与安全（target 为嵌入式设备）
+- **cache_size=-1024**：页缓存限制约 1MB（默认 2MB），小表场景足够，少占用约 1MB 常驻内存
 - **自动清理**：短信保留 2000 条，通话保留 1000 条，防止 `/data` 分区占满
 
 ### 4. 配置安全
@@ -493,7 +495,9 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 ### 5. 内存管理
 
 - **环形日志缓冲**：最多 2000 条，不写磁盘，不磨损 flash
-- **ACTIVE_CALLS TTL**：孤儿通话条目 30 分钟自动清理，防止内存泄漏
+- **tokio 阻塞线程池上限 8**：默认 512 × 2MB 栈 ≈ 1GB 虚拟内存，收紧为 8 个线程
+- **SQLite 页缓存 1MB**：`cache_size=-1024`，比默认 2MB 少占用约 1MB 常驻内存
+- **孤儿通话条目清理**：30 分钟 TTL 之外，新增 60s 周期清理循环，信号丢失残留的条目也能及时回收
 - **可用内存语义**：使用 Linux `MemAvailable` 而非 `MemTotal - MemFree`，反映真实可用内存
 
 ### 6. 前端健壮性
@@ -521,6 +525,8 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   - 仅在 `registered`/`roaming` 状态下才判失败，`searching` 阶段不计入
   - 启动后 30 秒启动宽限
   - 每级动作后进入 cooldown 静默期
+  - 探测命令带硬超时（`timeout_secs + 3`），防止探活命令挂死占住阻塞线程池
+- **飞行模式卡死升级**：L2 复位后若设备仍持续离线（`stuck_in_airplane`），自动升级到 L3 重启，防止远程指令或复位失败导致设备永久卡在飞行模式
 
 ### 9. 短信遥控指令
 
@@ -542,6 +548,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **飞行模式自动恢复**：`#飞行开#` / `#关射频#` 执行后 10 秒自动关闭飞行模式 + 开启数据连接，防止远程指令导致设备永久断网
 - **安全隔离**：命中指令的短信仅入库审计，不转发到 Webhook/推送平台
 - **独立开关**：`SmsControlConfig.enabled` 控制，与通话遥控互不干扰
+- **编码兼容**：支持 GSM 7-bit（含扩展字符如 `€`）与 UCS-2 解码；异常长度 PDU 安全截断，不会 panic
 
 ### 10. 通话遥控（时长编码 + 二次确认）
 
@@ -555,6 +562,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   4. 同号码 10 秒内再次来电 → 确认并执行动作，推送"已执行"
   5. 10 秒内无二次来电 → 推送"命令已取消"，丢弃待确认命令
 - **通知双通道**：命令检测、确认执行、超时取消三个事件均通过 Webhook + 短信推送双通道推送
+- **监听循环零阻塞**：接听/挂断等 D-Bus 调用派发到独立任务，不占用来电监听循环，计时不受全局串行锁等待影响
 - **防误触设计**：通话时长 <3s 或 >30s 视为误操作，不匹配任何命令
 - **飞行模式自动恢复**：`AirplaneOn` / `RadioOff` 动作执行后 10 秒自动关闭飞行模式 + 开启数据连接
 - **独立开关**：`CallControlConfig.enabled` 控制，与短信遥控互不干扰
@@ -572,6 +580,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   - 频段锁（AT+SPLBAND）
   - 小区锁（AT+SPFORCEFRQ）
 - **容错设计**：每步失败只打 warn 日志，不阻断后续步骤
+- **工程模式兜底恢复**：小区锁进入 `AT+SFUN=5` 后，无论中间步骤成败都保证恢复 `AT+SFUN=4`，防止 modem 滞留工程模式导致无信号
 
 ### 12. MQTT 远程控制
 
