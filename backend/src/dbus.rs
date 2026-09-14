@@ -1141,6 +1141,41 @@ pub async fn set_airplane_mode(conn: &Connection, enabled: bool) -> zbus::Result
     }).await
 }
 
+/// 飞行模式自动恢复：10 秒后关闭飞行模式并开启数据连接。
+///
+/// 远程指令（短信遥控 `#飞行开#`/`#关射频#`、通话遥控 AirplaneOn/RadioOff）触发的
+/// 飞行模式会导致设备断网。通过此函数确保设备不因远程指令而永久离线——10 秒后
+/// 自动关飞行模式、再等 2 秒开数据连接，给基带足够恢复时间。
+///
+/// 恢复操作在独立后台任务中执行，不阻塞调用方。任务 panic 时仅记录日志，
+/// 后续连通性由 `net_health` watchdog 兜底。
+pub fn spawn_airplane_recovery(conn: &Connection) {
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            tracing::info!("Airplane mode auto-recovery: turning off airplane mode");
+            let _ = crate::dbus::set_airplane_mode(&conn, false).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            tracing::info!("Airplane mode auto-recovery: enabling data connection");
+            let _ = crate::dbus::set_data_connection(&conn, true).await;
+            tracing::info!("Airplane mode auto-recovery completed");
+        });
+        match handle.await {
+            Ok(_) => {
+                tracing::info!("Airplane recovery completed successfully");
+            }
+            Err(e) if e.is_panic() => {
+                tracing::error!("Airplane recovery task panicked: {:?}", e);
+                // 内层 task panic 后 conn 已不可用，依赖 net_health watchdog 恢复
+            }
+            Err(e) => {
+                tracing::warn!("Airplane recovery task was cancelled: {:?}", e);
+            }
+        }
+    });
+}
+
 /// 获取飞行模式状态
 ///
 /// # Arguments
@@ -1723,10 +1758,14 @@ pub async fn set_call_forwarding(
         let number_value = zbus::zvariant::Value::new(number);
         proxy.call::<_, _, ()>("SetProperty", &(property_name, number_value)).await?;
         
-        // 如果是 noreply 类型且提供了超时时间
-        if forward_type == "noreply" && timeout.is_some() {
-            let timeout_value = zbus::zvariant::Value::new(timeout.unwrap());
-            proxy.call::<_, _, ()>("SetProperty", &("VoiceNoReplyTimeout", timeout_value)).await?;
+        // 如果是 noreply 类型且提供了超时时间。
+        // 用 if let 取代「is_some() 守卫 + unwrap」，从结构上杜绝 panic
+        // （release 构建 panic = abort，任何 panic 都会直接杀死进程）。
+        if forward_type == "noreply" {
+            if let Some(timeout_secs) = timeout {
+                let timeout_value = zbus::zvariant::Value::new(timeout_secs);
+                proxy.call::<_, _, ()>("SetProperty", &("VoiceNoReplyTimeout", timeout_value)).await?;
+            }
         }
         
         Ok(())

@@ -85,6 +85,13 @@ fn lock_state() -> MutexGuard<'static, State> {
 // ── 公开 API ──────────────────────────────────────────────
 
 /// 处理一条新的来电：命中白名单则自动接听并开始计时。
+///
+/// 所有 D-Bus 调用（接听、执行动作、挂断）都在独立任务中进行，函数本身只做
+/// 同步的状态登记后立即返回。原因：本函数由 `call_listener` 的 D-Bus 消息循环
+/// 调用，而 D-Bus 操作需等待全局串口锁（`serial::DBUS_LOCK`），最长可达 30s，
+/// 运营商扫描期间甚至 120s。若在循环里 `await`，后续的 `CallRemoved` 信号虽不会
+/// 丢失（zbus 缓冲），但处理会被推迟，而通话时长由 `Instant::now() - begin` 计算，
+/// 会被这段延迟灌水，导致通话遥控的时长匹配失准。
 pub async fn on_incoming_call(
     conn: &Connection,
     config: &CallControlConfig,
@@ -107,10 +114,11 @@ pub async fn on_incoming_call(
     }
 
     // 检查是否为二次确认来电
-    let is_confirmation = { lock_state().pending.as_ref().map_or(false, |p| p.number == normalized) };
+    let is_confirmation = { lock_state().pending.as_ref().is_some_and(|p| p.number == normalized) };
 
     if !is_confirmation {
-        // 首次通话：记录活跃通话并自动接听
+        // 首次通话：同步登记活跃通话（保证后续 CallRemoved 一定能匹配到），
+        // 接听动作放到后台任务，不阻塞消息循环。
         {
             let mut state = lock_state();
             state.active_call = Some(ActiveCall {
@@ -119,7 +127,11 @@ pub async fn on_incoming_call(
                 begin: Instant::now(),
             });
         }
-        let _ = crate::dbus::answer_call(conn, path).await;
+        let conn = conn.clone();
+        let path = path.to_string();
+        tokio::spawn(async move {
+            let _ = crate::dbus::answer_call(&conn, &path).await;
+        });
         return true;
     }
 
@@ -142,10 +154,16 @@ pub async fn on_incoming_call(
     }));
 
     record_trigger(&number, action);
-    execute_action(conn, action).await;
 
-    // 挂断确认来电
-    let _ = crate::dbus::hangup_call(conn, path).await;
+    // 执行动作与挂断同样放到后台任务：execute_action 内部可能触发射频切换等
+    // 较慢的 D-Bus 操作，不能阻塞消息循环。
+    let conn = conn.clone();
+    let path = path.to_string();
+    tokio::spawn(async move {
+        execute_action(&conn, action).await;
+        let _ = crate::dbus::hangup_call(&conn, &path).await;
+    });
+
     true
 }
 
@@ -208,15 +226,43 @@ pub async fn on_call_removed(_conn: &Connection, config: &CallControlConfig, pat
     });
 }
 
-/// 定时轮询：检查待确认命令是否过期。
-pub async fn poll() {
+/// 定时轮询：检查待确认命令是否过期，并清理超时的活跃通话残留。
+///
+/// 返回下次需要检查的等待时长；`None` 表示当前无任何计时状态，调用方可长时间
+/// 休眠（避免 1 秒一次的无谓唤醒，降低嵌入式设备 CPU/功耗占用）。
+pub async fn poll() -> Option<Duration> {
+    /// 活跃通话最长保留时间：远超单次通话时长，超过则视为 CallRemoved 信号丢失。
+    const ACTIVE_CALL_TTL: Duration = Duration::from_secs(600);
+
     let expired = {
         let mut state = lock_state();
-        let now = Instant::now();
-        if state.pending.as_ref().map_or(true, |p| p.expires_at > now) {
-            return;
+
+        // 清理孤儿活跃通话（CallRemoved 信号丢失时防止状态残留，阻塞后续判断）。
+        if state.active_call.as_ref().is_some_and(|a| a.begin.elapsed() > ACTIVE_CALL_TTL) {
+            if let Some(stale) = state.active_call.take() {
+                tracing::warn!(
+                    number = %stale.number,
+                    "Stale call-control active call cleared after {}s",
+                    ACTIVE_CALL_TTL.as_secs()
+                );
+            }
         }
-        state.pending.take()
+
+        match state.pending.as_ref() {
+            Some(p) if p.expires_at > Instant::now() => {
+                // 未到期：精确休眠到到期时刻。
+                return Some(p.expires_at - Instant::now());
+            }
+            Some(_) => state.pending.take(),
+            // 无待确认命令：若还有活跃通话在计时，按其 TTL 兜底唤醒一次即可。
+            None => {
+                return state.active_call.as_ref().map(|a| {
+                    ACTIVE_CALL_TTL
+                        .checked_sub(a.begin.elapsed())
+                        .unwrap_or(Duration::from_secs(1))
+                });
+            }
+        }
     };
 
     if let Some(pending) = expired {
@@ -228,6 +274,8 @@ pub async fn poll() {
             "message": format!("命令已取消: {}（10秒内未收到二次确认来电）", pending.action_label),
         }));
     }
+
+    None
 }
 
 /// 读取上次触发的通话遥控记录。
@@ -267,7 +315,7 @@ async fn execute_action(conn: &Connection, action: ScheduleAction) {
         }
         ScheduleAction::AirplaneOn => {
             let _ = crate::dbus::set_airplane_mode(conn, true).await;
-            spawn_airplane_recovery(conn);
+            crate::dbus::spawn_airplane_recovery(conn);
         }
         ScheduleAction::AirplaneOff => {
             let _ = crate::dbus::set_airplane_mode(conn, false).await;
@@ -289,32 +337,9 @@ async fn execute_action(conn: &Connection, action: ScheduleAction) {
         }
         ScheduleAction::RadioOff => {
             let _ = crate::dbus::set_airplane_mode(conn, true).await;
-            spawn_airplane_recovery(conn);
+            crate::dbus::spawn_airplane_recovery(conn);
         }
     }
 }
 
-fn spawn_airplane_recovery(conn: &Connection) {
-    let conn = conn.clone();
-    tokio::spawn(async move {
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            tracing::info!("Call control airplane auto-recovery");
-            let _ = crate::dbus::set_airplane_mode(&conn, false).await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let _ = crate::dbus::set_data_connection(&conn, true).await;
-        });
-        match handle.await {
-            Ok(_) => {
-                tracing::info!("Airplane recovery completed successfully");
-            }
-            Err(e) if e.is_panic() => {
-                tracing::error!("Airplane recovery task panicked: {:?}", e);
-                // 内层 task panic 后 conn 已不可用，依赖 net_health watchdog 恢复
-            }
-            Err(e) => {
-                tracing::warn!("Airplane recovery task was cancelled: {:?}", e);
-            }
-        }
-    });
-}
+// 飞行模式自动恢复已统一到 dbus::spawn_airplane_recovery（短信/通话遥控共用）。

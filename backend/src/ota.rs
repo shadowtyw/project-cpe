@@ -171,6 +171,12 @@ fn normalize_archive_name(raw_name: &str) -> Result<String, String> {
     while let Some(stripped) = normalized.strip_prefix("./") {
         normalized = stripped;
     }
+    // 显式拒绝以 '/' 开头的绝对路径。目标设备为 Linux，tar 归档成员若以 '/' 开头
+    // 会逃逸出解压目录（路径穿越）；但 Windows 下 `Path::is_absolute()` 不识别
+    // Unix 绝对路径，故此处单独判断前导斜杠，保证跨平台一致拦截。
+    if normalized.starts_with('/') {
+        return Err(format!("OTA archive contains unsafe path: {}", trimmed));
+    }
     let path = Path::new(normalized);
     if path.is_absolute() || path.components().any(|component| matches!(component, Component::ParentDir)) {
         return Err(format!("OTA archive contains unsafe path: {}", trimmed));

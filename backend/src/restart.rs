@@ -26,11 +26,32 @@ pub fn schedule_reboot(reason: &'static str, delay_seconds: u64) -> bool {
         return false;
     }
 
+    // 超时兜底：如果 reboot 子进程启动了但系统未真重启，30s 后自动重置标志
+    let max_guard = delay_seconds.saturating_add(30).max(30);
     tokio::spawn(async move {
         let handle = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
-            match std::process::Command::new("reboot").spawn() {
-                Ok(_) => info!(reason, "System reboot requested"),
+            // 必须用 tokio::process::Command：std::process::Child::wait() 是阻塞调用，
+            // 无法放进 tokio::select! 与超时分支一起等待。
+            match tokio::process::Command::new("reboot").spawn() {
+                Ok(mut child) => {
+                    // 子进程确认启动后等待一小段时间，若系统还活着说明重启失败
+                    let deadline = std::time::Duration::from_secs(max_guard);
+                    tokio::select! {
+                        _ = tokio::time::sleep(deadline) => {
+                            REBOOT_PENDING.store(false, Ordering::SeqCst);
+                            warn!(reason, "Reboot command did not complete within {}s; REBOOT_PENDING flag reset", max_guard);
+                        }
+                        status = child.wait() => {
+                            REBOOT_PENDING.store(false, Ordering::SeqCst);
+                            match status {
+                                Ok(s) if s.success() => warn!(reason, "Reboot returned success but system still running"),
+                                Ok(s) => warn!(reason, "Reboot process exited with status {}: {:?}; flag reset", s.code().unwrap_or(-1), s),
+                                Err(e) => warn!(reason, "Reboot process wait error: {}; flag reset", e),
+                            }
+                        }
+                    }
+                }
                 Err(error) => {
                     REBOOT_PENDING.store(false, Ordering::SeqCst);
                     warn!(reason, error = %error, "Failed to request system reboot");
@@ -38,16 +59,12 @@ pub fn schedule_reboot(reason: &'static str, delay_seconds: u64) -> bool {
             }
         });
         match handle.await {
-            Ok(_) => {
-                // 正常完成或已重置 REBOOT_PENDING
-            }
+            Ok(_) => {}
             Err(e) if e.is_panic() => {
-                // Task panic，重置标志防止永久卡死
                 REBOOT_PENDING.store(false, Ordering::SeqCst);
                 warn!(reason, "Reboot task panicked: {:?}; REBOOT_PENDING flag reset", e);
             }
             Err(e) => {
-                // Task 被取消
                 REBOOT_PENDING.store(false, Ordering::SeqCst);
                 warn!(reason, "Reboot task was cancelled: {:?}; REBOOT_PENDING flag reset", e);
             }
@@ -92,7 +109,14 @@ pub async fn restart_watchdog(config_manager: Arc<ConfigManager>) {
             }
 
             // A value exactly at the configured threshold does not trigger.
-            let available_percent = memory.available_bytes.saturating_mul(100) / memory.total_bytes;
+            // 用 saturating_div 而非 `/`：上方虽有 total_bytes == 0 的守卫，但那是
+            // 隐式依赖，后续重构一旦挪动顺序就会退化成除零 panic —— 而 release
+            // profile 设了 panic = "abort"，本函数又在常驻 watchdog 中，等于整机服务
+            // 被杀。saturating_div 遇零除数返回 0，彻底消除该风险。
+            let available_percent = memory
+                .available_bytes
+                .saturating_mul(100)
+                .saturating_div(memory.total_bytes);
             if available_percent < u64::from(config.low_memory_threshold_percent) {
                 consecutive_low_memory_checks = consecutive_low_memory_checks.saturating_add(1);
             } else {

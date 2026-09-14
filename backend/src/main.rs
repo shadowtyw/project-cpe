@@ -32,7 +32,7 @@ use axum::{
 use clap::Parser;
 use std::future::Future;
 use std::sync::Arc;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -72,18 +72,25 @@ use sms_push::SmsPushSender;
 use state::{AppState, FrontendRuntime};
 use webhook::WebhookSender;
 
-/// 获取二进制文件同级目录下的 www 目录路径
-fn get_www_dir() -> PathBuf {
-    // 获取当前可执行文件的路径
-    let exe_path = std::env::current_exe()
-        .expect("Failed to get executable path");
-    
-    // 获取可执行文件所在目录
-    let exe_dir = exe_path.parent()
-        .expect("Failed to get executable directory");
-    
-    // 拼接 www 目录
-    exe_dir.join("www")
+/// 获取二进制文件同级目录下的 www 目录路径。
+///
+/// 结果在首次调用时计算并缓存：本函数位于每个前端静态资源请求的路径上，
+/// 既避免重复系统调用，也保证只有一处需要处理路径获取失败。
+///
+/// # 为什么不能 panic
+/// release profile 设了 `panic = "abort"`，而本函数在请求路径上被高频调用。
+/// 早期实现用 `.expect()`，一旦 `current_exe()` 失败（/proc 未挂载、二进制在
+/// OTA 替换期间被删除等）整个进程会直接 abort，导致服务完全中断——这比返回
+/// 404 严重得多。因此这里改为返回 `None` 并由调用方降级处理。
+fn get_www_dir() -> Option<&'static Path> {
+    static WWW_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    WWW_DIR
+        .get_or_init(|| {
+            let exe_path = std::env::current_exe().ok()?;
+            let exe_dir = exe_path.parent()?;
+            Some(exe_dir.join("www"))
+        })
+        .as_deref()
 }
 
 /// Protect management APIs when UDX710_API_TOKEN is configured.
@@ -132,14 +139,21 @@ async fn spa_fallback(uri: Uri) -> Response {
     if path.starts_with("/api/") {
         return (StatusCode::NOT_FOUND, "API endpoint not found").into_response();
     }
-    
-    // 获取 www 目录的绝对路径
-    let www_dir = get_www_dir();
-    
+
+    // 获取 www 目录的绝对路径；获取失败时返回 500 而不是 panic（见 get_www_dir）。
+    let Some(www_dir) = get_www_dir() else {
+        warn!("Cannot resolve www directory: failed to determine executable path");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Static assets unavailable: cannot resolve executable path",
+        )
+            .into_response();
+    };
+
     // 构建请求文件的完整路径
     let requested_path = if path == "/" { "/index.html" } else { path };
     let file_path = www_dir.join(requested_path.trim_start_matches('/'));
-    
+
     // 如果文件存在，返回文件内容
     if let Ok(content) = tokio::fs::read(&file_path).await {
         // 根据文件扩展名设置正确的 Content-Type
@@ -195,8 +209,18 @@ struct Args {
     host: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // 手动构建 runtime：限制阻塞线程池上限为 8。tokio 默认允许最多 512 个阻塞
+    // 线程（每个默认 2MB 栈），对本项目的 spawn_blocking 用量（ping、读文件等
+    // 短任务）而言是巨大的虚拟内存浪费。8 个线程足以覆盖并发探测与磁盘 IO。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(8)
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // 初始化 tracing 日志框架
     // 通过 RUST_LOG 环境变量控制日志级别，默认为 info
     // fmt layer 输出到终端（进程 stdout），LogBufferLayer 转发到内存环形缓冲，
@@ -399,13 +423,29 @@ async fn main() -> Result<()> {
         });
     }
 
+    // 孤儿通话条目周期清理：即使长时间无新通话，因 CallRemoved 信号丢失而残留
+    // 的内存条目也能在 TTL 后及时回收，防止内存缓慢泄漏。
+    {
+        tokio::spawn(async move {
+            supervise("call_cleanup_loop", move || async move {
+                sms_listener::call_cleanup_loop().await;
+            })
+            .await;
+        });
+    }
+
     // 通话遥控轮询：检查待确认命令是否过期。
+    // poll() 返回下次需要检查的等待时长；返回 None 表示无任何计时状态，休眠一个
+    // 较长的兜底间隔。这样常态下几乎不唤醒，避免 1 秒一次的高频轮询占用 CPU。
     {
         tokio::spawn(async move {
             supervise("call_control_poll", move || async move {
+                const IDLE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(5);
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    crate::call_control::poll().await;
+                    match crate::call_control::poll().await {
+                        Some(wait) => tokio::time::sleep(wait).await,
+                        None => tokio::time::sleep(IDLE_INTERVAL).await,
+                    }
                 }
             })
             .await;

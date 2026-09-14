@@ -836,7 +836,11 @@ pub async fn sample_cpu_usage() -> Result<f64, String> {
     }
     
     // 计算 CPU 使用率
-    let usage = ((total_diff - idle_diff) as f64 / total_diff as f64) * 100.0;
+    // 用 saturating_sub：若 idle 增量反常地大于 total 增量（计数器异常或采样竞态），
+    // 裸减法在 debug 构建会 panic、在 release 构建静默回绕成天文数字再被 clamp 成
+    // 100%。饱和减法在此场景下正确得到 0（即无忙碌时间）。
+    let busy_diff = total_diff.saturating_sub(idle_diff);
+    let usage = (busy_diff as f64 / total_diff as f64) * 100.0;
     
     Ok(usage.clamp(0.0, 100.0))
 }

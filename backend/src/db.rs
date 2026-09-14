@@ -86,11 +86,17 @@ impl Database {
 
         // 启用 WAL 模式：允许并发读写，读取不再阻塞写入。
         // embedded 设备上 WAL 也能显著提升多任务并发访问的响应速度。
+        //
+        // cache_size=-1024：把 SQLite 页缓存限制到约 1MB。默认值为 -2000（约 2MB），
+        // 本库只有短信/通话/流量三张小表且清理任务会把行数压在几千行内，1MB 足够
+        // 缓存热页，省下的 1MB 常驻内存在小内存设备上更有价值。
+        // 注意负值单位是 KiB，正值单位是「页数」。
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;
              PRAGMA synchronous=NORMAL;
-             PRAGMA foreign_keys=ON;",
+             PRAGMA foreign_keys=ON;
+             PRAGMA cache_size=-1024;",
         )?;
         
         // 创建短信表（如果不存在）

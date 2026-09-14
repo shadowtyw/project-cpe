@@ -38,10 +38,30 @@ enum RecoveryLevel {
     Reboot,
 }
 
+/// Level 2 飞行模式复位的执行结果。
+///
+/// 必须区分「进入飞行模式就失败」与「进入成功但退不出」：前者设备仍在线，
+/// 后者设备已卡在飞行模式彻底离线，需要 `stuck_in_airplane` 标记才能绕过
+/// 主循环「未注册即清零」的逻辑，让失败计数爬到 Level 3 触发重启兜底。
+#[derive(Debug, PartialEq, Eq)]
+enum AirplaneResetOutcome {
+    /// 已成功退出飞行模式，基带恢复在线。
+    Recovered,
+    /// 进入飞行模式失败，设备仍在线（未卡死）。
+    EnterFailed,
+    /// 进入飞行模式成功但重试后仍退不出，设备已离线（卡死）。
+    StuckOffline,
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct NetHealthState {
     consecutive_failures: u32,
     last_level: u8,
+    /// Level 2 飞行模式复位未能恢复在线时置位。卡飞行模式的设备注册状态必然
+    /// 不是 registered，若不单独标记，主循环的「未注册即清零计数」逻辑会让
+    /// 失败计数永远无法累积到 Level 3，设备将永久离线且无兜底。
+    #[serde(default)]
+    stuck_in_airplane: bool,
 }
 
 fn state_path() -> std::path::PathBuf {
@@ -111,9 +131,29 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
         let status = crate::dbus::get_registration_status(&conn).await;
         let registered = matches!(status.as_deref(), Some("registered") | Some("roaming"));
         if !registered {
-            state.consecutive_failures = 0;
-            write_state(&state);
+            if state.stuck_in_airplane {
+                // 例外：Level 2 复位失败卡飞行模式 → 设备确定离线，继续累计失败，
+                // 让计数最终爬到 Level 3 触发重启兜底（飞行模式重启后自动解除）。
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+                let failures = state.consecutive_failures;
+                if failures >= config.l3_failures {
+                    warn!(failures, "Net health: still offline after failed airplane reset; escalating to Level 3 reboot");
+                    if crate::restart::schedule_reboot("airplane_stuck", 3) {
+                        state.last_level = 3;
+                        state.stuck_in_airplane = false;
+                    }
+                }
+                write_state(&state);
+            } else if state.consecutive_failures != 0 {
+                state.consecutive_failures = 0;
+                write_state(&state);
+            }
             continue;
+        }
+        // 已注册即说明射频在线：清除飞行模式卡死标记。
+        if state.stuck_in_airplane {
+            state.stuck_in_airplane = false;
+            write_state(&state);
         }
 
         // 并发 ping 两个目标，全部失败才计一次失败。
@@ -157,9 +197,22 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
             }
             RecoveryLevel::AirplaneReset => {
                 warn!(failures, "Net health Level 2: airplane-mode baseband reset");
-                execute_level_2(&conn).await;
-                state.last_level = 2;
-                last_action_at = Some(std::time::Instant::now());
+                match execute_level_2(&conn).await {
+                    AirplaneResetOutcome::Recovered => {
+                        state.last_level = 2;
+                        last_action_at = Some(std::time::Instant::now());
+                    }
+                    AirplaneResetOutcome::EnterFailed => {
+                        // 进入飞行模式就失败：设备仍在线，不设 cooldown，下一轮重试。
+                        warn!("Net health Level 2: failed to enter airplane mode; will retry next cycle");
+                    }
+                    AirplaneResetOutcome::StuckOffline => {
+                        // 已卡飞行模式离线：标记 stuck，让后续未注册轮次继续累计失败
+                        // 直至升级 Level 3 重启。不设 cooldown，下一轮立即重试。
+                        state.stuck_in_airplane = true;
+                        warn!("Net health Level 2: stuck in airplane mode; flagged for escalation");
+                    }
+                }
                 write_state(&state);
             }
             RecoveryLevel::Reboot => {
@@ -174,8 +227,13 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
 }
 
 /// 并发 ping 探测目标，任一可达返回 true。
+///
+/// `ping` 子进程理论上受 `-W` 超时约束，但命令不存在、参数被裁剪或系统负载
+/// 异常时仍可能长时间挂起，占满 tokio 阻塞线程池。此处为每个探测加一道
+/// `ping_timeout + 3s` 的硬超时，超时按「不可达」处理。
 async fn probe_targets(config: &NetHealthConfig) -> bool {
     let timeout_secs = config.ping_timeout_secs;
+    let hard_timeout = std::time::Duration::from_secs(timeout_secs.saturating_add(3));
     let futures: Vec<_> = PROBE_TARGETS
         .iter()
         .map(|target| {
@@ -185,8 +243,12 @@ async fn probe_targets(config: &NetHealthConfig) -> bool {
         .collect();
 
     for fut in futures {
-        if let Ok(Ok(true)) = fut.await {
-            return true;
+        match tokio::time::timeout(hard_timeout, fut).await {
+            Ok(Ok(Ok(true))) => return true,
+            Ok(Ok(Ok(false))) => {}
+            Ok(Ok(Err(e))) => warn!(error = %e, "Net health ping command failed"),
+            Ok(Err(e)) => warn!(error = %e, "Net health ping task panicked"),
+            Err(_) => warn!("Net health ping timed out (hard limit {}s)", hard_timeout.as_secs()),
         }
     }
     false
@@ -221,15 +283,46 @@ async fn execute_level_1(conn: &Connection) {
 }
 
 /// Level 2：飞行模式复位基带（Online=false → 等 15s → Online=true）。
-async fn execute_level_2(conn: &Connection) {
+///
+/// 返回三态结果以区分「设备仍在线的失败」与「设备已卡离线的失败」：后者必须
+/// 由调用方设置 `stuck_in_airplane` 标记，否则主循环的「未注册即清零计数」逻辑
+/// 会让失败计数永远到不了 Level 3，设备将永久离线且无兜底。
+async fn execute_level_2(conn: &Connection) -> AirplaneResetOutcome {
     if let Err(e) = crate::dbus::set_airplane_mode(conn, true).await {
         warn!(error = %e, "Net health Level 2: failed to enter airplane mode");
-        return;
+        return AirplaneResetOutcome::EnterFailed;
     }
     tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-    if let Err(e) = crate::dbus::set_airplane_mode(conn, false).await {
-        warn!(error = %e, "Net health Level 2: failed to exit airplane mode");
+
+    // 退出飞行模式是关键一步，失败必须重试：ofono/基带刚复位时首个 D-Bus 调用
+    // 常因 modem 尚未 ready 而失败，重试几次通常即可成功。
+    const EXIT_RETRIES: u32 = 4;
+    for attempt in 1..=EXIT_RETRIES {
+        match crate::dbus::set_airplane_mode(conn, false).await {
+            Ok(()) => {
+                if attempt > 1 {
+                    info!(attempt, "Net health Level 2: exited airplane mode after retry");
+                }
+                return AirplaneResetOutcome::Recovered;
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    attempt,
+                    "Net health Level 2: failed to exit airplane mode ({}/{})",
+                    attempt,
+                    EXIT_RETRIES
+                );
+                if attempt < EXIT_RETRIES {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
     }
+
+    // 所有重试失败：设备仍处于飞行模式（离线）。
+    warn!("Net health Level 2: device stuck in airplane mode; will escalate to reboot");
+    AirplaneResetOutcome::StuckOffline
 }
 
 #[cfg(test)]

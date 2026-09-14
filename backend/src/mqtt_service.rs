@@ -123,20 +123,11 @@ impl MqttService {
                 continue;
             }
 
-            MQTT_ENABLED.store(true, Ordering::SeqCst);
-
-            let err_str = match self.connect_and_run(&config).await {
-                Ok(()) => None,
-                Err(e) => {
-                    error!(error = %e, "MQTT service error");
-                    Some(e.to_string())
-                }
-            };
-            if let Some(msg) = err_str {
-                Self::update_state_static(|state| {
-                    state.connected = false;
-                    state.error_message = Some(msg);
-                }).await;
+            // 仅在成功连接后才标记 enabled=true，避免 UI 在连接前显示假连接状态。
+            if self.connect_and_run(&config).await.is_ok() {
+                MQTT_ENABLED.store(true, Ordering::SeqCst);
+            } else {
+                MQTT_ENABLED.store(false, Ordering::SeqCst);
             }
 
             // 重连间隔
@@ -162,7 +153,7 @@ impl MqttService {
             let broker = &broker_list[broker_index];
             let client_id = format!("udx710_{}", self.imei);
 
-            info!("Connecting to MQTT broker: {} client_id={}", broker, client_id);
+            debug!("Connecting to MQTT broker: {} client_id={}", broker, client_id);
 
             Self::update_state_static(|state| {
                 state.current_broker = broker.clone();
@@ -175,7 +166,7 @@ impl MqttService {
                 Ok(()) => {
                     // 成功连接并正常运行直到断开，重置退避
                     consecutive_failures = 0;
-                    info!(broker = %broker, "MQTT connection closed gracefully, trying next broker");
+                    debug!(broker = %broker, "MQTT connection closed gracefully, trying next broker");
                     broker_index += 1;
                 }
                 Err(e) => {
@@ -232,14 +223,14 @@ impl MqttService {
         // TLS
         if use_tls {
             mqttoptions.set_transport(Transport::tls_with_default_config());
-            info!("MQTT TLS enabled for broker: {} (system CA certs)", host);
+            debug!("MQTT TLS enabled for broker: {} (system CA certs)", host);
         }
 
         // 用户名密码认证
         if let Some(ref user) = config.username {
             let pass = config.password.as_deref().unwrap_or("");
             mqttoptions.set_credentials(user, pass);
-            info!("MQTT credentials set user={}", user);
+            debug!("MQTT credentials set user={}", user);
         }
 
         let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
@@ -333,6 +324,9 @@ impl MqttService {
                         Ok(Event::Incoming(Packet::Disconnect)) => {
                             warn!(broker = %broker, "MQTT disconnected by broker");
                             MQTT_CLIENT.lock().await.take();
+                            Self::update_state_static(|state| {
+                                state.connected = false;
+                            }).await;
                             break;
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
@@ -467,14 +461,14 @@ async fn publish_status(dbus_conn: &Connection) {
     let (client, topic_pub) = match MQTT_CLIENT.lock().await.clone() {
         Some(entry) => entry,
         None => {
-            error!("No active MQTT client, cannot publish status");
+            debug!("No active MQTT client for publish_status");
             return;
         }
     };
 
     match client.publish(&topic_pub, QoS::AtLeastOnce, false, payload.as_bytes()).await {
         Ok(_) => {
-            info!(topic = %topic_pub, "Published status");
+            debug!(topic = %topic_pub, "Published status");
             MqttService::update_state_static(|state| {
                 state.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
             }).await;

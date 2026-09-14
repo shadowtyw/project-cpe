@@ -93,18 +93,33 @@ async fn apply_band_lock(conn: &Connection, config: &BandLockConfig) -> Result<(
 }
 
 /// 下发小区锁定 AT 指令到 modem。
+///
+/// 关键约束：进入工程模式（SFUN=5）后，无论中途哪一步失败，都必须恢复
+/// SFUN=4，否则 modem 将滞留工程模式导致无信号。此函数在每次开机和 watchdog
+/// 重连后都会被调用，一旦泄漏工程模式状态，设备将在重启后依旧无网。
 async fn apply_cell_lock(conn: &Connection, config: &CellLockConfig) -> Result<(), String> {
     // 进入工程模式
     send_at(conn, "AT+SFUN=5").await?;
 
+    // 内层执行；失败也先恢复 SFUN=4 再向上抛错
+    let result = apply_cell_lock_inner(conn, config).await;
+
+    // 恢复正常模式（无论成败都执行；失败仅告警，不覆盖内层错误）
+    if let Err(e) = send_at(conn, "AT+SFUN=4").await {
+        warn!(error = %e, "Failed to restore normal mode (SFUN=4) after cell lock");
+    }
+
+    result
+}
+
+async fn apply_cell_lock_inner(conn: &Connection, config: &CellLockConfig) -> Result<(), String> {
     // 清空现有锁定，避免冲突
     let _ = send_at(conn, "AT+SPFORCEFRQ=16,0").await;
     let _ = send_at(conn, "AT+SPFORCEFRQ=12,0").await;
 
-    // 下发 LTE 小区锁
-    if config.has_lte() {
-        let arfcn = config.lte_arfcn.unwrap();
-        let pci = config.lte_pci.unwrap();
+    // 下发 LTE 小区锁。用 if let 双 Some 模式匹配，取代「has_lte() 守卫 + unwrap」，
+    // 从结构上杜绝 unwrap panic（release 构建 panic = abort，任何 panic 都会杀进程）。
+    if let (Some(arfcn), Some(pci)) = (config.lte_arfcn, config.lte_pci) {
         let cmd = format!("AT+SPFORCEFRQ=12,2,{},{}", arfcn, pci);
         send_at(conn, &cmd)
             .await
@@ -112,17 +127,12 @@ async fn apply_cell_lock(conn: &Connection, config: &CellLockConfig) -> Result<(
     }
 
     // 下发 NR 小区锁
-    if config.has_nr() {
-        let arfcn = config.nr_arfcn.unwrap();
-        let pci = config.nr_pci.unwrap();
+    if let (Some(arfcn), Some(pci)) = (config.nr_arfcn, config.nr_pci) {
         let cmd = format!("AT+SPFORCEFRQ=16,2,{},{}", arfcn, pci);
         send_at(conn, &cmd)
             .await
             .map_err(|e| format!("NR cell lock failed (arfcn={}, pci={}): {}", arfcn, pci, e))?;
     }
-
-    // 恢复正常模式
-    send_at(conn, "AT+SFUN=4").await?;
 
     Ok(())
 }

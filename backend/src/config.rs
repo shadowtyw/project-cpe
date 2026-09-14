@@ -806,6 +806,13 @@ impl ConfigManager {
                         Ok(cfg) => AppConfig {
                             refresh: cfg.refresh.sanitize(),
                             restart: cfg.restart.sanitize(),
+                            schedule: cfg.schedule.sanitize(),
+                            call_control: cfg.call_control.sanitize(),
+                            sms_control: cfg.sms_control.sanitize(),
+                            traffic_alert: cfg.traffic_alert.sanitize(),
+                            net_health: cfg.net_health.sanitize(),
+                            radio_mode: cfg.radio_mode.sanitize(),
+                            mqtt: cfg.mqtt.sanitize(),
                             ..cfg
                         },
                         Err(e) => {
@@ -1067,20 +1074,22 @@ impl ConfigManager {
         self.save()
     }
     
-    /// 保存配置到文件（原子写入：先写临时文件，再 rename 替换）
+    /// 保存配置到文件（原子写入：先写临时文件，再 rename 替换）。
+    ///
+    /// RwLock 读锁在序列化完成后立即释放，后续磁盘 I/O 不持有锁，
+    /// 避免阻塞其他 setter 的写锁获取。
     pub fn save(&self) -> Result<(), String> {
-        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
-        let content = serde_json::to_string_pretty(&*config)
-            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        let content = {
+            let config = self.config.read().unwrap_or_else(|p| p.into_inner());
+            serde_json::to_string_pretty(&*config)
+                .map_err(|e| format!("Failed to serialize config: {}", e))?
+        }; // 读锁在此释放
 
-        // 确保目录存在
         if let Some(parent) = self.config_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
 
-        // 原子写入：先写临时文件，再 rename 替换。
-        // 避免断电/进程崩溃导致配置文件被截断或损坏。
         let tmp_path = self.config_path.with_extension("json.tmp");
         fs::write(&tmp_path, &content)
             .map_err(|e| format!("Failed to write config file: {}", e))?;

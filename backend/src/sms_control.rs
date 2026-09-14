@@ -215,7 +215,7 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
         "FLIGHTON" => {
             match crate::dbus::set_airplane_mode(conn, true).await {
                 Ok(()) => {
-                    spawn_airplane_recovery(conn);
+                    crate::dbus::spawn_airplane_recovery(conn);
                     "[UDX710] 飞行模式已开启，将在10秒后自动关闭并恢复网络。".to_string()
                 }
                 Err(e) => format!("[UDX710] 开启飞行模式失败：{}", e),
@@ -260,7 +260,7 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
         "RADIOOFF" => {
             match crate::dbus::set_airplane_mode(conn, true).await {
                 Ok(()) => {
-                    spawn_airplane_recovery(conn);
+                    crate::dbus::spawn_airplane_recovery(conn);
                     "[UDX710] 射频已关闭，将在10秒后自动关闭飞行模式并恢复网络。".to_string()
                 }
                 Err(e) => format!("[UDX710] 关闭射频失败：{}", e),
@@ -270,36 +270,7 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
     }
 }
 
-/// 飞行模式自动恢复：10 秒后关闭飞行模式并开启数据连接。
-///
-/// 无论是短信遥控还是通话遥控触发的飞行模式，都通过此函数确保设备不因
-/// 远程指令而永久断网。恢复操作在独立后台任务中执行，不阻塞主流程。
-fn spawn_airplane_recovery(conn: &Connection) {
-    let conn = conn.clone();
-    tokio::spawn(async move {
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            info!("Airplane mode auto-recovery: turning off airplane mode");
-            let _ = crate::dbus::set_airplane_mode(&conn, false).await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            info!("Airplane mode auto-recovery: enabling data connection");
-            let _ = crate::dbus::set_data_connection(&conn, true).await;
-            info!("Airplane mode auto-recovery completed");
-        });
-        match handle.await {
-            Ok(_) => {
-                info!("Airplane recovery completed successfully");
-            }
-            Err(e) if e.is_panic() => {
-                tracing::error!("Airplane recovery task panicked: {:?}", e);
-                // 内层 task panic 后 conn 已不可用，依赖 net_health watchdog 恢复
-            }
-            Err(e) => {
-                tracing::warn!("Airplane recovery task was cancelled: {:?}", e);
-            }
-        }
-    });
-}
+/// 飞行模式自动恢复已统一到 `dbus::spawn_airplane_recovery`（短信/通话遥控共用）。
 
 /// 构造设备状态回复短信。
 async fn build_status_reply(conn: &Connection) -> String {
