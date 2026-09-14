@@ -353,6 +353,50 @@ pub fn parse_neighbor_cells(tech: &str, parsed_data: &[Vec<String>]) -> Vec<Cell
     result
 }
 
+/// 读取全部温度传感器数据。
+///
+/// 遍历 `/sys/class/thermal/thermal_zone*`，读取 `type` 与 `temp`（毫摄氏度）。
+/// 目录不存在时返回空列表而不报错——部分平台并未导出 thermal zone。
+pub fn read_temperature_sensors() -> Vec<crate::models::ThermalZone> {
+    use crate::models::ThermalZone;
+    use std::fs;
+    use std::path::Path;
+
+    let thermal_path = Path::new("/sys/class/thermal");
+    let mut sensors = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(thermal_path) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+
+            if name.starts_with("thermal_zone") {
+                let zone_path = entry.path();
+
+                let sensor_type = fs::read_to_string(zone_path.join("type"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+
+                // temp 缺失或非整数时按 0.0 处理，避免整份报告被一个坏传感器拖垮
+                let temperature = fs::read_to_string(zone_path.join("temp"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .map(|t| t as f64 / 1000.0)
+                    .unwrap_or(0.0);
+
+                sensors.push(ThermalZone {
+                    zone: name.to_string(),
+                    sensor_type,
+                    temperature,
+                });
+            }
+        }
+    }
+
+    sensors.sort_by(|a, b| a.zone.cmp(&b.zone));
+    sensors
+}
+
 /// 从 /proc/meminfo 读取内存信息。
 ///
 /// `MemAvailable` 是 Linux 对可分配内存的最佳估算，适合作为低内存判断。

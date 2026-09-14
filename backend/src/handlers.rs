@@ -635,43 +635,12 @@ pub async fn get_qos_info(State(conn): State<Arc<Connection>>) -> impl IntoRespo
     }
 }
 
-/// 读取温度传感器数据（内部工具函数）
+/// 读取温度传感器数据
+///
+/// 实现已移到 [`crate::utils::read_temperature_sensors`]，与设备状态报告、短信遥控
+/// 共用同一份采集逻辑，避免多处各写一遍 `/sys/class/thermal` 解析。
 pub fn read_temperature_sensors() -> Vec<ThermalZone> {
-    use std::fs;
-    use std::path::Path;
-
-    let thermal_path = Path::new("/sys/class/thermal");
-    let mut sensors = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(thermal_path) {
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-
-            if name.starts_with("thermal_zone") {
-                let zone_path = entry.path();
-                
-                let sensor_type = fs::read_to_string(zone_path.join("type"))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
-
-                let temperature = fs::read_to_string(zone_path.join("temp"))
-                    .ok()
-                    .and_then(|s| s.trim().parse::<i32>().ok())
-                    .map(|t| t as f64 / 1000.0)
-                    .unwrap_or(0.0);
-
-                sensors.push(ThermalZone {
-                    zone: name.to_string(),
-                    sensor_type,
-                    temperature,
-                });
-            }
-        }
-    }
-
-    sensors.sort_by(|a, b| a.zone.cmp(&b.zone));
-    sensors
+    crate::utils::read_temperature_sensors()
 }
 
 /// 获取USB模式名称
@@ -3304,6 +3273,7 @@ pub async fn cancel_ota_handler() -> impl IntoResponse {
 /// Query 参数：
 /// - `min_level`: 0=debug, 1=info, 2=warn, 3=error（默认 0）
 /// - `limit`: 最多返回条数（默认 200，最大 2000）
+/// - `module`: 仅返回该模块的日志（如 `mqtt`），用于各功能页的独立日志视图
 pub async fn get_logs_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<ApiResponse<LogsResponse>>) {
@@ -3317,8 +3287,9 @@ pub async fn get_logs_handler(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(200)
         .clamp(1, 2000);
+    let module = params.get("module").map(String::as_str);
 
-    let entries = crate::log_buffer::snapshot(min_level, limit);
+    let entries = crate::log_buffer::snapshot_filtered(min_level, limit, module);
     let response = LogsResponse {
         total: entries.len(),
         entries: entries
@@ -3330,6 +3301,7 @@ pub async fn get_logs_handler(
                 message: e.message,
             })
             .collect(),
+        modules: crate::log_buffer::modules(),
     };
 
     (
@@ -3775,6 +3747,7 @@ pub async fn get_mqtt_config_handler(
     let config = config_manager.get_mqtt();
     Json(ApiResponse::success_with_message("Success", MqttConfigResponse {
         enabled: config.enabled,
+        nodes: config.nodes,
         broker_list: config.broker_list,
         active_broker: config.active_broker,
         port: config.port,
@@ -3792,8 +3765,11 @@ pub async fn set_mqtt_config_handler(
     State(config_manager): State<Arc<ConfigManager>>,
     Json(config): Json<MqttConfigResponse>,
 ) -> impl IntoResponse {
+    // 只认 `nodes` 为权威输入；旧字段镜像由 sanitize() 自动回写，前端不必再传。
+    // set_mqtt 内部会 sanitize，这里无需重复清洗。
     let mqtt_config = crate::config::MqttConfig {
         enabled: config.enabled,
+        nodes: config.nodes,
         broker_list: config.broker_list,
         active_broker: config.active_broker,
         port: config.port,
@@ -3805,20 +3781,22 @@ pub async fn set_mqtt_config_handler(
         password: config.password,
     };
 
+    let sanitized = mqtt_config.sanitize();
     let resp = MqttConfigResponse {
-        enabled: mqtt_config.enabled,
-        broker_list: mqtt_config.broker_list.clone(),
-        active_broker: mqtt_config.active_broker.clone(),
-        port: mqtt_config.port,
-        topic_sub: mqtt_config.topic_sub.clone(),
-        topic_pub: mqtt_config.topic_pub.clone(),
-        auth_token: mqtt_config.auth_token.clone(),
-        tls: mqtt_config.tls,
-        username: mqtt_config.username.clone(),
-        password: mqtt_config.password.clone(),
+        enabled: sanitized.enabled,
+        nodes: sanitized.nodes.clone(),
+        broker_list: sanitized.broker_list.clone(),
+        active_broker: sanitized.active_broker.clone(),
+        port: sanitized.port,
+        topic_sub: sanitized.topic_sub.clone(),
+        topic_pub: sanitized.topic_pub.clone(),
+        auth_token: sanitized.auth_token.clone(),
+        tls: sanitized.tls,
+        username: sanitized.username.clone(),
+        password: sanitized.password.clone(),
     };
 
-    match config_manager.set_mqtt(mqtt_config) {
+    match config_manager.set_mqtt(sanitized) {
         Ok(_) => Json(ApiResponse::success_with_message("MQTT configuration updated", resp)),
         Err(e) => Json(ApiResponse::error(format!("Failed to save MQTT config: {}", e))),
     }

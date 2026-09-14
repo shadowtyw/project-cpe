@@ -850,6 +850,8 @@ export interface LogEntry {
 export interface LogsResponse {
   entries: LogEntry[]
   total: number
+  /** 缓冲中出现过的全部模块名（字典序），供系统日志页生成模块筛选下拉 */
+  modules: string[]
 }
 
 // ========== 一键诊断类型 ==========
@@ -918,14 +920,35 @@ export interface ScheduleConfig {
 
 // ========== MQTT 远程控制类型 ==========
 
+/**
+ * 单个 Broker 节点：主机、端口、TLS 都可独立编辑。
+ *
+ * 这是权威数据源；下面的 broker_list/active_broker/port/tls 是后端为兼容
+ * 旧版二进制回写的镜像字段，前端只读 `nodes`，不再读写那几个旧字段。
+ */
+export interface MqttBrokerNode {
+  /** 主机名或 IP，可带 ssl:// 前缀（自动启用 TLS） */
+  host: string
+  /** 端口；填 0 时后端按是否 TLS 取 8883 / 1883 */
+  port: number
+  /** 是否使用 TLS 加密连接 */
+  tls: boolean
+}
+
 export interface MqttConfigResponse {
   enabled: boolean
+  /** Broker 节点列表（权威，逐条可编辑 host/port/tls） */
+  nodes: MqttBrokerNode[]
+  /** @deprecated 旧版镜像字段，仅用于兼容展示，勿编辑 */
   broker_list: string[]
+  /** @deprecated 旧版镜像字段 */
   active_broker: string
+  /** @deprecated 旧版镜像字段 */
   port: number
   topic_sub: string
   topic_pub: string
   auth_token: string | null
+  /** @deprecated 旧版镜像字段 */
   tls: boolean
   username: string | null
   password: string | null

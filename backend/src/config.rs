@@ -658,23 +658,110 @@ pub fn normalize_phone_number(number: &str) -> String {
         .collect()
 }
 
+/// MQTT Broker 节点
+///
+/// 每个节点自带主机、端口与 TLS 开关，用户可在页面上逐条编辑，
+/// 不再共享一个全局端口（公共 Broker 的 1883 与自建 EMQX 的 8883 常常并存）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MqttBrokerNode {
+    /// 主机名或 IP，可带 `ssl://` / `tls://` 前缀（自动启用 TLS）
+    #[serde(default)]
+    pub host: String,
+    /// 端口；未填写（0）时按是否 TLS 取 8883 / 1883
+    #[serde(default)]
+    pub port: u16,
+    /// 是否使用 TLS 加密连接
+    #[serde(default)]
+    pub tls: bool,
+}
+
+impl MqttBrokerNode {
+    pub fn new(host: impl Into<String>, port: u16, tls: bool) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            tls,
+        }
+    }
+
+    /// 明文/TLS 的默认端口
+    pub const PLAIN_PORT: u16 = 1883;
+    pub const TLS_PORT: u16 = 8883;
+
+    /// 剥掉 `ssl://` / `tls://` / `mqtt://` 前缀，返回 (纯主机, 是否 TLS)。
+    ///
+    /// 前缀优先级高于 `tls` 字段：`mqtt://` 显式表示明文，`ssl://` / `tls://`
+    /// 显式表示加密，无前缀时才回落到配置的 `tls` 值。这样用户直接粘贴
+    /// `ssl://broker.example.com` 就能加密，不必再单独打开开关。
+    ///
+    /// rumqttc 只接受纯主机名，前缀必须由这里剥掉，否则 DNS 解析必然失败。
+    pub fn resolve(&self) -> (String, bool) {
+        let host = self.host.trim();
+        let lower = host.to_ascii_lowercase();
+        // 前缀都是 ASCII，长度固定；用长度切片以保留用户输入的原始大小写。
+        let (prefix_len, forced_tls) = if lower.starts_with("ssl://") || lower.starts_with("tls://") {
+            (6usize, Some(true))
+        } else if lower.starts_with("mqtt://") {
+            (7usize, Some(false))
+        } else {
+            (0usize, None)
+        };
+        let bare = host[prefix_len.min(host.len())..].trim();
+        (bare.to_string(), forced_tls.unwrap_or(self.tls))
+    }
+
+    /// 实际连接端口：未填写时按 TLS 与否取默认值
+    pub fn effective_port(&self) -> u16 {
+        if self.port == 0 {
+            if self.resolve().1 {
+                Self::TLS_PORT
+            } else {
+                Self::PLAIN_PORT
+            }
+        } else {
+            self.port
+        }
+    }
+
+    /// 用于展示与旧版配置镜像的写法：TLS 节点带 `ssl://` 前缀
+    pub fn display(&self) -> String {
+        let (host, tls) = self.resolve();
+        if tls {
+            format!("ssl://{host}")
+        } else {
+            host
+        }
+    }
+
+    /// 连接用的完整地址（含端口），仅用于日志
+    pub fn endpoint(&self) -> String {
+        let (host, _) = self.resolve();
+        format!("{host}:{}", self.effective_port())
+    }
+}
+
 /// MQTT 远程控制配置
 ///
 /// 用于国内蜂窝网络与纯数据物联卡的远程运维场景。
 /// 支持多 Broker 节点容灾轮询，Client ID 动态拼接 IMEI 避免重名。
-/// 支持 SSL/TLS 加密连接（使用 `ssl://` 前缀）及用户名/密码认证。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 支持 SSL/TLS 加密连接（节点级 `tls` 或 `ssl://` 前缀）及用户名/密码认证。
+#[derive(Debug, Clone, Serialize)]
 pub struct MqttConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Broker 节点列表（按优先级排序，失败时自动轮询）。
-    /// 以 `ssl://` 开头时启用 TLS 加密。
+    ///
+    /// 这是唯一的权威数据源；下面的 `broker_list` / `active_broker` / `port` / `tls`
+    /// 是写给旧版本二进制读的镜像字段，读取时忽略。
+    #[serde(default = "default_mqtt_nodes")]
+    pub nodes: Vec<MqttBrokerNode>,
+    /// 旧版：Broker 节点字符串列表（降级兼容镜像，勿直接读取）
     #[serde(default = "default_broker_list")]
     pub broker_list: Vec<String>,
-    /// 当前使用的 Broker（初始值，运行时可能切换）
-    #[serde(default = "default_broker")]
+    /// 旧版：当前使用的 Broker（降级兼容镜像，勿直接读取）
+    #[serde(default)]
     pub active_broker: String,
-    /// MQTT 端口
+    /// 旧版：全局 MQTT 端口（降级兼容镜像，勿直接读取）
     #[serde(default = "default_mqtt_port")]
     pub port: u16,
     /// 订阅主题（接收指令）
@@ -686,7 +773,7 @@ pub struct MqttConfig {
     /// 指令鉴权 Token（防止公共 Broker 上被误触）
     #[serde(default)]
     pub auth_token: Option<String>,
-    /// 是否启用 TLS（当 broker 以 ssl:// 开头时自动启用；也可独立控制）
+    /// 旧版：全局 TLS 开关（降级兼容镜像，勿直接读取）
     #[serde(default)]
     pub tls: bool,
     /// MQTT 用户名（可选）
@@ -697,6 +784,17 @@ pub struct MqttConfig {
     pub password: Option<String>,
 }
 
+/// 节点数量上限：轮询一圈的耗时与节点数成正比，过多会让故障切换变得迟钝
+const MAX_MQTT_NODES: usize = 16;
+
+fn default_mqtt_nodes() -> Vec<MqttBrokerNode> {
+    vec![
+        MqttBrokerNode::new("broker.emqx.io", MqttBrokerNode::PLAIN_PORT, false),
+        MqttBrokerNode::new("broker-cn.emqx.io", MqttBrokerNode::PLAIN_PORT, false),
+        MqttBrokerNode::new("test.mosquitto.org", MqttBrokerNode::PLAIN_PORT, false),
+    ]
+}
+
 fn default_broker_list() -> Vec<String> {
     vec![
         "broker.emqx.io".to_string(),
@@ -705,12 +803,8 @@ fn default_broker_list() -> Vec<String> {
     ]
 }
 
-fn default_broker() -> String {
-    "broker.emqx.io".to_string()
-}
-
 fn default_mqtt_port() -> u16 {
-    1883
+    MqttBrokerNode::PLAIN_PORT
 }
 
 fn default_topic_sub() -> String {
@@ -725,8 +819,9 @@ impl Default for MqttConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            nodes: default_mqtt_nodes(),
             broker_list: default_broker_list(),
-            active_broker: default_broker(),
+            active_broker: String::new(),
             port: default_mqtt_port(),
             topic_sub: default_topic_sub(),
             topic_pub: default_topic_pub(),
@@ -738,17 +833,175 @@ impl Default for MqttConfig {
     }
 }
 
+/// 手写 `Deserialize` 以兼容两种历史 schema：
+///
+/// * 旧版：`broker_list: Vec<String>` + 全局 `port` / `tls` / `active_broker`
+/// * 新版：`nodes: Vec<MqttBrokerNode>`
+///
+/// 迁移必须放在反序列化层而不是 `sanitize()`，因为 `ConfigManager::new` 在解析失败时
+/// 会回落到整个 `AppConfig::default()`——那会把用户所有配置清空。这里保证「只要 JSON
+/// 合法就一定能读出可用配置」，绝不向上抛错。
+impl<'de> Deserialize<'de> for MqttConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// 中间表示：字段名覆盖新旧两套 schema，缺失一律取 `None` / 默认，
+        /// 以便区分「用户没写」与「用户写了空值」。
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            enabled: bool,
+            nodes: Option<Vec<MqttBrokerNode>>,
+            broker_list: Vec<String>,
+            active_broker: String,
+            port: u16,
+            tls: bool,
+            topic_sub: String,
+            topic_pub: String,
+            auth_token: Option<String>,
+            username: Option<String>,
+            password: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+
+        // 新版字段优先；只有完全没写 nodes 时才从旧版字段迁移
+        let nodes = match raw.nodes {
+            Some(nodes) if !nodes.is_empty() => nodes,
+            _ => {
+                let port = if raw.port == 0 {
+                    MqttBrokerNode::PLAIN_PORT
+                } else {
+                    raw.port
+                };
+                let mut migrated: Vec<MqttBrokerNode> = raw
+                    .broker_list
+                    .iter()
+                    .map(|host| MqttBrokerNode::new(host.trim(), port, raw.tls))
+                    .collect();
+                // active_broker 可能不在 broker_list 里（历史脏数据），按原语义插到最前
+                let active = raw.active_broker.trim();
+                if !active.is_empty()
+                    && !migrated.iter().any(|n| n.host.trim().eq_ignore_ascii_case(active))
+                {
+                    migrated.insert(0, MqttBrokerNode::new(active, port, raw.tls));
+                }
+                migrated
+            }
+        };
+
+        let mut config = MqttConfig {
+            enabled: raw.enabled,
+            nodes,
+            broker_list: raw.broker_list,
+            active_broker: raw.active_broker,
+            port: raw.port,
+            topic_sub: if raw.topic_sub.trim().is_empty() {
+                default_topic_sub()
+            } else {
+                raw.topic_sub
+            },
+            topic_pub: if raw.topic_pub.trim().is_empty() {
+                default_topic_pub()
+            } else {
+                raw.topic_pub
+            },
+            auth_token: raw.auth_token,
+            tls: raw.tls,
+            username: raw.username,
+            password: raw.password,
+        };
+        config = config.sanitize();
+        Ok(config)
+    }
+}
+
 impl MqttConfig {
+    /// 归一化配置：清洗节点、补齐默认值，并同步旧版镜像字段。
     pub fn sanitize(mut self) -> Self {
-        // 确保 broker_list 非空
-        if self.broker_list.is_empty() {
-            self.broker_list = default_broker_list();
+        let mut cleaned: Vec<MqttBrokerNode> = Vec::with_capacity(self.nodes.len());
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        for node in self.nodes.into_iter() {
+            let host = node.host.trim();
+            // 剥掉前缀后为空的节点（如只写了 "ssl://"）直接丢弃，避免 DNS 解析必然失败
+            if node.resolve().0.is_empty() {
+                continue;
+            }
+            // 去重：同一 host+port+tls 只保留第一条（用户粘贴重复节点时很常见）
+            let key = format!("{}:{}:{}", node.resolve().0, node.effective_port(), node.resolve().1);
+            if !seen.insert(key) {
+                continue;
+            }
+            cleaned.push(MqttBrokerNode {
+                host: host.to_string(),
+                port: node.port,
+                tls: node.tls,
+            });
         }
-        // 确保 active_broker 在列表中；若不在则插入到列表最前面
-        if !self.broker_list.contains(&self.active_broker) {
-            self.broker_list.insert(0, self.active_broker.clone());
+
+        if cleaned.is_empty() {
+            cleaned = default_mqtt_nodes();
         }
+        cleaned.truncate(MAX_MQTT_NODES);
+        self.nodes = cleaned;
+
+        if self.topic_sub.trim().is_empty() {
+            self.topic_sub = default_topic_sub();
+        }
+        if self.topic_pub.trim().is_empty() {
+            self.topic_pub = default_topic_pub();
+        }
+
+        // 认证凭据：没有用户名时密码无意义（连接代码以 username 为开关）
+        let username = self.username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        self.username = username;
+        if self.username.is_none() {
+            self.password = None;
+        }
+        if let Some(ref mut token) = self.auth_token {
+            let trimmed = token.trim().to_string();
+            self.auth_token = if trimmed.is_empty() { None } else { Some(trimmed) };
+        }
+
+        self.sync_legacy_mirror();
         self
+    }
+
+    /// 把节点列表回写到旧版字段，使 OTA 回滚到旧二进制时配置仍然可读。
+    ///
+    /// 旧版只有一个全局端口，这里取首节点的端口/TLS 作为近似——回滚场景下
+    /// 至少首选节点能正常连上，不至于因为端口不匹配而完全失联。
+    fn sync_legacy_mirror(&mut self) {
+        self.broker_list = self.nodes.iter().map(|n| n.display()).collect();
+
+        // active_broker 决定连接时从哪个节点开始（页面上的 ★）。
+        // 只要它仍匹配某个节点的 display()，就保留用户的选择；否则回落到首节点。
+        let active_valid = self
+            .nodes
+            .iter()
+            .any(|n| n.display() == self.active_broker);
+        match self.nodes.first() {
+            Some(first) => {
+                if !active_valid {
+                    self.active_broker = first.display();
+                }
+                // 端口/TLS 镜像取「激活节点」，回滚旧二进制时优先连用户指定的那个
+                let active_node = self
+                    .nodes
+                    .iter()
+                    .find(|n| n.display() == self.active_broker)
+                    .unwrap_or(first);
+                self.port = active_node.effective_port();
+                self.tls = active_node.resolve().1;
+            }
+            None => {
+                self.active_broker = String::new();
+                self.port = default_mqtt_port();
+                self.tls = false;
+            }
+        }
     }
 }
 
@@ -1375,12 +1628,18 @@ pub fn set_init_script(script: String) -> Result<crate::models::InitScriptRespon
 mod tests {
     use super::{
         append_init_command_to_loader,
+        default_mqtt_nodes,
+        default_topic_pub,
+        default_topic_sub,
         loader_contains_init_command,
         loader_contains_ota_command,
         remove_ota_command_from_loader,
         AppConfig,
+        MqttBrokerNode,
+        MqttConfig,
         RestartConfig,
         INIT_SCRIPT_LOADER_COMMAND,
+        MAX_MQTT_NODES,
     };
 
     #[test]
@@ -1444,5 +1703,319 @@ mod tests {
 
         assert!(!config.restart.schedule_enabled);
         assert!(!config.restart.low_memory_enabled);
+    }
+
+    // === MQTT 节点 schema 迁移 ===
+
+    #[test]
+    fn mqtt_migrates_legacy_broker_list_to_nodes() {
+        // 旧版 config.json：只有 broker_list + 全局 port/tls/active_broker，没有 nodes
+        let legacy = r#"{
+            "enabled": true,
+            "broker_list": ["broker.emqx.io", "ssl://custom.example.com"],
+            "active_broker": "ssl://custom.example.com",
+            "port": 8883,
+            "tls": true,
+            "topic_sub": "cpe/{imei}/cmd",
+            "topic_pub": "cpe/{imei}/status"
+        }"#;
+        let cfg: MqttConfig = serde_json::from_str(legacy).unwrap();
+
+        assert!(cfg.enabled);
+        // 两个旧节点都迁移过来了，且各自继承全局 port/tls
+        assert_eq!(cfg.nodes.len(), 2);
+        assert_eq!(cfg.nodes[0].host, "broker.emqx.io");
+        assert_eq!(cfg.nodes[0].port, 8883);
+        assert!(cfg.nodes[0].tls);
+        assert_eq!(cfg.nodes[1].host, "ssl://custom.example.com");
+        // active_broker 仍指向迁移后的同一节点（sanitize 不应丢掉用户选择）
+        assert_eq!(cfg.active_broker, "ssl://custom.example.com");
+    }
+
+    #[test]
+    fn mqtt_active_broker_inserted_when_missing_from_legacy_list() {
+        // 历史脏数据：active_broker 不在 broker_list 里
+        let legacy = r#"{
+            "broker_list": ["broker.emqx.io"],
+            "active_broker": "orphan.example.com",
+            "port": 1883
+        }"#;
+        let cfg: MqttConfig = serde_json::from_str(legacy).unwrap();
+
+        // 旧语义：把 active_broker 插到列表最前面，不丢失
+        assert!(cfg.nodes.iter().any(|n| n.host == "orphan.example.com"));
+        assert!(cfg.nodes.iter().any(|n| n.host == "broker.emqx.io"));
+        assert_eq!(cfg.active_broker, "orphan.example.com");
+    }
+
+    #[test]
+    fn mqtt_new_nodes_schema_deserializes_directly() {
+        let json = r#"{
+            "enabled": false,
+            "nodes": [
+                {"host": "a.example.com", "port": 1883, "tls": false},
+                {"host": "ssl://b.example.com", "port": 8883, "tls": true}
+            ],
+            "topic_sub": "cmd/{imei}",
+            "topic_pub": "status/{imei}"
+        }"#;
+        let cfg: MqttConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(cfg.nodes.len(), 2);
+        assert_eq!(cfg.nodes[0].host, "a.example.com");
+        assert_eq!(cfg.nodes[1].port, 8883);
+        // 旧字段镜像被 sanitize 自动回写，供 OTA 回滚到旧二进制时读取
+        assert_eq!(cfg.broker_list.len(), 2);
+        assert!(cfg.broker_list[1].starts_with("ssl://"));
+    }
+
+    #[test]
+    fn mqtt_nodes_schema_wins_over_legacy_fields() {
+        // 同时存在 nodes 与 broker_list 时，以 nodes 为权威
+        let json = r#"{
+            "nodes": [{"host": "new.example.com", "port": 2883, "tls": false}],
+            "broker_list": ["old.example.com"],
+            "port": 1883
+        }"#;
+        let cfg: MqttConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(cfg.nodes.len(), 1);
+        assert_eq!(cfg.nodes[0].host, "new.example.com");
+        assert_eq!(cfg.nodes[0].port, 2883);
+        // broker_list 镜像被回写为 nodes 的内容，不再是旧值
+        assert_eq!(cfg.broker_list, vec!["new.example.com".to_string()]);
+    }
+
+    #[test]
+    fn mqtt_empty_nodes_falls_back_to_defaults() {
+        let json = r#"{"enabled": true, "nodes": []}"#;
+        let cfg: MqttConfig = serde_json::from_str(json).unwrap();
+
+        // sanitize 保证节点列表非空，否则连接循环会空转
+        assert!(!cfg.nodes.is_empty());
+        assert_eq!(cfg.nodes.len(), default_mqtt_nodes().len());
+    }
+
+    #[test]
+    fn mqtt_sanitize_dedupes_and_drops_empty_hosts() {
+        let cfg = MqttConfig {
+            nodes: vec![
+                MqttBrokerNode::new("a.example.com", 1883, false),
+                MqttBrokerNode::new("a.example.com", 1883, false), // 完全重复
+                MqttBrokerNode::new("   ", 1883, false),          // 空主机
+                MqttBrokerNode::new("ssl://", 8883, true),        // 只有前缀
+                MqttBrokerNode::new("b.example.com", 8883, true),
+            ],
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        assert_eq!(cfg.nodes.len(), 2, "应只剩 a 与 b: {:?}", cfg.nodes);
+        assert_eq!(cfg.nodes[0].host, "a.example.com");
+        assert_eq!(cfg.nodes[1].host, "b.example.com");
+    }
+
+    #[test]
+    fn mqtt_sanitize_distinguishes_same_host_different_port() {
+        // 同主机不同端口是两个不同节点（明文 1883 与 TLS 8883 并存很常见）
+        let cfg = MqttConfig {
+            nodes: vec![
+                MqttBrokerNode::new("a.example.com", 1883, false),
+                MqttBrokerNode::new("a.example.com", 8883, true),
+            ],
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        assert_eq!(cfg.nodes.len(), 2);
+    }
+
+    #[test]
+    fn mqtt_sanitize_caps_node_count() {
+        let many: Vec<MqttBrokerNode> = (0..(MAX_MQTT_NODES + 10))
+            .map(|i| MqttBrokerNode::new(format!("b{i}.example.com"), 1883, false))
+            .collect();
+        let cfg = MqttConfig { nodes: many, ..MqttConfig::default() }.sanitize();
+
+        assert_eq!(cfg.nodes.len(), MAX_MQTT_NODES);
+    }
+
+    #[test]
+    fn mqtt_sanitize_preserves_valid_active_broker() {
+        // 用户把 ★ 设在第二个节点上，sanitize 不应把它挪回第一个
+        let cfg = MqttConfig {
+            nodes: vec![
+                MqttBrokerNode::new("a.example.com", 1883, false),
+                MqttBrokerNode::new("b.example.com", 1883, false),
+            ],
+            active_broker: "b.example.com".to_string(),
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        assert_eq!(cfg.active_broker, "b.example.com");
+        // 端口/TLS 镜像也应跟随激活节点
+        assert_eq!(cfg.port, 1883);
+    }
+
+    #[test]
+    fn mqtt_sanitize_resets_active_broker_when_stale() {
+        // active_broker 指向已被删除的节点时回落到首节点
+        let cfg = MqttConfig {
+            nodes: vec![MqttBrokerNode::new("a.example.com", 1883, false)],
+            active_broker: "deleted.example.com".to_string(),
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        assert_eq!(cfg.active_broker, "a.example.com");
+    }
+
+    #[test]
+    fn mqtt_sanitize_drops_password_without_username() {
+        // 没有用户名时密码无意义（连接代码以 username 为开关），避免误存
+        let cfg = MqttConfig {
+            username: None,
+            password: Some("orphan-pass".to_string()),
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        assert!(cfg.username.is_none());
+        assert!(cfg.password.is_none());
+    }
+
+    #[test]
+    fn mqtt_sanitize_trims_blank_credentials_to_none() {
+        let cfg = MqttConfig {
+            username: Some("   ".to_string()),
+            password: Some("secret".to_string()),
+            auth_token: Some("  tok  ".to_string()),
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        // 空白用户名视为未填，连带清掉密码
+        assert!(cfg.username.is_none());
+        assert!(cfg.password.is_none());
+        // token 只去首尾空白，内容保留
+        assert_eq!(cfg.auth_token.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn mqtt_sanitize_restores_empty_topics() {
+        let cfg = MqttConfig {
+            topic_sub: "   ".to_string(),
+            topic_pub: String::new(),
+            ..MqttConfig::default()
+        }
+        .sanitize();
+
+        // 空主题会让订阅/发布静默失效，必须回落到默认值
+        assert_eq!(cfg.topic_sub, default_topic_sub());
+        assert_eq!(cfg.topic_pub, default_topic_pub());
+    }
+
+    #[test]
+    fn mqtt_broker_node_resolve_strips_prefixes() {
+        // rumqttc 只接受纯主机名，前缀必须剥掉，否则 DNS 解析必然失败
+        let (host, tls) = MqttBrokerNode::new("ssl://a.example.com", 8883, false).resolve();
+        assert_eq!(host, "a.example.com");
+        assert!(tls, "ssl:// 前缀应强制启用 TLS");
+
+        let (host, tls) = MqttBrokerNode::new("tls://b.example.com", 8883, false).resolve();
+        assert_eq!(host, "b.example.com");
+        assert!(tls);
+
+        // mqtt:// 显式表示明文，即使 tls 字段为 true
+        let (host, tls) = MqttBrokerNode::new("mqtt://c.example.com", 1883, true).resolve();
+        assert_eq!(host, "c.example.com");
+        assert!(!tls, "mqtt:// 前缀应强制明文");
+
+        // 无前缀时回落到 tls 字段
+        let (_, tls) = MqttBrokerNode::new("d.example.com", 1883, true).resolve();
+        assert!(tls);
+    }
+
+    #[test]
+    fn mqtt_broker_node_resolve_is_case_insensitive_on_prefix() {
+        // 用户可能粘贴大写前缀
+        let (host, tls) = MqttBrokerNode::new("SSL://MixedCase.Example.COM", 8883, false).resolve();
+        assert_eq!(host, "MixedCase.Example.COM", "应保留主机原始大小写");
+        assert!(tls);
+    }
+
+    #[test]
+    fn mqtt_broker_node_effective_port_defaults_by_tls() {
+        // port=0 表示「未填写」，按 TLS 与否取默认端口
+        assert_eq!(MqttBrokerNode::new("a.com", 0, false).effective_port(), 1883);
+        assert_eq!(MqttBrokerNode::new("a.com", 0, true).effective_port(), 8883);
+        // ssl:// 前缀同样决定默认端口
+        assert_eq!(MqttBrokerNode::new("ssl://a.com", 0, false).effective_port(), 8883);
+        // 显式端口优先
+        assert_eq!(MqttBrokerNode::new("ssl://a.com", 1234, false).effective_port(), 1234);
+    }
+
+    #[test]
+    fn mqtt_broker_node_display_roundtrips_tls() {
+        // display() 的结果要能被 resolve() 正确读回，否则 ★ 激活项匹配会失效
+        let tls_node = MqttBrokerNode::new("ssl://a.example.com", 8883, true);
+        assert_eq!(tls_node.display(), "ssl://a.example.com");
+        assert_eq!(tls_node.resolve().0, "a.example.com");
+
+        let plain_node = MqttBrokerNode::new("b.example.com", 1883, false);
+        assert_eq!(plain_node.display(), "b.example.com");
+    }
+
+    #[test]
+    fn mqtt_malformed_node_does_not_fail_parse() {
+        // 关键安全性质：单个节点字段缺失不应让整个 MqttConfig 解析失败。
+        // ConfigManager 在解析失败时会回落到整个 AppConfig::default()，
+        // 那会清空用户所有配置——所以这里必须容错。
+        let json = r#"{
+            "nodes": [{"host": "a.example.com"}, {"port": 1883}],
+            "enabled": true
+        }"#;
+        let cfg: MqttConfig = serde_json::from_str(json).unwrap();
+
+        // 缺 port/tls 的节点取默认；缺 host 的节点被 sanitize 丢弃
+        assert!(cfg.enabled);
+        assert_eq!(cfg.nodes.len(), 1);
+        assert_eq!(cfg.nodes[0].host, "a.example.com");
+        assert_eq!(cfg.nodes[0].port, 0, "未填端口应为 0（连接时取默认）");
+    }
+
+    #[test]
+    fn mqtt_unknown_fields_are_ignored() {
+        // 未来版本新增字段时，旧二进制读新配置不应失败（反之亦然）
+        let json = r#"{
+            "enabled": true,
+            "nodes": [{"host": "a.example.com", "port": 1883, "tls": false}],
+            "some_future_field": {"nested": true},
+            "another_unknown": 42
+        }"#;
+        let cfg: MqttConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.nodes.len(), 1);
+    }
+
+    #[test]
+    fn mqtt_full_app_config_survives_partial_mqtt_section() {
+        // 端到端验证：config.json 里 mqtt 段残缺时，其它段（如 webhook）不受影响。
+        // 这是「解析失败会清空全部配置」风险的实际防线。
+        let json = r#"{
+            "webhook": {"enabled": true, "url": "https://example.com/hook", "forward_sms": false, "forward_calls": false},
+            "mqtt": {"enabled": true, "broker_list": ["legacy.example.com"], "port": 2883}
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+
+        // webhook 段完好
+        assert!(cfg.webhook.enabled);
+        assert_eq!(cfg.webhook.url, "https://example.com/hook");
+        // mqtt 段从旧 schema 迁移成功
+        assert!(cfg.mqtt.enabled);
+        assert_eq!(cfg.mqtt.nodes.len(), 1);
+        assert_eq!(cfg.mqtt.nodes[0].host, "legacy.example.com");
+        assert_eq!(cfg.mqtt.nodes[0].port, 2883);
     }
 }

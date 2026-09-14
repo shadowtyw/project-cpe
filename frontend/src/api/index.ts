@@ -795,9 +795,11 @@ class UDX710API {
   // ========== 运行日志 ==========
 
   // 读取内存中的运行日志。min_level: 0=debug 1=info 2=warn 3=error
-  async getLogs(minLevel: number = 0, limit: number = 200) {
+  // module: 仅返回该模块的日志（如 'mqtt'），用于各功能页的独立日志视图
+  async getLogs(minLevel: number = 0, limit: number = 200, module?: string) {
+    const moduleParam = module ? `&module=${encodeURIComponent(module)}` : ''
     return request<ApiResponse<LogsResponse>>(
-      `/logs?min_level=${minLevel}&limit=${limit}`,
+      `/logs?min_level=${minLevel}&limit=${limit}${moduleParam}`,
     )
   }
 

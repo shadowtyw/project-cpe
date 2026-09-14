@@ -1281,6 +1281,11 @@ pub struct LogsResponse {
     pub entries: Vec<LogEntryResponse>,
     /// 缓冲中的日志总数（不含本次过滤）
     pub total: usize,
+    /// 缓冲中出现过的全部模块名（字典序），供前端生成模块筛选下拉。
+    ///
+    /// 始终返回全量模块列表，不受本次 `module` 过滤影响，避免筛选后下拉只剩一项。
+    #[serde(default)]
+    pub modules: Vec<String>,
 }
 
 // ============ 诊断与配置备份模型 ============
@@ -1411,11 +1416,20 @@ pub struct SmsControlConfigResponse {
 // ============ MQTT 远程控制模型 ============
 
 /// MQTT 配置响应（镜像 config::MqttConfig）
+///
+/// `nodes` 是权威数据源（每节点独立 host/port/tls）；`broker_list`/`active_broker`/
+/// `port`/`tls` 为旧版字段镜像，前端应优先读写 `nodes`。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MqttConfigResponse {
     pub enabled: bool,
+    /// Broker 节点列表（权威，逐条可编辑）
+    #[serde(default)]
+    pub nodes: Vec<crate::config::MqttBrokerNode>,
+    #[serde(default)]
     pub broker_list: Vec<String>,
+    #[serde(default)]
     pub active_broker: String,
+    #[serde(default)]
     pub port: u16,
     pub topic_sub: String,
     pub topic_pub: String,

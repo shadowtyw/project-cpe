@@ -43,6 +43,7 @@ mod call_control;
 mod config;
 mod db;
 mod dbus;
+mod device_report;
 mod handlers;
 mod iptables;
 mod log_buffer;

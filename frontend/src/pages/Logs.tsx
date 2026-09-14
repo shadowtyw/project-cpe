@@ -48,14 +48,20 @@ export default function Logs() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [minLevel, setMinLevel] = useState<number>(1)
+  // 模块筛选：'' 表示全部。下拉项来自后端返回的 modules（实际出现过的模块名），
+  // 避免把模块名硬编码到前端后与后端 target 命名不符。
+  const [moduleFilter, setModuleFilter] = useState<string>('')
+  const [modules, setModules] = useState<string[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const load = useCallback(async (level: number, showSpinner = false) => {
+  const load = useCallback(async (level: number, module: string, showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     try {
-      const response = await api.getLogs(level, 500)
+      const response = await api.getLogs(level, 500, module || undefined)
       if (response.data) {
         setEntries(response.data.entries)
+        // modules 始终是全量列表，不受本次过滤影响
+        setModules(response.data.modules ?? [])
         setError(null)
       }
     } catch (err) {
@@ -68,17 +74,23 @@ export default function Logs() {
 
   const handleLevelChange = (value: number) => {
     setMinLevel(value)
-    void load(value, true)
+    void load(value, moduleFilter, true)
+  }
+
+  const handleModuleChange = (value: string) => {
+    setModuleFilter(value)
+    void load(minLevel, value, true)
   }
 
   const handleManualRefresh = () => {
-    void load(minLevel, true)
+    void load(minLevel, moduleFilter, true)
   }
 
   const handleClear = async () => {
     try {
       await api.clearLogs()
       setEntries([])
+      setModules([])
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -87,7 +99,7 @@ export default function Logs() {
   useAdaptivePolling({
     refreshInterval: refreshInterval > 0 ? Math.max(refreshInterval, 5_000) : 0,
     refreshKey,
-    onTick: () => load(minLevel),
+    onTick: () => load(minLevel, moduleFilter),
     immediate: true,
     hiddenMinInterval: 60_000,
   })
@@ -121,6 +133,22 @@ export default function Logs() {
               {LEVEL_OPTIONS.map((option) => (
                 <MenuItem key={option.value} value={option.value}>
                   {option.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel id="log-module-label">来源模块</InputLabel>
+            <Select
+              labelId="log-module-label"
+              value={moduleFilter}
+              label="来源模块"
+              onChange={(e) => handleModuleChange(String(e.target.value))}
+            >
+              <MenuItem value="">全部模块</MenuItem>
+              {modules.map((m) => (
+                <MenuItem key={m} value={m}>
+                  {m}
                 </MenuItem>
               ))}
             </Select>

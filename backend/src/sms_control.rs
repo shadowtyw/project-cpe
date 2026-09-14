@@ -273,64 +273,15 @@ async fn execute_command(conn: &Connection, command: &str) -> String {
 /// 飞行模式自动恢复已统一到 `dbus::spawn_airplane_recovery`（短信/通话遥控共用）。
 
 /// 构造设备状态回复短信。
+///
+/// 复用 [`crate::device_report::DeviceReport`]，与 MQTT `status` 指令同源，
+/// 保证「短信看到的」和「MQTT 推送看到的」是同一份数据：内存以可用百分比为主指标，
+/// 并补齐了旧版缺失的 CPU 占用率与设备温度。短信版走 `format_sms`（精简纯文本），
+/// 避免 emoji 与逐传感器温度让短信过长。
 async fn build_status_reply(conn: &Connection) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("[UDX710] 设备状态报告".to_string());
-
-    // 1. 注册状态
-    let reg_status = crate::dbus::get_registration_status(conn).await;
-    lines.push(format!("网络: {}", reg_status.as_deref().unwrap_or("unknown")));
-
-    // 2. 信号强度
-    match crate::dbus::get_signal_strength(conn).await {
-        Ok(sig) => lines.push(format!("信号: {}dBm", sig.strength)),
-        Err(_) => lines.push("信号: 获取失败".to_string()),
-    }
-
-    // 3. 数据连接状态
-    match crate::dbus::get_data_connection_status(conn).await {
-        Ok(active) => lines.push(format!("上网: {}", if active { "已连接" } else { "未连接" })),
-        Err(_) => lines.push("上网: 获取失败".to_string()),
-    }
-
-    // 4. 运行时间
-    let uptime = read_uptime_seconds();
-    lines.push(format!("运行: {}分钟", uptime / 60));
-
-    // 5. 内存
-    let mem_avail = read_mem_available_kb();
-    lines.push(format!("内存: {}MB 可用", mem_avail / 1024));
-
-    lines.join("\n")
-}
-
-fn read_uptime_seconds() -> u64 {
-    std::fs::read_to_string("/proc/uptime")
-        .ok()
-        .and_then(|s| {
-            s.split_whitespace()
-                .next()?
-                .parse::<f64>()
-                .ok()
-                .map(|v| v as u64)
-        })
-        .unwrap_or(0)
-}
-
-fn read_mem_available_kb() -> u64 {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|line| line.starts_with("MemAvailable:"))
-                .and_then(|line| {
-                    line.split_whitespace()
-                        .nth(1)?
-                        .parse::<u64>()
-                        .ok()
-                })
-        })
-        .unwrap_or(0)
+    crate::device_report::DeviceReport::collect(conn)
+        .await
+        .format_sms()
 }
 
 #[cfg(test)]

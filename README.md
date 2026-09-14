@@ -45,6 +45,7 @@ project-cpe-main/
 │       ├── call_control.rs     # 通话遥控（白名单来电→接听→计时→执行动作）
 │       ├── sms_control.rs      # 短信遥控指令（#REBOOT#/#RECONNECT#/#STATUS#）
 │       ├── mqtt_service.rs     # MQTT 远程控制（公共 Broker + 多节点故障转移）
+│       ├── device_report.rs    # 设备状态报告采集与格式化（MQTT/短信共用）
 │       ├── webhook.rs          # Webhook 转发（飞书/自定义）+ HMAC-SHA256
 │       ├── sms_push.rs         # 短信推送（Pushplus/Server酱/Pushdeer/Bark/Ntfy）
 │       ├── ota.rs              # OTA 更新（tar.gz 校验/安装/回滚/哨兵恢复）
@@ -374,7 +375,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 | `/api/ota/apply` | POST | 应用 OTA（低版本需 `allow_downgrade`） |
 | `/api/ota/rollback` | POST | 恢复到上一版本 |
 | `/api/ota/cancel` | POST | 取消待安装 OTA |
-| `/api/logs` | GET | 运行日志（min_level=0-3, limit） |
+| `/api/logs` | GET | 运行日志（min_level=0-3, limit, module=逗号分隔模块名）；响应含 `modules` 模块列表 |
 | `/api/logs/clear` | POST | 清空日志缓冲 |
 | `/api/diag/report` | GET | 一键诊断报告 |
 | `/api/config/backup/export` | GET | 导出配置备份 |
@@ -415,7 +416,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - 短信转发（Webhook + 多平台推送）
 - 通话遥控（白名单来电→自动接听→通话时长编码命令→二次来电确认→执行）
 - **短信遥控指令**：白名单号码发送短信远程控制设备（与通话遥控共享白名单，控制短信不转发到第三方）。支持中英文 11 条指令，覆盖重启、重连、飞行模式、数据连接、射频模式等全部动作。飞行模式指令触发后 10 秒自动恢复网络。
-- **MQTT 远程控制**：适用于纯数据物联卡（无短信/通话权限），通过公共 MQTT Broker 收发指令。支持多国内节点故障转移，Client ID 使用 IMEI 标识设备。支持 3 条指令（reboot/reconnect/status），可选 Token 鉴权。
+- **MQTT 远程控制**：适用于纯数据物联卡（无短信/通话权限），通过公共 MQTT Broker 收发指令。多节点故障转移，Client ID 使用 IMEI 标识设备，支持 3 条指令（reboot/reconnect/status）与可选 Token 鉴权。节点的主机/端口/TLS 均可逐条编辑，页面内置独立日志视图。
 
 ### USB 模式
 
@@ -434,7 +435,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 
 ### 系统管理
 
-- 运行日志查看器（内存环形缓冲，2000 条，不写磁盘）
+- 运行日志查看器（内存环形缓冲，2000 条，不写磁盘；按等级 + 来源模块筛选）
 - 流量统计与预警（今日/本月/历史，按日聚合）
 - 定时计划（每天/指定日期/指定时间执行预设动作）
 - 自动重启策略（周期重启 + 低内存重启，默认关闭）
@@ -534,8 +535,8 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 
 - **共享白名单**：复用通话遥控的 `CallControlConfig.numbers`，两项功能共用同一组管理员号码
 - **11 条中英文指令**：
-  - `#STATUS#` / `#状态#` → 回复设备运行状态（信号、上网状态、运行时间等）
-  - `#REBOOT#` / `#重启#` → 延迟 3 秒重启系统
+  - `#STATUS#` / `#状态#` → 回复设备运行状态（网络/信号/上网+IP/**可用内存百分比**/**CPU 占用率**/**设备温度**/运行时长/程序版本）
+  - `#REBOOT#` / `#重启#` → 延迟 10 秒重启系统
   - `#RECONNECT#` / `#重连#` → 重置数据连接
   - `#FLIGHTON#` / `#飞行开#` → 开启飞行模式（10 秒后自动恢复网络）
   - `#FLIGHTOFF#` / `#飞行关#` → 关闭飞行模式
@@ -546,6 +547,8 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   - `#RADIOAUTO#` / `#自动#` → 4G/5G 自动
   - `#RADIOOFF#` / `#关射频#` → 关闭射频（10 秒后自动恢复网络）
 - **飞行模式自动恢复**：`#飞行开#` / `#关射频#` 执行后 10 秒自动关闭飞行模式 + 开启数据连接，防止远程指令导致设备永久断网
+- **状态报告同源**：`#STATUS#` 与 MQTT 的 `status` 指令共用 `device_report.rs` 采集器，短信版输出精简纯文本（无 emoji，适配短信长度限制），MQTT 版输出完整分组报告 + JSON 原始数据。此前两边各写一份采集逻辑，报告内容不一致（MQTT 有温度没 CPU，短信两者都没有），现已消除
+- **采集容错**：报告中的每一项（Modem D-Bus 查询 / `/proc` / `/sys/class/thermal` / `statvfs` / `ip addr`）独立取数，单项失败仅置空对应字段，不影响整份报告；全程无 `unwrap`，避免 release 下 `panic = "abort"` 杀掉整个进程
 - **安全隔离**：命中指令的短信仅入库审计，不转发到 Webhook/推送平台
 - **独立开关**：`SmsControlConfig.enabled` 控制，与通话遥控互不干扰
 - **编码兼容**：支持 GSM 7-bit（含扩展字符如 `€`）与 UCS-2 解码；异常长度 PDU 安全截断，不会 panic
@@ -587,17 +590,23 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 适用于纯数据物联卡（无短信/通话权限）的远程运维通道：
 
 - **轻量级协议**：使用 rumqttc 0.24 异步 MQTT 3.1.1 客户端，低带宽开销
-- **国内公共 Broker**：预设 3 个国内节点（broker.emqx.io、broker-cn.emqx.io、test.mosquitto.org），无需自建服务器
-- **多节点故障转移**：连接失败时自动轮询下一个节点，全部失败后等待 10 秒重试
+- **国内公共 Broker**：预设 9 个公共节点（EMQX / Mosquitto / Eclipse / HiveMQ，含明文与 TLS 两种端口），无需自建服务器
+- **节点可逐条编辑**：每个节点自带 **主机 / 端口 / TLS** 三项，公共明文节点（1883）与自建 TLS 节点（8883）可以并存；主机名支持 `ssl://`、`tls://`、`mqtt://` 前缀，前缀优先于 TLS 开关；端口留空时按是否 TLS 自动取 8883 / 1883
+- **多节点故障转移**：连接失败时自动轮询下一个节点，全部失败后指数退避（3s 起，每轮翻倍，上限 60s）
 - **设备唯一标识**：Client ID 使用 `udx710_{imei}` 格式，避免公共 Broker 上的冲突
 - **指令格式**：JSON 通过订阅主题 `cpe/{imei}/cmd` 下发
-  - `{"action":"reboot"}` — 延迟 3 秒重启系统
+  - `{"action":"reboot"}` — 延迟 10 秒重启系统
   - `{"action":"reconnect"}` — 断开并重连数据连接
-  - `{"action":"status"}` — 发布系统状态到发布主题 `cpe/{imei}/status`
+  - `{"action":"status"}` — 推送设备状态报告，并发布完整 JSON 到 `cpe/{imei}/status`
 - **Token 鉴权**：可选配置 `auth_token`，指令中需携带 `"token":"your-token"` 才会执行
 - **状态看板**：前端 MQTT 遥控页面实时显示连接状态、当前 Broker、最后心跳/指令、异常信息
+- **三态连接指示**：状态卡区分 **已连接 / 未连接（重连中）/ 已停用**。关闭开关后 5 秒内主动断开并清理状态，不再残留「已连接」；停用期间也不再显示上一次的连接报错
+- **连接时序正确**：`connected` 仅在收到 ConnAck 之后置位，不会在握手期间短暂显示假连接
+- **配置热生效**：连接期间修改节点/端口/主题/凭据，5 秒内自动断开并按新配置重连（仅比较真正影响连接的字段，避免无谓重连抖动）
+- **独立日志视图**：MQTT 页面内置日志面板，只筛选 `mqtt` / `mqtt_service` 两个模块的记录，连接、订阅、指令、报错都带节点与主题上下文；系统日志页同时新增「来源模块」下拉，模块列表由后端实时返回而非前端硬编码
 - **默认关闭**：`MqttConfig.enabled` 默认 `false`，需手动开启
 - **延迟启动**：服务启动 10 秒后自动获取 IMEI 并尝试连接
+- **配置向后兼容**：旧版 `broker_list` + 全局 `port`/`tls`/`active_broker` 会在加载时自动迁移为节点列表；保存时同步回写旧字段镜像，OTA 回滚到旧版本二进制仍可读取。迁移在反序列化层完成且不抛错——单个字段残缺不会导致整份配置被重置为默认值
 
 ---
 

@@ -96,20 +96,60 @@ pub fn debug(module: &str, message: impl Into<String>) {
 /// * `min_level` - 最小日志等级数值（0=debug, 1=info, 2=warn, 3=error）
 /// * `limit` - 最多返回条数
 pub fn snapshot(min_level: u8, limit: usize) -> Vec<LogEntry> {
+    snapshot_filtered(min_level, limit, None)
+}
+
+/// 读取日志快照，可选按模块过滤。
+///
+/// # Arguments
+/// * `min_level` - 最小日志等级数值（0=debug, 1=info, 2=warn, 3=error）
+/// * `limit` - 最多返回条数
+/// * `module` - 仅返回这些模块的日志；`None` 表示不过滤。
+///   支持逗号分隔的多个模块名（如 `"mqtt,mqtt_service"`），命中任意一个即保留。
+///   用于各功能页面（如 MQTT 遥控）展示自己的独立日志，而系统日志页保持全量。
+///   传逗号列表是因为同一功能可能有两个来源：`log_entry!` 显式写的模块名
+///   （如 `mqtt`）与 tracing 从 target 推导的模块名（如 `mqtt_service`）。
+pub fn snapshot_filtered(min_level: u8, limit: usize, module: Option<&str>) -> Vec<LogEntry> {
     let buffer = match LOG_BUFFER.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
 
     let limit = limit.clamp(1, MAX_LOG_ENTRIES);
+    // 过滤条件先归一化：空字符串等同于「不过滤」，避免前端传空值时得到空列表。
+    let wanted: Vec<&str> = module
+        .map(|m| {
+            m.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
 
     buffer
         .iter()
         .rev()
         .filter(|entry| level_rank(&entry.level) >= min_level)
+        .filter(|entry| wanted.is_empty() || wanted.iter().any(|m| *m == entry.module))
         .take(limit)
         .cloned()
         .collect()
+}
+
+/// 列出缓冲中出现过的全部模块名（去重并按字典序排序）。
+///
+/// 供前端「系统日志」页生成模块筛选下拉，避免把模块名硬编码到前端后与实际不符。
+pub fn modules() -> Vec<String> {
+    let buffer = match LOG_BUFFER.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in buffer.iter() {
+        seen.insert(entry.module.clone());
+    }
+    seen.into_iter().collect()
 }
 
 /// 清空内存日志缓冲
@@ -245,5 +285,86 @@ mod tests {
             .collect();
         assert_eq!(entries[0].message, "second");
         assert_eq!(entries[1].message, "first");
+    }
+
+    #[test]
+    fn module_filter_returns_only_matching_module() {
+        let target = "test_module_filter_returns_only_matching_module";
+        let other = "test_module_filter_other_module";
+        super::info(target, "mine");
+        super::warn(other, "not mine");
+
+        let filtered = super::snapshot_filtered(0, 500, Some(target));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].message, "mine");
+        assert!(filtered.iter().all(|e| e.module == target));
+    }
+
+    #[test]
+    fn module_filter_combines_with_level_filter() {
+        let target = "test_module_filter_combines_with_level_filter";
+        super::info(target, "info line");
+        super::error(target, "error line");
+
+        // min_level=3 只保留 error，且模块过滤仍然生效
+        let errors = super::snapshot_filtered(3, 500, Some(target));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "error line");
+    }
+
+    #[test]
+    fn comma_separated_module_filter_matches_any() {
+        let a = "test_comma_module_a";
+        let b = "test_comma_module_b";
+        let c = "test_comma_module_c";
+        super::info(a, "from a");
+        super::info(b, "from b");
+        super::info(c, "from c");
+
+        // MQTT 页同时取 log_entry! 写的模块名与 tracing 推导的模块名
+        let filtered = super::snapshot_filtered(0, 500, Some(&format!("{a},{b}")));
+        let msgs: Vec<_> = filtered.iter().map(|e| e.message.as_str()).collect();
+        assert!(msgs.contains(&"from a"), "缺少 a: {msgs:?}");
+        assert!(msgs.contains(&"from b"), "缺少 b: {msgs:?}");
+        assert!(!msgs.contains(&"from c"), "不应包含 c: {msgs:?}");
+    }
+
+    #[test]
+    fn comma_separated_filter_ignores_empty_segments() {
+        let a = "test_comma_empty_segments";
+        super::info(a, "mine");
+        // 前后逗号与空格不应影响匹配
+        let filtered = super::snapshot_filtered(0, 500, Some(&format!(" , {a} , ")));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].message, "mine");
+    }
+
+    #[test]
+    fn empty_module_filter_is_treated_as_no_filter() {
+        let target = "test_empty_module_filter_is_treated_as_no_filter";
+        super::info(target, "some line");
+
+        // 空字符串 / 纯空白不应把结果清空
+        assert!(!super::snapshot_filtered(0, 500, Some("")).is_empty());
+        assert!(!super::snapshot_filtered(0, 500, Some("   ")).is_empty());
+    }
+
+    #[test]
+    fn modules_lists_distinct_module_names() {
+        let target = "test_modules_lists_distinct_module_names";
+        super::info(target, "a");
+        super::info(target, "b");
+
+        let listed = super::modules();
+        assert!(listed.contains(&target.to_string()));
+        // 去重：同一模块只出现一次
+        assert_eq!(
+            listed.iter().filter(|m| *m == target).count(),
+            1
+        );
+        // 已排序
+        let mut sorted = listed.clone();
+        sorted.sort();
+        assert_eq!(listed, sorted);
     }
 }

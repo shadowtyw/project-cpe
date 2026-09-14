@@ -35,6 +35,43 @@ const PRESET_BROKERS = [
   { host: 'broker.hivemq.com', port: 1883, label: 'HiveMQ 公共 (明文)' },
 ]
 
+/**
+ * 剥掉 ssl:// / tls:// / mqtt:// 前缀，返回 [纯主机, 是否 TLS]。
+ *
+ * 必须与后端 `MqttBrokerNode::resolve` 保持一致：rumqttc 只接受纯主机名，
+ * 前缀留在那里会导致 DNS 解析必然失败。
+ */
+function parseHost(raw: string): [string, boolean | null] {
+  const host = raw.trim()
+  const lower = host.toLowerCase()
+  if (lower.startsWith('ssl://') || lower.startsWith('tls://')) {
+    return [host.slice(6).trim(), true]
+  }
+  if (lower.startsWith('mqtt://')) {
+    return [host.slice(7).trim(), false]
+  }
+  return [host, null]
+}
+
+/** 节点的规范展示名（TLS 节点带 ssl:// 前缀），与后端 `display()` 一致 */
+function nodeDisplay(node: MqttBrokerNode): string {
+  const [bare, forced] = parseHost(node.host)
+  const tls = forced ?? node.tls
+  return tls ? `ssl://${bare}` : bare
+}
+
+/** 节点的实际连接端口：填 0 时按 TLS 取 8883 / 1883 */
+function nodePort(node: MqttBrokerNode): number {
+  if (node.port !== 0) return node.port
+  const [, forced] = parseHost(node.host)
+  return (forced ?? node.tls) ? 8883 : 1883
+}
+
+/** 节点的唯一键，用于判断预设是否已在列表中 */
+function nodeKey(node: MqttBrokerNode): string {
+  return `${nodeDisplay(node)}:${nodePort(node)}`
+}
+
 import {
   Add as AddIcon,
   Delete as DeleteIcon,
@@ -47,6 +84,8 @@ import {
   Send as SendIcon,
   Star as StarIcon,
   StarBorder as StarBorderIcon,
+  Lock as LockIcon,
+  LockOpen as LockOpenIcon,
 } from '@mui/icons-material'
 import { api } from '../api'
 import type {
@@ -56,8 +95,10 @@ import type {
   CallControlTrigger,
   ScheduleAction,
   MqttConfigResponse,
+  MqttBrokerNode,
   MqttStatusResponse,
   RemoteControlPushConfig,
+  LogEntry,
 } from '../api/types'
 
 const ACTION_LABELS: Record<ScheduleAction, string> = {
@@ -106,11 +147,12 @@ export default function RemoteControl() {
   // MQTT Control state
   const [mqttConfig, setMqttConfig] = useState<MqttConfigResponse>({
     enabled: false,
-    broker_list: [
-      'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn',
-      'broker.emqx.io',
-      'broker-cn.emqx.io',
+    nodes: [
+      { host: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn', port: 8883, tls: true },
+      { host: 'broker.emqx.io', port: 1883, tls: false },
+      { host: 'broker-cn.emqx.io', port: 1883, tls: false },
     ],
+    broker_list: [],
     active_broker: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn',
     port: 8883,
     topic_sub: 'cpe/{imei}/cmd',
@@ -131,6 +173,9 @@ export default function RemoteControl() {
   })
   const [mqttConfigLoading, setMqttConfigLoading] = useState(false)
   const [mqttInitialized, setMqttInitialized] = useState(false)
+  // MQTT 独立日志（module='mqtt'）
+  const [mqttLogs, setMqttLogs] = useState<LogEntry[]>([])
+  const [mqttLogsLevel, setMqttLogsLevel] = useState(0)
 
   // Push Notification state
   const [pushConfig, setPushConfig] = useState<RemoteControlPushConfig>({
@@ -241,6 +286,24 @@ export default function RemoteControl() {
     const timer = setInterval(() => { void refreshMqttStatus() }, 2000)
     return () => clearInterval(timer)
   }, [activeTab, refreshMqttStatus])
+
+  // MQTT 独立日志：取 module 为 mqtt / mqtt_service 的记录。
+  // 两个来源：log_entry! 显式写 "mqtt"，tracing::* 从 target 推导出 "mqtt_service"，
+  // 都要纳入，否则连接/断开等关键事件会漏显。
+  const refreshMqttLogs = useCallback(async () => {
+    try {
+      const res = await api.getLogs(mqttLogsLevel, 200, 'mqtt,mqtt_service')
+      if (res.data) setMqttLogs(res.data.entries)
+    } catch { /* ignore poll errors */ }
+  }, [mqttLogsLevel])
+
+  useEffect(() => {
+    if (activeTab !== 2) return
+    void refreshMqttLogs()
+    // 日志变化频率低，5s 轮询足够，避免和状态轮询叠加请求压力
+    const timer = setInterval(() => { void refreshMqttLogs() }, 5000)
+    return () => clearInterval(timer)
+  }, [activeTab, refreshMqttLogs])
 
   // Load push config
   const loadPushConfig = useCallback(async () => {
@@ -737,8 +800,10 @@ export default function RemoteControl() {
                 label="启用 MQTT 远程控制"
               />
 
-              {/* Connection Status Card */}
-              <Card variant={mqttStatus.connected ? 'outlined' : 'outlined'}>
+              {/* Connection Status Card
+                  三态而非两态：关闭开关后必须显示「已停用」，
+                  否则后端已断开、页面却仍显示「未连接」甚至「已连接」，用户无法确认开关生效。 */}
+              <Card variant="outlined">
                 <CardContent>
                   <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
                     连接状态
@@ -750,23 +815,36 @@ export default function RemoteControl() {
                           width: 10,
                           height: 10,
                           borderRadius: '50%',
-                          backgroundColor: mqttStatus.connected ? '#4caf50' : '#f44336',
+                          backgroundColor: mqttStatus.connected
+                            ? '#4caf50'
+                            : mqttStatus.enabled
+                              ? '#ff9800'
+                              : '#9e9e9e',
                         }}
                       />
                       <Typography variant="body2">
-                        {mqttStatus.connected ? '已连接' : '未连接'}
+                        {mqttStatus.connected
+                          ? '已连接'
+                          : mqttStatus.enabled
+                            ? '未连接（重连中）'
+                            : '已停用'}
                       </Typography>
                     </Box>
-                    <Typography variant="body2">
-                      当前 Broker: {mqttStatus.current_broker || '—'}
-                    </Typography>
-                    <Typography variant="body2">
-                      最后心跳: {mqttStatus.last_heartbeat || '—'}
-                    </Typography>
+                    {mqttStatus.enabled && (
+                      <Typography variant="body2">
+                        当前 Broker: {mqttStatus.current_broker || '—'}
+                      </Typography>
+                    )}
+                    {mqttStatus.enabled && (
+                      <Typography variant="body2">
+                        最后心跳: {mqttStatus.last_heartbeat || '—'}
+                      </Typography>
+                    )}
                     <Typography variant="body2">
                       最后指令: {mqttStatus.last_command || '—'}
                     </Typography>
-                    {mqttStatus.error_message && (
+                    {/* 停用时不再显示上一次的连接错误，避免「已停用 + 红色报错」自相矛盾 */}
+                    {mqttStatus.error_message && mqttStatus.enabled && (
                       <Alert severity="error" sx={{ mt: 1 }}>
                         {mqttStatus.error_message}
                       </Alert>
@@ -777,7 +855,10 @@ export default function RemoteControl() {
 
               <Divider />
 
-              {/* Broker Configuration */}
+              {/* Broker Configuration
+                  每个节点都自带可编辑的 主机 / 端口 / TLS。
+                  旧版是「一个全局端口 + 预设节点只读 Chip」，公共 Broker 与自建 EMQX
+                  端口不同（1883 / 8883）时无法共存，这里改为逐节点配置。 */}
               <Box>
                 <Typography variant="subtitle2" gutterBottom>
                   Broker 节点列表
@@ -787,17 +868,24 @@ export default function RemoteControl() {
                     <strong>连接格式：</strong><br />
                     • 明文：<code>broker.emqx.io</code>（端口 1883）<br />
                     • TLS：<code>ssl://broker.emqx.io</code>（端口 8883）<br />
-                    • 端口在下方统一配置，双击预设节点可设为当前激活
+                    • 每个节点可单独填写主机、端口与 TLS；主机带 <code>ssl://</code> 前缀时自动加密<br />
+                    • 端口留空（0）时按 TLS 自动取 8883 / 1883
                   </Typography>
                 </Alert>
 
-                {/* Preset Brokers */}
+                {/* Preset Brokers：点击即按预设的主机/端口/TLS 加入列表，加入后仍可逐字段编辑 */}
                 <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
-                  公共服务（点击加入列表，已加入的再点移除）：
+                  公共服务（点击加入列表，加入后可继续编辑主机与端口）：
                 </Typography>
                 <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 2 }}>
                   {PRESET_BROKERS.map((pb) => {
-                    const inList = mqttConfig.broker_list.includes(pb.host)
+                    const presetNode: MqttBrokerNode = {
+                      host: pb.host,
+                      port: pb.port,
+                      tls: pb.host.toLowerCase().startsWith('ssl://'),
+                    }
+                    const presetKey = nodeKey(presetNode)
+                    const inList = mqttConfig.nodes.some(n => nodeKey(n) === presetKey)
                     return (
                       <Chip
                         key={pb.host}
@@ -806,22 +894,14 @@ export default function RemoteControl() {
                         color={inList ? 'primary' : 'default'}
                         variant={inList ? 'filled' : 'outlined'}
                         onClick={() => {
-                          if (inList) {
-                            const rest = mqttConfig.broker_list.filter(b => b !== pb.host)
-                            setMqttConfig({
-                              ...mqttConfig,
-                              broker_list: rest.length ? rest : [''],
-                              active_broker: mqttConfig.active_broker === pb.host ? (rest[0] ?? '') : mqttConfig.active_broker,
-                            })
-                          } else {
-                            setMqttConfig({
-                              ...mqttConfig,
-                              broker_list: [...mqttConfig.broker_list.filter(b => b), pb.host],
-                              active_broker: mqttConfig.active_broker || pb.host,
-                              port: pb.port,
-                              tls: pb.host.startsWith('ssl://'),
-                            })
-                          }
+                          if (inList) return
+                          // 去掉可能存在的空节点，再追加预设
+                          const kept = mqttConfig.nodes.filter(n => parseHost(n.host)[0] !== '')
+                          setMqttConfig({
+                            ...mqttConfig,
+                            nodes: [...kept, presetNode],
+                            active_broker: mqttConfig.active_broker || nodeDisplay(presetNode),
+                          })
                         }}
                       />
                     )
@@ -829,70 +909,126 @@ export default function RemoteControl() {
                 </Box>
 
                 <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
-                  当前节点列表（★ = 当前激活，拖拽不可用请删除后重新添加以便排序）：
+                  当前节点列表（★ = 优先连接；按从上到下顺序故障转移）：
                 </Typography>
-                {mqttConfig.broker_list.map((broker, index) => {
-                  const preset = PRESET_BROKERS.find(p => p.host === broker)
+                {mqttConfig.nodes.map((node, index) => {
+                  const display = nodeDisplay(node)
+                  const isActive = display === mqttConfig.active_broker
+                  const [, forcedTls] = parseHost(node.host)
+                  // 主机已写 ssl:// 前缀时，TLS 由前缀决定，开关禁用但显示为开
+                  const tlsLocked = forcedTls !== null
+                  const effectiveTls = forcedTls ?? node.tls
                   return (
-                    <Box key={index} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                      {preset ? (
-                        <Chip
-                          label={`${preset.label}${broker === mqttConfig.active_broker ? ' ★' : ''}`}
-                          size="small"
-                          color={broker === mqttConfig.active_broker ? 'primary' : 'default'}
-                          variant="filled"
-                          sx={{ flex: 1, justifyContent: 'flex-start' }}
-                        />
-                      ) : (
-                        <TextField
-                          size="small"
-                          value={broker}
-                          onChange={(e) => {
-                            const newList = [...mqttConfig.broker_list]
-                            newList[index] = e.target.value
-                            setMqttConfig({
-                              ...mqttConfig,
-                              broker_list: newList,
-                              active_broker: mqttConfig.active_broker === broker ? e.target.value : mqttConfig.active_broker,
-                            })
-                          }}
-                          sx={{ flex: 1 }}
-                          placeholder="ssl://custom.broker.com"
-                        />
-                      )}
+                    <Box
+                      key={index}
+                      sx={{
+                        display: 'flex',
+                        gap: 1,
+                        mb: 1,
+                        alignItems: 'center',
+                        flexWrap: { xs: 'wrap', sm: 'nowrap' },
+                      }}
+                    >
+                      <TextField
+                        size="small"
+                        label="主机"
+                        value={node.host}
+                        onChange={(e) => {
+                          const next = [...mqttConfig.nodes]
+                          next[index] = { ...node, host: e.target.value }
+                          // 编辑的是当前激活节点时，让 ★ 跟随新主机，避免激活项丢失
+                          const newActive = isActive
+                            ? nodeDisplay(next[index])
+                            : mqttConfig.active_broker
+                          setMqttConfig({ ...mqttConfig, nodes: next, active_broker: newActive })
+                        }}
+                        sx={{ flex: 2, minWidth: 180 }}
+                        placeholder="ssl://custom.broker.com"
+                      />
+                      <TextField
+                        size="small"
+                        label="端口"
+                        type="number"
+                        value={node.port === 0 ? '' : node.port}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          // 允许清空（=0，自动取默认端口）；输入时限制 1-65535
+                          const parsed = raw === '' ? 0 : parseInt(raw, 10)
+                          const port = Number.isNaN(parsed) ? 0 : Math.min(Math.max(parsed, 0), 65535)
+                          const next = [...mqttConfig.nodes]
+                          next[index] = { ...node, port }
+                          setMqttConfig({ ...mqttConfig, nodes: next })
+                        }}
+                        placeholder={effectiveTls ? '8883' : '1883'}
+                        inputProps={{ min: 0, max: 65535 }}
+                        sx={{ width: 100 }}
+                      />
                       <IconButton
                         size="small"
-                        color={broker === mqttConfig.active_broker ? 'primary' : 'default'}
-                        onClick={() => setMqttConfig({ ...mqttConfig, active_broker: broker })}
-                        title="设为当前激活节点"
+                        color={effectiveTls ? 'primary' : 'default'}
+                        disabled={tlsLocked}
+                        onClick={() => {
+                          const next = [...mqttConfig.nodes]
+                          const tls = !node.tls
+                          // 切换 TLS 时，若端口还是旧默认值就跟着切，省一步手填
+                          const nextPort =
+                            node.port === 0 || node.port === 1883 || node.port === 8883
+                              ? (tls ? 8883 : 1883)
+                              : node.port
+                          next[index] = { ...node, tls, port: nextPort }
+                          setMqttConfig({ ...mqttConfig, nodes: next })
+                        }}
+                        title={
+                          tlsLocked
+                            ? '主机前缀已指定加密方式，移除 ssl:// 前缀后可手动切换'
+                            : effectiveTls
+                              ? 'TLS 加密（点击改为明文）'
+                              : '明文（点击启用 TLS）'
+                        }
                       >
-                        {broker === mqttConfig.active_broker ? <StarIcon fontSize="small" /> : <StarBorderIcon fontSize="small" />}
+                        {effectiveTls ? <LockIcon fontSize="small" /> : <LockOpenIcon fontSize="small" />}
+                      </IconButton>
+                      <IconButton
+                        size="small"
+                        color={isActive ? 'primary' : 'default'}
+                        onClick={() => setMqttConfig({ ...mqttConfig, active_broker: display })}
+                        title="设为优先连接节点"
+                      >
+                        {isActive ? <StarIcon fontSize="small" /> : <StarBorderIcon fontSize="small" />}
                       </IconButton>
                       <IconButton
                         size="small"
                         color="error"
                         onClick={() => {
-                          const rest = mqttConfig.broker_list.filter((_, i) => i !== index)
+                          const rest = mqttConfig.nodes.filter((_, i) => i !== index)
                           setMqttConfig({
                             ...mqttConfig,
-                            broker_list: rest.length ? rest : [''],
-                            active_broker: mqttConfig.active_broker === broker ? (rest[0] ?? '') : mqttConfig.active_broker,
+                            nodes: rest,
+                            active_broker: isActive ? (rest[0] ? nodeDisplay(rest[0]) : '') : mqttConfig.active_broker,
                           })
                         }}
-                        disabled={mqttConfig.broker_list.length <= 1}
+                        title="删除该节点"
                       >
                         <DeleteIcon fontSize="small" />
                       </IconButton>
                     </Box>
                   )
                 })}
+                {mqttConfig.nodes.length === 0 && (
+                  <Alert severity="warning" sx={{ mb: 1 }}>
+                    节点列表为空，保存时会自动填入默认公共节点。
+                  </Alert>
+                )}
                 <Button
                   size="small"
                   startIcon={<AddIcon />}
                   onClick={() =>
                     setMqttConfig({
                       ...mqttConfig,
-                      broker_list: [...mqttConfig.broker_list.filter(b => b), ''],
+                      nodes: [
+                        ...mqttConfig.nodes,
+                        { host: '', port: 1883, tls: false },
+                      ],
                     })
                   }
                   sx={{ mt: 1 }}
@@ -901,29 +1037,15 @@ export default function RemoteControl() {
                 </Button>
               </Box>
 
-              <Box sx={{ display: 'flex', gap: 2 }}>
-                <TextField
-                  size="small"
-                  label="端口"
-                  type="number"
-                  value={mqttConfig.port}
-                  onChange={(e) =>
-                    setMqttConfig({ ...mqttConfig, port: parseInt(e.target.value) || 1883 })
-                  }
-                  inputProps={{ min: 1, max: 65535 }}
-                  sx={{ width: 120 }}
-                />
-                <TextField
-                  size="small"
-                  label="订阅主题 (接收指令)"
-                  value={mqttConfig.topic_sub}
-                  onChange={(e) =>
-                    setMqttConfig({ ...mqttConfig, topic_sub: e.target.value })
-                  }
-                  sx={{ flex: 1 }}
-                  helperText="使用 {imei} 作为设备占位符"
-                />
-              </Box>
+              <TextField
+                size="small"
+                label="订阅主题 (接收指令)"
+                value={mqttConfig.topic_sub}
+                onChange={(e) =>
+                  setMqttConfig({ ...mqttConfig, topic_sub: e.target.value })
+                }
+                helperText="使用 {imei} 作为设备占位符"
+              />
 
               <TextField
                 size="small"
@@ -949,24 +1071,14 @@ export default function RemoteControl() {
               />
 
               <Divider sx={{ my: 1 }} />
-              <Typography variant="subtitle2">连接安全</Typography>
+              <Typography variant="subtitle2">连接认证</Typography>
 
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={mqttConfig.tls}
-                    onChange={(e) => {
-                      const tls = e.target.checked
-                      setMqttConfig({
-                        ...mqttConfig,
-                        tls,
-                        port: tls ? 8883 : 1883,
-                      })
-                    }}
-                  />
-                }
-                label="启用 TLS (SSL)"
-              />
+              <Alert severity="info" sx={{ mb: 1 }}>
+                <Typography variant="body2">
+                  TLS 加密已改为<strong>逐节点</strong>设置（见上方节点列表的 🔒 图标），
+                  公共明文节点与自建 TLS 节点可以共存。用户名/密码对<strong>所有节点</strong>生效。
+                </Typography>
+              </Alert>
 
               <TextField
                 size="small"
@@ -978,7 +1090,7 @@ export default function RemoteControl() {
                     username: e.target.value || null,
                   })
                 }
-                helperText="EMQX 等自建 Broker 认证用"
+                helperText="EMQX 等自建 Broker 认证用，对所有节点生效"
               />
 
               <TextField
@@ -1019,6 +1131,72 @@ export default function RemoteControl() {
               >
                 {mqttConfigLoading ? '保存中...' : '保存配置'}
               </Button>
+
+              <Divider />
+
+              {/* MQTT 专属日志：只看 module='mqtt' 的记录，
+                  连接/断开/订阅/指令/报错都带上下文，不必再去系统日志页翻全量。 */}
+              <Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1, flexWrap: 'wrap', gap: 1 }}>
+                  <Typography variant="subtitle2">MQTT 日志</Typography>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <FormControl size="small" sx={{ minWidth: 140 }}>
+                      <Select
+                        value={mqttLogsLevel}
+                        onChange={(e) => setMqttLogsLevel(Number(e.target.value))}
+                      >
+                        <MuiMenuItem value={0}>全部日志</MuiMenuItem>
+                        <MuiMenuItem value={1}>运行日志 (info+)</MuiMenuItem>
+                        <MuiMenuItem value={2}>报错日志 (warn+)</MuiMenuItem>
+                      </Select>
+                    </FormControl>
+                    <IconButton size="small" onClick={() => void refreshMqttLogs()} title="刷新">
+                      <RefreshIcon fontSize="small" />
+                    </IconButton>
+                  </Box>
+                </Box>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    bgcolor: '#1e1e1e',
+                    color: '#d4d4d4',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                    fontSize: 12,
+                    p: 1.5,
+                    maxHeight: 320,
+                    overflow: 'auto',
+                  }}
+                >
+                  {mqttLogs.length === 0 ? (
+                    <Typography variant="body2" sx={{ color: '#888', fontFamily: 'inherit' }}>
+                      暂无 MQTT 日志（启用并保存配置后开始记录）
+                    </Typography>
+                  ) : (
+                    mqttLogs.map((log, i) => (
+                      <Box key={i} sx={{ display: 'flex', gap: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-all', py: 0.25 }}>
+                        <Box component="span" sx={{ color: '#888', flexShrink: 0 }}>
+                          {log.timestamp.split('T')[1]?.slice(0, 8) ?? log.timestamp}
+                        </Box>
+                        <Box
+                          component="span"
+                          sx={{
+                            flexShrink: 0,
+                            width: 44,
+                            color:
+                              log.level === 'error' ? '#f48771'
+                              : log.level === 'warn' ? '#dcdcaa'
+                              : log.level === 'debug' ? '#808080'
+                              : '#9cdcfe',
+                          }}
+                        >
+                          {log.level.toUpperCase()}
+                        </Box>
+                        <Box component="span">{log.message}</Box>
+                      </Box>
+                    ))
+                  )}
+                </Paper>
+              </Box>
             </Stack>
           )}
         </Paper>
