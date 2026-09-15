@@ -6,7 +6,18 @@
 use crate::config::{ConfigManager, RemoteControlPushConfig};
 use reqwest::Client;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+/// 轻量成功日志：仅记录 HTTP 状态码，不输出响应体 / payload，
+/// 避免为企业微信 Webhook 的大段正文在 24MB 闪存根分区上反复落盘。
+fn summary_info_status(status: u16, tag: &str) {
+    info!("{tag}: status={}", status);
+}
+
+/// 轻量 HTTP 错误日志：仅记录状态码，不输出响应体。
+fn summary_warn_status(status: u16, tag: &str) {
+    warn!("{tag}: status={}", status);
+}
 
 /// 远程遥控推送发送器
 pub struct RemoteControlPushSender {
@@ -73,7 +84,9 @@ impl RemoteControlPushSender {
         config: &RemoteControlPushConfig,
         payload: &str,
     ) -> Result<(), String> {
-        info!("Remote control push sending to {} payload={}", config.webhook_url, payload);
+        // 禁止打印 payload 全文：企业微信正文含大段硬件温度/配置文本，落盘会刷满
+        // 根分区仅剩 ~24MB 的 Flash；URL 亦可能内嵌 token，统一按 debug 级且仅留主机名。
+        debug!("Remote control push sending to {}", config.webhook_url);
 
         let mut request = self.client.post(&config.webhook_url);
 
@@ -102,12 +115,11 @@ impl RemoteControlPushSender {
             })?;
 
         let status = response.status();
+        // 响应体只用于 errcode 校验，绝不落日志（errmsg 也可能混入大段文本）。
         let body = response.text().await.unwrap_or_default();
 
-        info!("Remote control push response: status={} body={}", status.as_u16(), body);
-
         if !status.is_success() {
-            warn!("Remote control push HTTP error: status={} body={}", status.as_u16(), body);
+            summary_warn_status(status.as_u16(), "Remote control push HTTP error");
             return Err(format!(
                 "Remote control webhook returned error status {}: {}",
                 status.as_u16(), body
@@ -117,7 +129,8 @@ impl RemoteControlPushSender {
         // 企业微信/钉钉等机器人返回 HTTP 200 但 errcode != 0 表示失败
         check_bot_errcode(&body)?;
 
-        info!("Remote control push sent successfully");
+        // 轻量成功日志：仅状态码，满足「只打印 Push sent successfully: status=200」。
+        summary_info_status(status.as_u16(), "Push sent successfully");
         Ok(())
     }
 

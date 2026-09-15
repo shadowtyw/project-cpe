@@ -369,6 +369,15 @@ impl MqttService {
         let port = node.effective_port();
         let endpoint = node.endpoint();
 
+        // 前置公网探测：规避开机「ofono 已标就绪但 DNS/默认路由尚未稳定」的竞态。
+        // 直接发包会卡 TLS 握手的 Network timeout（现场约 59s）。先用「DNS 解析 +
+        // 短超时 TCP connect」探一次 host:port（每 2s 重试、最多 5 次），
+        // 链路确认可达后才放行正式 MQTT 连接。
+        if let Err(e) = probe_broker_reachable(node).await {
+            crate::log_entry!(warn, LOG_MODULE, "公网链路未就绪，跳过本次连接：{}", e);
+            return BrokerOutcome::Failed(format!("probe failed: {e}"));
+        }
+
         let mut mqttoptions = MqttOptions::new(client_id, host.clone(), port);
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_clean_session(true);
@@ -437,33 +446,24 @@ impl MqttService {
         // 连接成功后存储客户端以供 publish 复用
         MQTT_CLIENT.lock().await.replace((client.clone(), topic_pub.clone()));
 
-        // 发布初始上线状态
+        // 连接成功只发一条「已连接」的遥控推送通知；不再自动发布状态。
+        // 状态上报是纯响应式的：仅在收到 status 指令时按需采集发布，
+        // 避免每次重连都往 status 主题刷一份完整报告。
         send_mqtt_notification(
             "mqtt_connected",
             "connect",
             &format!("MQTT 已连接至 {}", endpoint),
         );
-        {
-            let dbus_clone = Arc::clone(&self.dbus_conn);
-            tokio::spawn(async move {
-                publish_status(&dbus_clone).await;
-            });
-        }
 
-        // 事件循环：保持连接，处理下行指令 + 周期性心跳 + 关闭检测。
+        // 事件循环：保持连接，处理下行指令 + 关闭检测。
         //
         // 关键设计：
-        // 1. 心跳定时器集成在事件循环内（tokio::select!），不再 spawn 独立 task。
-        //    之前每次 connect_broker() 都会 spawn 心跳 task，断连重连后旧 task 未退出
-        //    导致多个心跳 task 叠加，状态发布频率翻倍。
+        // 1. 状态上报是纯响应式的：不在循环里挂定时心跳任务，仅在收到 status
+        //    指令时按需采集发布，平时静默，不往 status 主题定时刷屏。
         // 2. 收到的 Publish 消息 spawn 到独立 task 处理，因为 handle_command 里的
         //    publish 需要 EventLoop 轮询来完成网络 I/O，不能在 poll 回调中 await。
         // 3. 过滤 topic_pub 上的自回环：如果 topic_pub == topic_sub，忽略自己发布的消息。
         // 4. disable_timer 周期性检查 enabled，使「连接中关闭开关」能在 5s 内断开。
-        let heartbeat_interval = Duration::from_secs(300);
-        let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
-        // 第一次 tick 立即触发，跳过它
-        heartbeat_timer.tick().await;
         let mut disable_timer = tokio::time::interval(Duration::from_secs(5));
         disable_timer.tick().await;
         // 本连接的配置指纹，用于检测「连接期间改了配置」
@@ -517,12 +517,6 @@ impl MqttService {
                             return BrokerOutcome::SessionLost(err_msg);
                         }
                     }
-                }
-                _ = heartbeat_timer.tick() => {
-                    let dbus_clone = Arc::clone(&self.dbus_conn);
-                    tokio::spawn(async move {
-                        publish_status(&dbus_clone).await;
-                    });
                 }
                 _ = disable_timer.tick() => {
                     let current = self.config_manager.get_mqtt().sanitize();
@@ -589,6 +583,57 @@ fn connection_signature(config: &MqttConfig) -> String {
     )
 }
 
+/// 前置公网探测：连接前确认 broker 的 DNS + 默认路由真正可用。
+///
+/// 开机竞态：`data_connection_watchdog` 刚把 ofono 的 context 标成 `Active=true` 时，
+/// 底层 DNS 解析与默认路由往往还没稳定，此时直接发起 MQTT/TLS 握手会卡在
+/// `Network timeout`（现场约 59s）。这里先用「DNS 解析 + 短超时 TCP connect」探一次
+/// broker 的 host:port：每 2s 重试、最多 5 次，链路确认可达才放行正式连接。
+///
+/// 显式取 host:port 而不只 ping 公网 IP：同时验证了 DNS 可用（设备可能指向一台
+/// 尚未就绪的自建 DNS），以及到 broker 的端到端路由连通。
+async fn probe_broker_reachable(node: &MqttBrokerNode) -> Result<(), String> {
+    const PROBE_ATTEMPTS: u32 = 5;
+    const PROBE_INTERVAL: Duration = Duration::from_secs(2);
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let (host, _) = node.resolve();
+    let port = node.effective_port();
+
+    let mut last_err = String::from("无法解析任何地址");
+    for attempt in 0..PROBE_ATTEMPTS {
+        // 1) DNS 解析：能拿到可路由地址即证明 DNS + 默认路由已就绪。
+        let addrs: Vec<std::net::SocketAddr> =
+            match tokio::net::lookup_host((host.as_str(), port)).await {
+                Ok(iter) => iter.collect(),
+                Err(e) => {
+                    last_err = format!("DNS 解析失败: {e}");
+                    debug!("MQTT preconnect probe DNS pending (attempt {}): {e}", attempt + 1);
+                    tokio::time::sleep(PROBE_INTERVAL).await;
+                    continue;
+                }
+            };
+        if addrs.is_empty() {
+            last_err = "DNS 解析无结果".to_string();
+            tokio::time::sleep(PROBE_INTERVAL).await;
+            continue;
+        }
+        // 2) TCP 探测：连上即证明公网可达，立即断开，不进 TLS（省一次握手）。
+        for addr in addrs.iter().take(3) {
+            match tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(_)) => {
+                    debug!("MQTT preconnect probe OK: {host}:{port}");
+                    return Ok(());
+                }
+                Ok(Err(e)) => last_err = format!("TCP 探测 {addr} 失败: {e}"),
+                Err(_) => last_err = format!("TCP 探测 {addr} 超时"),
+            }
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+    Err(format!("公网链路未就绪（{host}:{port}）：{last_err}"))
+}
+
 /// `connect_broker` 的返回，区分各种结局，让上层决定是重试、换节点还是重载配置。
 enum BrokerOutcome {
     /// 配置在连接期间被关闭 → 立即退出，不重连
@@ -643,9 +688,30 @@ async fn is_duplicate_command(action: &str) -> bool {
     false
 }
 
+/// `status` 指令的冷却窗口：触发 /proc 读取、温度采集与基站 AT 查询等多处重负载
+/// 操作，冷却期内连续收到的 status 直接忽略，避免命令风暴把设备打满或同一秒重复双发。
+const STATUS_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// 最近一次放行 status 采集的时刻，用于冷却判断。
+static LAST_STATUS_RUN: Mutex<Option<Instant>> = Mutex::const_new(None);
+
+/// status 采集的并发锁：即使多条 status 指令在冷却期外并发送达，也只允许一个在跑。
+static STATUS_RUNNING: Mutex<()> = Mutex::const_new(());
+
+/// 判断当前 status 是否处于冷却期；不在冷却期则登记本次并返回 `false`（应执行）。
+async fn is_status_in_cooldown() -> bool {
+    let mut guard = LAST_STATUS_RUN.lock().await;
+    let now = Instant::now();
+    if guard.is_some_and(|last| now.duration_since(last) < STATUS_COOLDOWN) {
+        return true;
+    }
+    *guard = Some(now);
+    false
+}
+
 /// 在独立 task 中处理 MQTT 指令（由 EventLoop spawn 调用）。
 ///
-/// 此函数不能 running 在与 EventLoop 相同的 task 中，否则 publish_status 里
+/// 此函数不能 running 在与 EventLoop 相同的 task 中，否则 publish_report 里
 /// client.publish() 会死锁（publish 依赖 EventLoop 轮询来完成网络 I/O）。
 async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: &Connection) {
     let payload_str = match std::str::from_utf8(payload) {
@@ -657,7 +723,8 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
         }
     };
 
-    debug!("Received MQTT command payload: {payload_str}");
+    // 不打印原始指令载荷：其中包含鉴权 token，落日志会泄露凭据。
+    // 具体 action 在下方解析成功后以 info 级记录。
 
     let cmd: MqttCommand = match serde_json::from_str(payload_str) {
         Ok(c) => c,
@@ -725,6 +792,13 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
             }
         }
         "status" => {
+            // 冷却去重：status 是重负载操作，冷却期内的重复请求直接忽略。
+            if is_status_in_cooldown().await {
+                crate::log_entry!(warn, LOG_MODULE, "status 冷却中，忽略重复请求");
+                return;
+            }
+            // 并发锁：冷却期外并发送达的 status 也只放一个进去采集，彻底杜绝同秒双发。
+            let _status_guard = STATUS_RUNNING.lock().await;
             // 采集一次完整报告，文本摘要走推送、完整 JSON 走 topic_pub，两者数据一致
             let report = DeviceReport::collect(dbus_conn).await;
             send_mqtt_notification(
@@ -742,16 +816,10 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
     }
 }
 
-/// 采集并发布系统状态到 MQTT（心跳路径用，独立函数不依赖 MqttService 实例）。
-async fn publish_status(dbus_conn: &Connection) {
-    let report = DeviceReport::collect(dbus_conn).await;
-    publish_report(&report).await;
-}
-
 /// 把已采集好的报告发布到 topic_pub，并刷新心跳时间戳。
 ///
-/// 与 [`publish_status`] 拆开，是为了让 `status` 指令复用「文本摘要 + JSON 发布」
-/// 同一次采集结果，避免重复采样 CPU（sample_cpu_usage 有 200ms 间隔）。
+/// 状态上报是纯响应式的：仅在收到 `status` 指令时由 [`handle_command_spawned`]
+/// 采集一次并调用本函数，连接建立或定时器都不会触发上报（平时静默）。
 async fn publish_report(report: &DeviceReport) {
     let payload = match serde_json::to_string(report) {
         Ok(p) => p,
@@ -766,15 +834,15 @@ async fn publish_report(report: &DeviceReport) {
     let (client, topic_pub) = match MQTT_CLIENT.lock().await.clone() {
         Some(entry) => entry,
         None => {
-            debug!("No active MQTT client for publish_status");
+            debug!("No active MQTT client for publish_report");
             return;
         }
     };
 
     match client.publish(&topic_pub, QoS::AtLeastOnce, false, payload.as_bytes()).await {
         Ok(_) => {
-            debug!("Published status to {topic_pub}");
-            crate::log_entry!(debug, LOG_MODULE, "已发布状态到 {}", topic_pub);
+            // 成功路径静默：仅刷新时间戳，不打日志，避免每次按需上报都刷终端。
+            // 网络错误在 Err 分支记录（error 级），指令入口在 handle_command_spawned 已记录。
             MqttService::update_state_static(|state| {
                 state.last_heartbeat = Some(crate::utils::now_beijing_rfc3339());
             }).await;
