@@ -136,6 +136,12 @@ impl MqttService {
                 state.enabled = true;
             }).await;
 
+            // 等待蜂窝数据连接就绪后再触发连接，避免开机未联网时反复超时退避。
+            // 超时可配（0 = 始终等待），等待期间若被关闭则回到循环顶部重新判断 enabled。
+            if !self.await_data_connected(&config).await {
+                continue;
+            }
+
             // connect_and_run 会在「被关闭」或「所有节点失败」时返回。
             // 返回后回到循环顶部重读配置，因此关闭开关能在一轮内生效。
             self.connect_and_run(&config).await;
@@ -308,6 +314,42 @@ impl MqttService {
             }
         }
         false
+    }
+
+    /// 等待蜂窝数据连接就绪（Data Connected），就绪后返回 `true` 允许进入连接。
+    ///
+    /// * `data_wait_timeout_secs == 0`：始终等待，不因超时降级（默认）。
+    /// * `> 0`：累计超过该秒数后即使未联网也放行连接（覆盖纯 WAN/直连等无蜂窝场景）。
+    /// * 等待期间配置被关闭：返回 `false`，调用方回到 `run()` 顶部重新判断 `enabled`。
+    async fn await_data_connected(&self, config: &MqttConfig) -> bool {
+        let timeout_secs = config.data_wait_timeout_secs;
+        let started = Instant::now();
+        loop {
+            if !self.config_manager.get_mqtt().enabled {
+                return false;
+            }
+            match crate::dbus::get_data_connection_status(&self.dbus_conn).await {
+                Ok(true) => {
+                    crate::log_entry!(info, LOG_MODULE, "蜂窝数据连接已就绪，开始连接 MQTT");
+                    return true;
+                }
+                _ => {
+                    if timeout_secs > 0 && started.elapsed() >= Duration::from_secs(timeout_secs) {
+                        crate::log_entry!(
+                            warn,
+                            LOG_MODULE,
+                            "等待数据连接超时（{}s），按配置降级尝试连接",
+                            timeout_secs
+                        );
+                        return true;
+                    }
+                    // 数据连接尚未就绪，分段休眠轮询；期间被关闭则返回 false。
+                    if self.sleep_responsive_to_disable(Duration::from_secs(3)).await {
+                        return false;
+                    }
+                }
+            }
+        }
     }
 
     async fn connect_broker(
@@ -563,6 +605,44 @@ enum BrokerOutcome {
     SessionLost(String),
 }
 
+/// 指令级去重窗口：MQTT QoS=1 是 at-least-once 语义，broker 在 PubAck 未及时到达时
+/// 会重发同一条 Publish，导致同一指令被回调执行两次（表现为 status 指令同一秒发布
+/// 两次状态、reboot 被重复触发）。在此窗口内相同 action 只执行一次。
+const COMMAND_DEDUP_WINDOW: Duration = Duration::from_secs(2);
+
+/// 最近一次已执行指令的 action 与时刻（用于短窗去重）。
+static LAST_EXECUTED_COMMAND: Mutex<Option<(String, Instant)>> = Mutex::const_new(None);
+
+/// 判断 `action` 是否属于「短窗内重复投递」：纯函数，便于单测。
+///
+/// `last` 为最近执行的 (action, 时刻)，`now` 为当前时刻。返回 `true` 表示应忽略。
+fn dedup_is_duplicate(
+    last: Option<&(String, Instant)>,
+    action: &str,
+    now: Instant,
+    window: Duration,
+) -> bool {
+    matches!(
+        last,
+        Some((last_action, last_time))
+            if last_action == action && now.duration_since(*last_time) < window
+    )
+}
+
+/// 登记并判断当前指令是否应因「短窗重复」被忽略。
+///
+/// 原子地完成「比对 + 登记」两步：若重复则不改状态并返回 `true`；否则记录本次
+/// (action, 时刻) 并返回 `false`（应执行）。
+async fn is_duplicate_command(action: &str) -> bool {
+    let mut guard = LAST_EXECUTED_COMMAND.lock().await;
+    let now = Instant::now();
+    if dedup_is_duplicate(guard.as_ref(), action, now, COMMAND_DEDUP_WINDOW) {
+        return true;
+    }
+    *guard = Some((action.to_string(), now));
+    false
+}
+
 /// 在独立 task 中处理 MQTT 指令（由 EventLoop spawn 调用）。
 ///
 /// 此函数不能 running 在与 EventLoop 相同的 task 中，否则 publish_status 里
@@ -603,6 +683,13 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
                 return;
             }
         }
+    }
+
+    // 指令级去重：MQTT QoS=1 at-least-once 语义下 broker 可能重发同一条 Publish，
+    // 短窗内相同 action 只执行一次，避免 status 重复发布、reboot/reconnect 重复触发。
+    if is_duplicate_command(&cmd.action).await {
+        crate::log_entry!(warn, LOG_MODULE, "忽略短时间内重复指令：{}", cmd.action);
+        return;
     }
 
     MqttService::update_state_static(|state| {
@@ -719,6 +806,7 @@ pub async fn is_mqtt_connected() -> bool {
 #[cfg(test)]
 mod tests {
     use super::connection_signature;
+    use super::dedup_is_duplicate;
     use crate::config::{MqttBrokerNode, MqttConfig};
 
     fn base_config() -> MqttConfig {
@@ -816,6 +904,36 @@ mod tests {
         let mut changed = base_config();
         changed.auth_token = Some("secret-token".to_string());
         assert_ne!(connection_signature(&base_config()), connection_signature(&changed));
+    }
+
+    #[test]
+    fn dedup_ignores_same_action_within_window() {
+        let now = std::time::Instant::now();
+        let last = Some(("status".to_string(), now));
+        // 同一 action、紧邻时刻（< 2s）视为重复
+        assert!(dedup_is_duplicate(last.as_ref(), "status", now + std::time::Duration::from_secs(1), std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn dedup_allows_same_action_after_window() {
+        let now = std::time::Instant::now();
+        let last = Some(("status".to_string(), now));
+        // 超出窗口后允许再次执行
+        assert!(!dedup_is_duplicate(last.as_ref(), "status", now + std::time::Duration::from_secs(3), std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn dedup_allows_different_action_within_window() {
+        let now = std::time::Instant::now();
+        let last = Some(("status".to_string(), now));
+        // 不同 action 不互相去重
+        assert!(!dedup_is_duplicate(last.as_ref(), "reboot", now + std::time::Duration::from_millis(500), std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn dedup_allows_first_command() {
+        // 没有历史记录时（首次）绝不视为重复
+        assert!(!dedup_is_duplicate(None, "status", std::time::Instant::now(), std::time::Duration::from_secs(2)));
     }
 
     #[test]

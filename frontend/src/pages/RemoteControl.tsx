@@ -159,6 +159,7 @@ export default function RemoteControl() {
     tls: false,
     username: null,
     password: null,
+    data_wait_timeout_secs: 0,
   })
   const [mqttStatus, setMqttStatus] = useState<MqttStatusResponse>({
     enabled: false,
@@ -1066,6 +1067,21 @@ export default function RemoteControl() {
                   })
                 }
                 helperText="设置后只有携带正确 token 的指令才会执行"
+              />
+
+              <TextField
+                size="small"
+                type="number"
+                label="数据连接等待超时 (秒)"
+                value={mqttConfig.data_wait_timeout_secs}
+                onChange={(e) =>
+                  setMqttConfig({
+                    ...mqttConfig,
+                    data_wait_timeout_secs: Math.max(0, Number(e.target.value) || 0),
+                  })
+                }
+                helperText="0 = 始终等待蜂窝数据连接就绪后连接；>0 = 等待超时后即使未联网也尝试连接"
+                inputProps={{ min: 0 }}
               />
 
               <Divider sx={{ my: 1 }} />

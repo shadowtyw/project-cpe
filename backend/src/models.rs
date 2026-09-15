@@ -1440,6 +1440,9 @@ pub struct MqttConfigResponse {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// 连接前等待蜂窝数据连接就绪的秒数；0 = 始终等待（默认）
+    #[serde(default)]
+    pub data_wait_timeout_secs: u64,
 }
 
 /// MQTT 状态响应（镜像 mqtt_service::MqttRuntimeState）

@@ -592,7 +592,8 @@ async fn async_main() -> Result<()> {
                 let conn_clone = Arc::clone(&conn_clone);
                 let config_manager = Arc::clone(&config_manager);
                 async move {
-                    // 延迟 10 秒启动，等待数据连接就绪
+                    // 延迟 10 秒启动，给 ofono/模组就绪以获取 IMEI 留缓冲；
+                    // 「等待蜂窝数据连接就绪」的门控已移至 MqttService 内部（await_data_connected）。
                     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
                     // 获取 IMEI 用于生成唯一的 Client ID

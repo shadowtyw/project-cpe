@@ -792,6 +792,10 @@ pub struct MqttConfig {
     /// MQTT 密码（可选）
     #[serde(default)]
     pub password: Option<String>,
+    /// 连接前等待蜂窝数据连接就绪的秒数。`0` = 始终等待（默认）；`>0` = 最多等这么久，
+    /// 超时后即使未联网也尝试连接（覆盖纯 WAN/直连等无蜂窝场景）。
+    #[serde(default)]
+    pub data_wait_timeout_secs: u64,
 }
 
 /// 节点数量上限：轮询一圈的耗时与节点数成正比，过多会让故障切换变得迟钝
@@ -839,6 +843,7 @@ impl Default for MqttConfig {
             tls: false,
             username: None,
             password: None,
+            data_wait_timeout_secs: 0,
         }
     }
 }
@@ -872,6 +877,7 @@ impl<'de> Deserialize<'de> for MqttConfig {
             auth_token: Option<String>,
             username: Option<String>,
             password: Option<String>,
+            data_wait_timeout_secs: u64,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -921,6 +927,7 @@ impl<'de> Deserialize<'de> for MqttConfig {
             tls: raw.tls,
             username: raw.username,
             password: raw.password,
+            data_wait_timeout_secs: raw.data_wait_timeout_secs,
         };
         config = config.sanitize();
         Ok(config)
@@ -1941,6 +1948,16 @@ mod tests {
         // sanitize 保证节点列表非空，否则连接循环会空转
         assert!(!cfg.nodes.is_empty());
         assert_eq!(cfg.nodes.len(), default_mqtt_nodes().len());
+    }
+
+    #[test]
+    fn mqtt_data_wait_timeout_defaults_to_zero() {
+        // 缺少字段时默认 0 = 始终等待数据连接（最安全），不会因缺字段而误降级直连
+        let cfg: MqttConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(cfg.data_wait_timeout_secs, 0);
+
+        let cfg: MqttConfig = serde_json::from_str(r#"{"enabled": true, "data_wait_timeout_secs": 300}"#).unwrap();
+        assert_eq!(cfg.data_wait_timeout_secs, 300);
     }
 
     #[test]

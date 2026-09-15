@@ -968,6 +968,8 @@ export interface MqttConfigResponse {
   tls: boolean
   username: string | null
   password: string | null
+  /** 连接前等待蜂窝数据连接就绪的秒数；0 = 始终等待（默认） */
+  data_wait_timeout_secs: number
 }
 
 export interface MqttStatusResponse {

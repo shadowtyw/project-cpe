@@ -3761,6 +3761,7 @@ pub async fn get_mqtt_config_handler(
         tls: config.tls,
         username: config.username,
         password: config.password,
+        data_wait_timeout_secs: config.data_wait_timeout_secs,
     }))
 }
 
@@ -3783,6 +3784,7 @@ pub async fn set_mqtt_config_handler(
         tls: config.tls,
         username: config.username,
         password: config.password,
+        data_wait_timeout_secs: config.data_wait_timeout_secs,
     };
 
     let sanitized = mqtt_config.sanitize();
@@ -3798,6 +3800,7 @@ pub async fn set_mqtt_config_handler(
         tls: sanitized.tls,
         username: sanitized.username.clone(),
         password: sanitized.password.clone(),
+        data_wait_timeout_secs: sanitized.data_wait_timeout_secs,
     };
 
     match config_manager.set_mqtt(sanitized) {

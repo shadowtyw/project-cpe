@@ -189,6 +189,20 @@ find "$USERDATA_DIR" -type d -exec chmod 755 {} \; 2>/dev/null || true
 
 echo ""
 
+# ==================== 隐私清理：排除运行态数据 ====================
+# 出厂镜像绝不含运行态数据：config.json / data.db 含个人 EMQX 节点凭据、企业微信
+# webhook key、MQTT 用户名密码、鉴权 token 与短信/通话记录，均为设备 /data 分区的
+# 私有数据。本地调试若在 userdata/home/root 下跑过二进制会残留这些文件，必须在此
+# 清除，与 .gitignore 的规则保持一致。若不清除，整份个人配置会被打进 UBIFS 分发出去。
+echo "隐私清理：移除运行态数据（config.json / *.db / logs / mode*.cfg 等）..."
+for _pattern in 'config.json' '*.corrupt' '*.db' '*.db-journal' '*.sqlite' '*.sqlite3' \
+                'net_health_state.json' 'mode.cfg' 'mode_tmp.cfg'; do
+    find "$USERDATA_DIR" -name "$_pattern" -type f -delete 2>/dev/null || true
+done
+find "$USERDATA_DIR" -type d \( -name logs -o -name log \) -exec rm -rf {} + 2>/dev/null || true
+
+echo ""
+
 # ==================== 创建 UBIFS 镜像 ====================
 echo "创建 UBIFS 镜像..."
 echo "  输入目录: $USERDATA_DIR"
