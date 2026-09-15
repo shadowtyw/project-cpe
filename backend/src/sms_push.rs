@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::{json, Value};
 
@@ -67,7 +66,7 @@ impl SmsPushSender {
             direction: "incoming".to_string(),
             phone_number: "+8613800138000".to_string(),
             content: "这是一条测试短信 (SMS Push Test)".to_string(),
-            timestamp: Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            timestamp: crate::utils::now_beijing_format("%Y-%m-%d %H:%M:%S"),
             status: "received".to_string(),
             pdu: None,
         };

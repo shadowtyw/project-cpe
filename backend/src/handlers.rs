@@ -3412,7 +3412,7 @@ pub async fn get_diagnostic_report(
         .collect();
 
     let report = DiagnosticReport {
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: crate::utils::now_beijing_rfc3339(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         commit: crate::ota::get_current_commit(),
         device,

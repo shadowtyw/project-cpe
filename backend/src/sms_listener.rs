@@ -380,7 +380,7 @@ pub async fn start_sms_listener(
                                 direction: "incoming".to_string(),
                                 phone_number: sender,
                                 content,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                timestamp: crate::utils::now_beijing_rfc3339(),
                                 status: "received".to_string(),
                                 pdu: None,
                             };
@@ -559,7 +559,7 @@ pub async fn start_call_listener(
                         if let Some(call) = active_calls.remove(&path_str) {
                             // Calculate duration
                             let duration = (Utc::now() - call.start_time).num_seconds();
-                            let end_time = Utc::now().to_rfc3339();
+                            let end_time = crate::utils::now_beijing_rfc3339();
                             
                             // Determine final direction
                             let final_direction = if !call.answered && call.direction == "incoming" {
@@ -577,7 +577,7 @@ pub async fn start_call_listener(
                                 direction: final_direction,
                                 phone_number: call.phone_number,
                                 duration,
-                                start_time: call.start_time.to_rfc3339(),
+                                start_time: crate::utils::to_beijing_rfc3339(call.start_time),
                                 end_time: Some(end_time),
                                 answered: call.answered,
                             };

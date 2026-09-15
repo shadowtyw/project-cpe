@@ -1,133 +1,53 @@
-feat: 远程遥控推送独立化 + 统一通知机制
+feat: 发布版出厂化清理 + 北京时间 + OTA 升级保留用户配置
 
-## 核心改动
+## 本次改动总览
 
-### 1. 远程遥控推送配置独立化
-- 新增 `RemoteControlPushConfig` 结构体，与 `WebhookConfig` 完全分离
-- 创建独立的 `remote_control_push.rs` 模块处理远程遥控推送
-- 支持独立的 webhook URL、请求头、签名密钥
-- 三种遥控方式可独立开关：`forward_sms_control`、`forward_call_control`、`forward_mqtt_control`
+面向"最终发布 OTA 分发给他人"这一目标，做三件事：
+1. **出厂化**：清理所有可能泄露个人信息的硬编码值，杜绝把运行态数据打进镜像。
+2. **平滑升级**：保证刷入 OTA 只覆盖程序文件，不覆盖用户已有的配置与短信/通话数据。
+3. **防崩溃**：旧配置缺字段时安全回落默认值，进程不崩、前端不白屏。
 
-### 2. 统一通知机制重构
-- 在 `main.rs` 中创建 `CompositeNotifier`，同时实现三个 Notifier trait：
-  - `SmsControlNotifier`（短信遥控）
-  - `CallControlNotifier`（通话遥控）
-  - `MqttNotifier`（MQTT 遥控）
-- 所有通知统一通过双通道发送：
-  1. 独立的远程遥控 Webhook（`RemoteControlPushSender`）
-  2. 短信推送服务（`SmsPushSender`）
+---
 
-### 3. 重启延迟统一为 10 秒
-- `call_control.rs`: `schedule_reboot("call_control", 10)`
-- `sms_control.rs`: `schedule_reboot("sms_control", 10)`
-- `mqtt_service.rs`: `schedule_reboot("mqtt", 10)`
+## 一、天气时刻统一为北京时间（UTC+8）
 
-### 4. MQTT 通知优化
-- 新增 `mqtt_connected` 通知：连接成功时立即发送
-- 心跳机制：每 120 秒自动发布系统状态
-- 命令执行前预推送：重启指令在延迟前发送通知
-- 所有通知消息统一为中文
+- 问题：设备未配置 `TZ`，`chrono::Local` 回落到 UTC，推送/日志时间比实际慢 8 小时。
+- 新增 `backend/src/utils.rs` 的北京时间 helper：`now_beijing_rfc3339()` / `now_beijing_format()` / `to_beijing_rfc3339()`，固定 `+08:00`（无夏令时），不依赖 `Local`。
+- 所有"给用户看"的时间戳（推送、短信、通话记录、日志、设备状态报告）全部切换；内部计时与差值计算（通话时长、流量时间戳、定时窗口）仍保留 UTC/Local，展示时再转。
+- 修复推送里"🕐 xxx"与"时间: yyy"两条时间同时出现的重复显示。
 
-### 5. Webhook 配置清理
-- 从 `WebhookConfig` 移除 `forward_call_control` 和 `forward_mqtt_control`
-- 远程遥控推送现在使用独立的配置和端点
+## 二、隐私清理（出厂化）
 
-## 技术细节
+- 删除远程遥控里的个人 MQTT Broker（`ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn`）、连接认证用户名/密码、鉴权 token、白名单号码。
+- 前端 `RemoteControl.tsx` 初始状态回落为公共 Broker（broker.emqx.io / broker-cn.emqx.io）；`ATConsole.tsx` IMEI 占位符改为示例值。
+- 修正测试固件里的真实设备 IMEI `868659060480591` → 示例值 `123456789012345`。
+- 确认无硬编码 WiFi 密码、无管理员密码/登录体系、无 URL 内嵌 token；`cbnet` APN 为公开运营商 MCC/MNC 查表，非个人数据。
+- `.gitignore` 覆盖扩展：新增 `*.corrupt`（解析失败备份）、`net_health_state.json`、`userdata/**/mode*.cfg`，确保设备运行态数据绝不入库。
 
-### 后端文件变更
-```
-backend/src/
-├── config.rs                    # 新增 RemoteControlPushConfig 结构体
-├── remote_control_push.rs       # 新建独立推送模块
-├── main.rs                      # CompositeNotifier 重构，使用 RemoteControlPushSender
-├── webhook.rs                   # 移除远程遥控相关转发方法
-├── mqtt_service.rs              # 新增 MqttNotifier + 10秒重启延迟
-├── sms_control.rs               # 新增 SmsControlNotifier + 10秒重启延迟
-├── call_control.rs              # 10秒重启延迟
-└── handlers.rs                  # 待添加 API endpoints
-```
+## 三、OTA 升级保留用户配置（打包→上传→安装三层确认）
 
-### 前端文件变更（待实现）
-```
-frontend/src/
-├── api/types.ts                 # 待添加 RemoteControlPushConfig 类型
-├── pages/RemoteControl.tsx      # 待添加推送配置面板
-└── pages/Configuration.tsx      # 移除远程遥控相关开关
-```
+- 打包：`pack-ota.sh` 只打 `meta.json + udx710 + www/`，顶层多任何一项即硬失败。
+- 上传：后端只放行 `meta.json`、`udx710`、`www/` 三个顶层入口；拒绝路径穿越、符号链接、绝对路径。
+- 安装：`ota.rs` 的 `install_update` rename 切换只作用于 `/home/root/udx710` 与 `/home/root/www`，唯一副作用是设备无启动脚本时补空 `init.sh` 占位，与 `/data/config.json`、`/data/data.db` 无关，二者永不读取/改写。
+- 全链路复盘确认：`config.json` 与 `data.db` 只存在于设备 `/data` 分区，属私有运行态数据，源码与 OTA 产物均不包含。
 
-### 通知消息格式
-所有通知统一使用以下 JSON 结构：
-```json
-{
-  "type": "sms_control|call_control|mqtt_control",
-  "timestamp": "ISO8601",
-  "data": {
-    "event": "event_name",
-    "command": "command_type",
-    "message": "人类可读的中文消息",
-    "source": "来源号码/设备"
-  }
-}
-```
+## 四、兼容性与增量合并（防崩溃）
 
-### API 端点（待实现）
-```
-GET  /api/remote-control-push/config    - 获取配置
-POST /api/remote-control-push/config    - 更新配置
-POST /api/remote-control-push/test      - 测试推送
-```
+- 为 7 个缺失 `#[serde(default)]` 的字段补齐兜底：`WebhookConfig`（enabled/url/forward_sms/forward_calls）、`SmsPushConfig.enabled`、`ScheduleEntry`（time/action）。
+- 解析失败兜底：`ConfigManager::new` 先备份原文件为 `config.json.corrupt`，再回落 `AppConfig::default()`，不再静默清空用户配置。
+- 新增 8 个回归测试（含 `unknown_future_fields_are_ignored_not_rejected` 锁死禁止 `deny_unknown_fields`），测试数 105 → 全部通过。
+- 前端确认无白屏路径：每个配置加载都有空值兜底 + 独立 try/catch；后端 `sanitize()` 保证返回非空 `nodes`/主题。
 
-## 通知示例
+## 五、README 完善
 
-### 短信遥控
-```json
-{
-  "type": "sms_control",
-  "timestamp": "2024-01-15T10:30:00+08:00",
-  "data": {
-    "event": "sms_command_executed",
-    "command": "reboot",
-    "message": "短信遥控：号码 +8613800138000 执行了「重启设备」指令，设备将在 10 秒后重启",
-    "source": "+8613800138000"
-  }
-}
-```
+- 修正"可用内存上限 100%"、公共 Broker 节点数描述等与实际不符处。
+- 新增「升级保留用户配置」与「配置安全：解析失败兜底」小节，明确发布级承诺。
+- 开源协议补充分发时的署名保留与 GPLv3 条款说明。
 
-### 通话遥控
-```json
-{
-  "type": "call_control",
-  "timestamp": "2024-01-15T10:30:00+08:00",
-  "data": {
-    "event": "call_command_executed",
-    "command": "reboot",
-    "message": "通话遥控：号码 +8613800138000 执行了「重启设备」指令，设备将在 10 秒后重启",
-    "source": "+8613800138000"
-  }
-}
-```
+---
 
-### MQTT 遥控
-```json
-{
-  "type": "mqtt_control",
-  "timestamp": "2024-01-15T10:30:00+08:00",
-  "data": {
-    "event": "mqtt_connected",
-    "command": "connect",
-    "message": "MQTT 已连接至 broker.emqx.io"
-  }
-}
-```
+## 验证
 
-## 向后兼容性
-- 现有 `WebhookConfig` 中的 `forward_sms` 和 `forward_calls` 保持不变
-- 旧的配置文件会自动使用默认值填充新的 `RemoteControlPushConfig`
-- 前端 Configuration 页面中移除的远程遥控开关不会导致错误
-
-## 测试建议
-1. 在 Configuration 页面配置远程遥控推送的 Webhook URL
-2. 分别启用三种遥控方式的推送
-3. 测试短信遥控、通话遥控、MQTT 遥控是否收到通知
-4. 验证重启指令的 10 秒延迟和预推送是否正常工作
-5. 检查 MQTT 连接通知和心跳是否按预期发送
+- `cargo check` 通过，无警告。
+- `cargo test`：105 passed; 0 failed。
+- 隐私扫描：源码中无个人 broker 域名、无真实手机号、无真实 IMEI、无 webhook key/token。

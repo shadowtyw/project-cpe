@@ -721,8 +721,45 @@ pub fn format_uptime(seconds: u64) -> String {
     if parts.is_empty() || secs > 0 {
         parts.push(format!("{}秒", secs));
     }
-    
+
     parts.join(" ")
+}
+
+// ── 北京时间（UTC+8）时间工具 ────────────────────────────
+
+/// 北京时间偏移（固定 +08:00）。
+///
+/// 设备可能未配置 `TZ` 环境变量，此时 `chrono::Local::now()` 会回落到 UTC，
+/// 导致日志与推送时间比北京时间慢 8 小时。这里不依赖 `Local`，显式固定 +08:00，
+/// 保证「设备时间 / 推送时间」无论设备 TZ 如何都显示为北京时间。
+///
+/// `east_opt` 只在偏移超出 ±24h 时返回 `None`；8 小时是编译期常量，
+/// 恒在合法范围内，`unwrap` 仅满足 `Option` 语义、实际永不触发。
+fn beijing_offset() -> chrono::FixedOffset {
+    chrono::FixedOffset::east_opt(8 * 3600).unwrap()
+}
+
+/// 当前北京时间，RFC 3339 字符串（尾缀 `+08:00`）。
+pub fn now_beijing_rfc3339() -> String {
+    chrono::Utc::now()
+        .with_timezone(&beijing_offset())
+        .to_rfc3339()
+}
+
+/// 把 UTC 时刻转成北京时间 RFC 3339 字符串。
+///
+/// 用于「时刻已在别处以 UTC 记录、只能在最终展示时转时区」的场景
+/// （如通话 `start_time` 需参与时长计算，字段类型保持 `DateTime<Utc>` 不变）。
+pub fn to_beijing_rfc3339(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.with_timezone(&beijing_offset()).to_rfc3339()
+}
+
+/// 当前北京时间的自定义格式（如 `"%Y-%m-%d %H:%M:%S"`）。
+pub fn now_beijing_format(fmt: &str) -> String {
+    chrono::Utc::now()
+        .with_timezone(&beijing_offset())
+        .format(fmt)
+        .to_string()
 }
 
 /// 读取网络接口的流量统计

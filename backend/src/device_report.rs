@@ -110,7 +110,7 @@ impl DeviceReport {
             .unwrap_or_default();
 
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::utils::now_beijing_rfc3339(),
             app_version: env!("APP_VERSION").to_string(),
             git_commit: env!("GIT_COMMIT").to_string(),
             device,
@@ -144,7 +144,9 @@ impl DeviceReport {
         self.push_storage_lines(&mut lines);
         self.push_runtime_lines(&mut lines);
 
-        lines.push(format!("🕐 {}", self.timestamp));
+        // 时间戳不再内联到摘要里：推送模板已自带 `时间: {{timestamp}}`，
+        // 内联会导致「🕐 xxx」与「时间: yyy」两条时间同时出现。
+        // `self.timestamp` 仍随完整 JSON 发布（topic_pub），外部系统不受影响。
         lines.join("\n")
     }
 
@@ -652,7 +654,7 @@ mod tests {
     #[test]
     fn summary_survives_all_fields_missing() {
         // release 下 panic = "abort"，任何 unwrap 都会杀掉整个进程；
-        // 空报告必须能正常渲染出标题与时间戳。
+        // 空报告必须能正常渲染出标题与版本号（时间戳只在模板/JSON 里，摘要不内联）。
         let empty = DeviceReport {
             timestamp: "2026-01-01T00:00:00+00:00".to_string(),
             app_version: "1.0.0".to_string(),

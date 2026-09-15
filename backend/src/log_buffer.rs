@@ -42,7 +42,7 @@ fn level_rank(level: &str) -> u8 {
 }
 
 fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
+    crate::utils::now_beijing_rfc3339()
 }
 
 /// 内部写入逻辑。锁被毒化时尽量恢复，避免日志写入成为新的崩溃点。

@@ -292,14 +292,14 @@ pub fn get_last_trigger() -> crate::models::CallControlTrigger {
 
 fn record_trigger(number: &str, action: ScheduleAction) {
     let mut state = lock_state();
-    state.triggered_at = Some(chrono::Utc::now().to_rfc3339());
+    state.triggered_at = Some(crate::utils::now_beijing_rfc3339());
     state.triggered_action = Some(format!("{:?}", action).to_lowercase());
     state.triggered_number = Some(number.to_string());
 }
 
 fn send_notification(payload: &serde_json::Value) {
     // add timestamp
-    let ts = chrono::Utc::now().to_rfc3339();
+    let ts = crate::utils::now_beijing_rfc3339();
     let msg = serde_json::json!({
         "timestamp": ts,
         "type": "call_control",

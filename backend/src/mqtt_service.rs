@@ -47,7 +47,7 @@ fn notify(payload: &serde_json::Value) {
 }
 
 fn send_mqtt_notification(event: &str, command: &str, message: &str) {
-    let ts = chrono::Utc::now().to_rfc3339();
+    let ts = crate::utils::now_beijing_rfc3339();
     let msg = serde_json::json!({
         "timestamp": ts,
         "type": "mqtt_control",
@@ -606,7 +606,7 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
     }
 
     MqttService::update_state_static(|state| {
-        state.last_command = Some(chrono::Utc::now().to_rfc3339());
+        state.last_command = Some(crate::utils::now_beijing_rfc3339());
     }).await;
 
     info!("Executing MQTT command: {}", cmd.action);
@@ -689,7 +689,7 @@ async fn publish_report(report: &DeviceReport) {
             debug!("Published status to {topic_pub}");
             crate::log_entry!(debug, LOG_MODULE, "已发布状态到 {}", topic_pub);
             MqttService::update_state_static(|state| {
-                state.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
+                state.last_heartbeat = Some(crate::utils::now_beijing_rfc3339());
             }).await;
         }
         Err(e) => {
@@ -863,7 +863,7 @@ mod tests {
             app_version: "3.6.2".to_string(),
             git_commit: "95c1a2d".to_string(),
             device: Some(DeviceInfoResponse {
-                imei: "868659060480591".to_string(),
+imei: "123456789012345".to_string(),
                 manufacturer: "Fake Modem Manufacturer".to_string(),
                 model: "Fake Modem Model".to_string(),
                 revision: Some("UDX710_V1.0.0_B05".to_string()),

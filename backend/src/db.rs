@@ -12,7 +12,6 @@
 //!
 //! 使用 SQLite 存储短信历史记录和通话记录
 
-use chrono::Utc;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -178,8 +177,8 @@ impl Database {
         pdu: Option<&str>,
     ) -> Result<i64> {
         let conn = self.lock_conn();
-        let timestamp = Utc::now().to_rfc3339();
-        
+        let timestamp = crate::utils::now_beijing_rfc3339();
+
         conn.execute(
             "INSERT INTO sms_messages (direction, phone_number, content, timestamp, status, pdu)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -324,7 +323,7 @@ impl Database {
         answered: bool,
     ) -> Result<i64> {
         let conn = self.lock_conn();
-        let start_time = Utc::now().to_rfc3339();
+        let start_time = crate::utils::now_beijing_rfc3339();
         
         conn.execute(
             "INSERT INTO call_history (direction, phone_number, duration, start_time, answered)
@@ -338,8 +337,8 @@ impl Database {
     /// 更新通话记录（通话结束时调用）
     pub fn update_call_end(&self, id: i64, duration: i64, answered: bool) -> Result<()> {
         let conn = self.lock_conn();
-        let end_time = Utc::now().to_rfc3339();
-        
+        let end_time = crate::utils::now_beijing_rfc3339();
+
         conn.execute(
             "UPDATE call_history SET duration = ?1, end_time = ?2, answered = ?3 WHERE id = ?4",
             params![duration, end_time, answered as i32, id],
@@ -350,8 +349,8 @@ impl Database {
     /// 标记通话为未接来电
     pub fn mark_call_missed(&self, id: i64) -> Result<()> {
         let conn = self.lock_conn();
-        let end_time = Utc::now().to_rfc3339();
-        
+        let end_time = crate::utils::now_beijing_rfc3339();
+
         conn.execute(
             "UPDATE call_history SET direction = 'missed', end_time = ?1, answered = 0 WHERE id = ?2",
             params![end_time, id],
@@ -500,7 +499,7 @@ impl Database {
     /// 将一段时间内的流量增量累加到当日记录
     pub fn add_traffic_delta(&self, rx_delta: u64, tx_delta: u64) -> Result<()> {
         let conn = self.lock_conn();
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = crate::utils::now_beijing_format("%Y-%m-%d");
 
         conn.execute(
             "INSERT INTO traffic_daily (date, rx_bytes, tx_bytes)
@@ -519,7 +518,7 @@ impl Database {
     /// 或当天还没有产生任何流量时出现 "Query returned no rows"。
     pub fn get_todays_traffic(&self) -> Result<(u64, u64)> {
         let conn = self.lock_conn();
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = crate::utils::now_beijing_format("%Y-%m-%d");
         let row = conn.query_row(
             "SELECT rx_bytes, tx_bytes FROM traffic_daily WHERE date = ?1",
             params![today],
@@ -536,7 +535,7 @@ impl Database {
     /// 读取本月累计 (rx_bytes, tx_bytes)
     pub fn get_months_traffic(&self) -> Result<(u64, u64)> {
         let conn = self.lock_conn();
-        let month_prefix = chrono::Local::now().format("%Y-%m").to_string();
+        let month_prefix = crate::utils::now_beijing_format("%Y-%m");
         // SUM 聚合在没有匹配行时返回一行 NULL，COALESCE 后为 0，不会触发 no rows。
         let row = conn.query_row(
             "SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)

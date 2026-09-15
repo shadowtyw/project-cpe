@@ -31,9 +31,13 @@ const INIT_SCRIPT_LOADER_COMMAND: &str = "sh /home/root/init.sh &";
 /// Webhook 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub url: String,
+    #[serde(default = "default_true")]
     pub forward_sms: bool,
+    #[serde(default = "default_true")]
     pub forward_calls: bool,
     #[serde(default)]
     pub headers: HashMap<String, String>,
@@ -158,6 +162,7 @@ impl Default for SmsPushProvider {
 /// 短信推送配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmsPushConfig {
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub provider: SmsPushProvider,
@@ -395,11 +400,16 @@ pub struct ScheduleEntry {
     #[serde(default)]
     pub enabled: bool,
     /// 触发时间（本地 24 小时制 HH:MM）
+    ///
+    /// 缺失时取空串，`ScheduleConfig::sanitize()` 会把它连同整条计划项一起丢弃
+    /// （`valid_schedule_time` 校验不过），不会留下一条永远不触发的僵尸计划。
+    #[serde(default)]
     pub time: String,
     /// 周几触发（0=周日 … 6=周六），空表示每天
     #[serde(default)]
     pub weekdays: Vec<u8>,
     /// 要执行的命令
+    #[serde(default)]
     pub action: ScheduleAction,
 }
 
@@ -1069,7 +1079,25 @@ impl ConfigManager {
                             ..cfg
                         },
                         Err(e) => {
-                            warn!(error = %e, "Failed to parse config file, using defaults");
+                            // 解析失败时先备份原文件再回落默认值。
+                            //
+                            // 为什么必须备份：所有 setter 都会调 save() 写盘，用户在页面上
+                            // 随手改一个开关，内存里的「默认值」就会覆盖磁盘上的原文件，
+                            // 用户配置从此永久丢失。嵌入式 UBIFS 上掉电截断 JSON 并不罕见，
+                            // 留一份 .corrupt 副本至少能人工抢救。
+                            let backup_path = corrupt_backup_path(&config_path);
+                            match fs::copy(&config_path, &backup_path) {
+                                Ok(_) => warn!(
+                                    error = %e,
+                                    backup = %backup_path.display(),
+                                    "Failed to parse config file, original backed up, using defaults"
+                                ),
+                                Err(copy_err) => warn!(
+                                    error = %e,
+                                    copy_error = %copy_err,
+                                    "Failed to parse config file and could not back it up, using defaults"
+                                ),
+                            }
                             AppConfig::default()
                         }
                     }
@@ -1382,6 +1410,16 @@ impl ConfigManager {
     }
 }
 
+/// 解析失败时的备份路径：`config.json` → `config.json.corrupt`。
+///
+/// 用追加后缀而不是替换扩展名（`config.corrupt`），是为了让备份名里仍带 `.json`，
+/// 人工抢救时一眼能看出原始格式，也便于编辑器直接语法高亮。
+fn corrupt_backup_path(config_path: &Path) -> PathBuf {
+    let mut backup = config_path.as_os_str().to_os_string();
+    backup.push(".corrupt");
+    PathBuf::from(backup)
+}
+
 /// 获取默认配置文件路径
 pub fn get_persistent_root_dir() -> PathBuf {
     let device_root = PathBuf::from("/data");
@@ -1628,6 +1666,7 @@ pub fn set_init_script(script: String) -> Result<crate::models::InitScriptRespon
 mod tests {
     use super::{
         append_init_command_to_loader,
+        corrupt_backup_path,
         default_mqtt_nodes,
         default_topic_pub,
         default_topic_sub,
@@ -1638,9 +1677,11 @@ mod tests {
         MqttBrokerNode,
         MqttConfig,
         RestartConfig,
+        ScheduleAction,
         INIT_SCRIPT_LOADER_COMMAND,
         MAX_MQTT_NODES,
     };
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn append_init_command_once_for_new_loader() {
@@ -1703,6 +1744,112 @@ mod tests {
 
         assert!(!config.restart.schedule_enabled);
         assert!(!config.restart.low_memory_enabled);
+    }
+
+    // === 旧配置缺字段时必须能解析（升级兼容）===
+    //
+    // 这一组测试守护的是一条会导致用户配置永久丢失的路径：
+    // 旧 config.json 缺某个字段 → serde 报 missing field → ConfigManager::new
+    // 回落 AppConfig::default() → 用户在页面改任一开关 → setter 调 save()
+    // → 磁盘上的原配置被默认值覆盖。
+    //
+    // 因此任何新增到 AppConfig 及其嵌套结构体的字段，都必须带 #[serde(default)]。
+
+    #[test]
+    fn partial_webhook_config_parses_without_missing_field_error() {
+        // 早期版本写出的 webhook 段可能只有 headers/secret，没有 enabled/url 等
+        let config: AppConfig = serde_json::from_str(
+            r#"{"webhook":{"headers":{"X-Token":"t"},"secret":"s"}}"#,
+        )
+        .expect("部分 webhook 配置必须能解析，否则升级会清空用户配置");
+
+        assert_eq!(config.webhook.secret, "s");
+        assert_eq!(config.webhook.headers.get("X-Token").map(String::as_str), Some("t"));
+        // 缺失字段取 Default 值：开关关闭、转发开启
+        assert!(!config.webhook.enabled);
+        assert!(config.webhook.url.is_empty());
+        assert!(config.webhook.forward_sms);
+        assert!(config.webhook.forward_calls);
+    }
+
+    #[test]
+    fn empty_webhook_object_parses() {
+        // 极端情况：webhook 段存在但完全是空对象
+        let config: AppConfig = serde_json::from_str(r#"{"webhook":{}}"#)
+            .expect("空 webhook 对象必须能解析");
+        assert!(!config.webhook.enabled);
+        assert!(config.webhook.forward_sms);
+    }
+
+    #[test]
+    fn empty_sms_push_object_parses() {
+        let config: AppConfig = serde_json::from_str(r#"{"sms_push":{}}"#)
+            .expect("空 sms_push 对象必须能解析");
+        assert!(!config.sms_push.enabled);
+        assert!(config.sms_push.credential.is_empty());
+        assert!(config.sms_push.server_url.is_empty());
+    }
+
+    #[test]
+    fn schedule_entry_with_only_enabled_parses() {
+        // 旧计划项可能只写了 enabled，缺 time/action
+        let config: AppConfig = serde_json::from_str(
+            r#"{"schedule":{"entries":[{"enabled":true}]}}"#,
+        )
+        .expect("缺 time/action 的计划项必须能解析");
+
+        assert_eq!(config.schedule.entries.len(), 1);
+        assert!(config.schedule.entries[0].time.is_empty());
+        // action 落到枚举 Default（Reboot）
+        assert_eq!(config.schedule.entries[0].action, ScheduleAction::Reboot);
+    }
+
+    #[test]
+    fn schedule_sanitize_drops_entry_with_empty_time() {
+        // 兜底链条的第二环：缺 time 的计划项虽能解析，但必须被 sanitize 丢弃，
+        // 否则会留下一条「HH:MM 永远匹配不上」的僵尸计划。
+        let config: AppConfig = serde_json::from_str(
+            r#"{"schedule":{"entries":[{"enabled":true},{"enabled":true,"time":"08:30","action":"reboot"}]}}"#,
+        )
+        .expect("解析不应失败");
+
+        let sanitized = config.schedule.sanitize();
+        assert_eq!(sanitized.entries.len(), 1, "空 time 的计划项应被丢弃");
+        assert_eq!(sanitized.entries[0].time, "08:30");
+    }
+
+    #[test]
+    fn full_app_config_parses_from_empty_object() {
+        // 所有 14 个顶层段都缺失时也必须成功——这是「旧版本完全不认识新段」的场景
+        let config: AppConfig = serde_json::from_str("{}").expect("空对象必须能解析");
+        assert!(!config.mqtt.enabled);
+        assert!(!config.restart.schedule_enabled);
+        assert!(!config.net_health.enabled);
+        assert!(config.call_control.numbers.is_empty());
+    }
+
+    #[test]
+    fn unknown_future_fields_are_ignored_not_rejected() {
+        // 向前兼容：更新的版本写出的字段，旧二进制读取时应忽略而非报错。
+        // 若有人加上 #[serde(deny_unknown_fields)]，此测试会失败。
+        let config: AppConfig = serde_json::from_str(
+            r#"{"some_feature_from_v9":{"nested":true},"webhook":{"enabled":true}}"#,
+        )
+        .expect("未知字段必须被忽略");
+        assert!(config.webhook.enabled);
+    }
+
+    #[test]
+    fn corrupt_backup_path_appends_suffix_keeping_json_extension() {
+        // 备份名要保留 .json，人工抢救时能直接看出原格式
+        let backup = corrupt_backup_path(Path::new("/data/config.json"));
+        assert_eq!(backup, PathBuf::from("/data/config.json.corrupt"));
+
+        // 相对路径与无扩展名同样成立
+        assert_eq!(
+            corrupt_backup_path(Path::new("config.json")),
+            PathBuf::from("config.json.corrupt")
+        );
     }
 
     // === MQTT 节点 schema 迁移 ===

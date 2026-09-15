@@ -37,5 +37,27 @@ release/*
 userdata/home/root/udx710
 userdata/home/root/www/
 
+# 设备运行时数据：从真机提取 UBIFS 镜像时会带出来，含 webhook key、
+# 白名单号码、MQTT 用户名密码、鉴权 token 与短信/通话记录，绝不入库。
+userdata/**/config.json
+userdata/**/*.db
+userdata/**/*.sqlite
+userdata/**/*.sqlite3
+userdata/**/logs/
+userdata/**/log/
+
+# 任何位置的运行时配置与数据库（本地调试时可能落在项目根目录）
+config.json
+# 解析失败时备份的旧配置（同样含凭据，绝不入库 / 打包）
+*.corrupt
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 设备上的其它运行态数据（从真机提取时可能带出）
+net_health_state.json
+userdata/**/mode.cfg
+userdata/**/mode_tmp.cfg
 
 .device-dump/

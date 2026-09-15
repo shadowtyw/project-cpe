@@ -1367,7 +1367,7 @@ pub async fn dial_call(conn: &Connection, phone_number: &str) -> zbus::Result<Ca
             phone_number: phone_number.to_string(),
             state: "dialing".to_string(),
             direction: "outgoing".to_string(),
-            start_time: Some(chrono::Utc::now().to_rfc3339()),
+            start_time: Some(crate::utils::now_beijing_rfc3339()),
         })
     }).await
 }

@@ -24,7 +24,6 @@ import {
   Divider,
 } from '@mui/material'
 const PRESET_BROKERS = [
-  { host: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn', port: 8883, label: 'EMQX 杭州 (TLS)' },
   { host: 'broker.emqx.io', port: 1883, label: 'EMQX 公共 (明文)' },
   { host: 'broker-cn.emqx.io', port: 1883, label: 'EMQX 中国 (明文)' },
   { host: 'ssl://broker.emqx.io', port: 8883, label: 'EMQX 公共 (TLS)' },
@@ -148,17 +147,16 @@ export default function RemoteControl() {
   const [mqttConfig, setMqttConfig] = useState<MqttConfigResponse>({
     enabled: false,
     nodes: [
-      { host: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn', port: 8883, tls: true },
       { host: 'broker.emqx.io', port: 1883, tls: false },
       { host: 'broker-cn.emqx.io', port: 1883, tls: false },
     ],
     broker_list: [],
-    active_broker: 'ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn',
-    port: 8883,
+    active_broker: '',
+    port: 1883,
     topic_sub: 'cpe/{imei}/cmd',
     topic_pub: 'cpe/{imei}/status',
     auth_token: null,
-    tls: true,
+    tls: false,
     username: null,
     password: null,
   })

@@ -358,7 +358,7 @@ export default function ATConsolePage() {
                   const value = e.target.value.replace(/\D/g, '').slice(0, 15)
                   setCurrentImei(value)
                 }}
-                placeholder="867164060028129"
+                placeholder="123456789012345"
                 disabled={imeiLoading}
                 size="small"
                 inputProps={{ maxLength: 15, pattern: '[0-9]*' }}
