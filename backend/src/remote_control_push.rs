@@ -5,7 +5,10 @@
 
 use crate::config::{ConfigManager, RemoteControlPushConfig};
 use reqwest::Client;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// 轻量成功日志：仅记录 HTTP 状态码，不输出响应体 / payload，
@@ -17,6 +20,57 @@ fn summary_info_status(status: u16, tag: &str) {
 /// 轻量 HTTP 错误日志：仅记录状态码，不输出响应体。
 fn summary_warn_status(status: u16, tag: &str) {
     warn!("{tag}: status={}", status);
+}
+
+/// 全局推送防抖窗口：5 秒内语义相同的推送直接丢弃。
+///
+/// 现场问题：开机上线时「MQTT 已连接」与「响应 status 查询」两条通知在 400ms 内
+/// 接连触发，企业微信 Webhook 被连续打两次。这里按 payload 的语义键
+/// （`type` + `data.event`/`data.command`，忽略每发必变的 timestamp）在窗口内去重。
+const PUSH_DEDUP_WINDOW: Duration = Duration::from_secs(5);
+
+// 已发送推送的「语义键哈希 → 最近发送时间」映射。
+// `HashMap::new()` 不是 const fn，无法用 `Mutex::const_new` 初始化，
+// 故用项目内已广泛使用的 `lazy_static!`。
+lazy_static::lazy_static! {
+    static ref PUSH_HISTORY: Mutex<HashMap<u64, Instant>> = Mutex::new(HashMap::new());
+}
+
+/// 从推送 payload 提取稳定语义键的哈希，忽略 timestamp 等每发必变字段。
+///
+/// 解析不出 JSON 时（纯文本模板结果）退回对原文整体哈希。
+fn push_dedup_key(payload: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+        let ty = v["type"].as_str().unwrap_or("");
+        let event = v["data"]["event"]
+            .as_str()
+            .or(v["data"]["command"].as_str())
+            .unwrap_or("");
+        ty.hash(&mut hasher);
+        event.hash(&mut hasher);
+    } else {
+        payload.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// 判断 payload 是否在防抖窗口内重复；返回 `true` 表示应丢弃（重复）。
+async fn is_duplicate_push(payload: &str) -> bool {
+    let key = push_dedup_key(payload);
+    let mut guard = PUSH_HISTORY.lock().await;
+    let now = Instant::now();
+    // 顺手清理过期条目，防止映射无限增长（实际推送量极小，成本可忽略）。
+    guard.retain(|_, t| now.duration_since(*t) < PUSH_DEDUP_WINDOW);
+    if guard
+        .get(&key)
+        .is_some_and(|t| now.duration_since(*t) < PUSH_DEDUP_WINDOW)
+    {
+        return true;
+    }
+    guard.insert(key, now);
+    false
 }
 
 /// 远程遥控推送发送器
@@ -84,6 +138,15 @@ impl RemoteControlPushSender {
         config: &RemoteControlPushConfig,
         payload: &str,
     ) -> Result<(), String> {
+        // 防抖：5 秒内语义相同的推送直接丢弃，返回成功但不发请求、不打 info 日志。
+        if is_duplicate_push(payload).await {
+            debug!(
+                "Remote control push deduped (duplicate within {}s)",
+                PUSH_DEDUP_WINDOW.as_secs()
+            );
+            return Ok(());
+        }
+
         // 禁止打印 payload 全文：企业微信正文含大段硬件温度/配置文本，落盘会刷满
         // 根分区仅剩 ~24MB 的 Flash；URL 亦可能内嵌 token，统一按 debug 级且仅留主机名。
         debug!("Remote control push sending to {}", config.webhook_url);

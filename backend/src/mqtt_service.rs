@@ -446,14 +446,9 @@ impl MqttService {
         // 连接成功后存储客户端以供 publish 复用
         MQTT_CLIENT.lock().await.replace((client.clone(), topic_pub.clone()));
 
-        // 连接成功只发一条「已连接」的遥控推送通知；不再自动发布状态。
+        // 连接成功不主动推送任何通知（静默）：「已连接」日志已在 ConnAck 处理处记录。
         // 状态上报是纯响应式的：仅在收到 status 指令时按需采集发布，
-        // 避免每次重连都往 status 主题刷一份完整报告。
-        send_mqtt_notification(
-            "mqtt_connected",
-            "connect",
-            &format!("MQTT 已连接至 {}", endpoint),
-        );
+        // 避免每次重连都往 status 主题刷一份完整报告、并触发一次 Webhook/SMS 推送。
 
         // 事件循环：保持连接，处理下行指令 + 关闭检测。
         //
