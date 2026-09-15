@@ -55,12 +55,32 @@ import {
 import { api, getApiToken, setApiToken } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
 import { useRefreshInterval } from '../contexts/RefreshContext'
-import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider, RestartConfig, NetHealthConfig } from '../api/types'
+import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider, RestartConfig, NetHealthConfig, HealthCheck } from '../api/types'
 import { DEFAULT_SMS_TEMPLATE, DEFAULT_CALL_TEMPLATE, DEFAULT_SMS_PUSH_TITLE_TEMPLATE, DEFAULT_SMS_PUSH_BODY_TEMPLATE } from '../api/types'
 
 interface HealthStatus {
+  // ok=全部正常；degraded=后端可访问但有核心依赖异常；error=后端无响应
   status: string
   timestamp?: string
+  // 参与健康判定的组件明细（ofono / database）。MQTT 因 affects_health=false
+  // 不影响 status，但仍会列出来，避免「MQTT 连不上」被误读成「后端异常」。
+  checks?: HealthCheck[]
+}
+
+// 组件名与状态的中文映射，让健康卡片能指名到具体故障项
+const HEALTH_COMPONENT_LABELS: Record<string, string> = {
+  ofono: 'ofono (D-Bus)',
+  database: '数据库',
+  mqtt: 'MQTT',
+}
+
+const HEALTH_STATUS_LABELS: Record<string, string> = {
+  ok: '正常',
+  connected: '已连接',
+  unavailable: '不可达',
+  error: '异常',
+  disconnected: '未连接',
+  disabled: '已停用',
 }
 
 interface SmsPushProviderOption {
@@ -218,10 +238,13 @@ export default function ConfigurationPage() {
   const checkHealth = useCallback(async () => {
     setHealthLoading(true)
     try {
-      const response = await api.health()
+      // 用 healthDetail 而非 health：后者在 503 时直接抛错，丢掉 checks 明细，
+      // 页面只能笼统显示「系统异常」，看不出到底是哪个组件坏了。
+      const detail = await api.healthDetail()
       setHealthStatus({
-        status: response.status,
+        status: detail?.status ?? 'error',
         timestamp: new Date().toISOString(),
+        checks: detail?.checks,
       })
     } catch {
       setHealthStatus({
@@ -628,17 +651,42 @@ export default function ConfigurationPage() {
                   ) : (
                     <ErrorIcon sx={{ fontSize: 48, color: 'error.main' }} />
                   )}
-                  <Box>
+                  <Box sx={{ minWidth: 0, flex: 1 }}>
                     <Typography variant="h6" fontWeight={600}>
-                      {healthStatus?.status === 'ok' ? '系统正常' : '系统异常'}
+                      {/* 三态区分：ok=正常，error=后端无响应，degraded=后端在跑但某项依赖异常。
+                          旧实现只有「正常/异常」两态，MQTT 连不上时会误报「后端服务异常」，
+                          把排障方向指向一个其实健康的进程。 */}
+                      {healthStatus?.status === 'ok'
+                        ? '系统正常'
+                        : healthStatus?.status === 'error'
+                          ? '后端无响应'
+                          : '部分依赖异常'}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
                       后端服务: <Chip
-                        label={healthStatus?.status === 'ok' ? '运行中' : '异常'}
+                        label={healthStatus?.status === 'error' ? '无法访问' : '运行中'}
                         size="small"
-                        color={healthStatus?.status === 'ok' ? 'success' : 'error'}
+                        color={healthStatus?.status === 'error' ? 'error' : 'success'}
                       />
                     </Typography>
+                    {/* 逐组件明细：MQTT 未连接只在此显示为「未连接」，不再拖垮整体状态 */}
+                    {healthStatus?.checks && healthStatus.checks.length > 0 && (
+                      <Box display="flex" flexWrap="wrap" gap={0.5} sx={{ mt: 1 }}>
+                        {healthStatus.checks.map((check) => {
+                          // affects_health=false 的组件（MQTT）即使异常也不算系统异常
+                          const bad = check.affects_health !== false && check.status !== 'ok' && check.status !== 'connected'
+                          return (
+                            <Chip
+                              key={check.component}
+                              size="small"
+                              variant={bad ? 'filled' : 'outlined'}
+                              color={bad ? 'error' : 'default'}
+                              label={`${HEALTH_COMPONENT_LABELS[check.component] ?? check.component}: ${HEALTH_STATUS_LABELS[check.status] ?? check.status}`}
+                            />
+                          )
+                        })}
+                      </Box>
+                    )}
                     {healthStatus?.timestamp && (
                       <Typography variant="caption" color="text.secondary">
                         上次检查: {new Date(healthStatus.timestamp).toLocaleTimeString()}

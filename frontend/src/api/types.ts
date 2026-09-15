@@ -15,6 +15,22 @@ export interface ApiResponse<T> {
   data?: T
 }
 
+// /api/health 的单组件检查结果
+export interface HealthCheck {
+  component: string // ofono / database / mqtt
+  status: string // ok / unavailable / error / connected / disconnected / disabled
+  // 该组件是否参与整体健康判定。MQTT 为 false：broker 是外部服务，
+  // 它不可达不代表本后端进程有问题，因此不应让页面报「系统异常」。
+  affects_health?: boolean
+}
+
+// /api/health 响应体（注意：不走 ApiResponse 包装，是裸 JSON）
+export interface HealthDetail {
+  status?: string // ok / degraded
+  version?: string
+  checks?: HealthCheck[]
+}
+
 // 设备信息（来自 D-Bus Modem 接口）
 export interface DeviceInfo {
   imei: string // IMEI 设备序列号

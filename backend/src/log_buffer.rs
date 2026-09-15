@@ -161,6 +161,34 @@ pub fn clear() {
     buffer.clear();
 }
 
+/// 自己通过 `log_entry!` 显式写缓冲的模块，其 **info/debug 级** tracing 事件不再重复入缓冲。
+///
+/// 背景：`mqtt_service.rs` 里每个关键事件都成对出现——一行 `tracing::info!`（英文，
+/// 走 fmt layer 到 stdout，同时被本 Layer 按 target 推导出模块名 `mqtt_service`）
+/// 和一行 `log_entry!(info, "mqtt", ...)`（中文，显式写入模块名 `mqtt`）。
+/// 两行都进缓冲，于是 Web 日志页里每条事件显示两遍，排障时要读双倍的内容。
+///
+/// 这里按 target 末段过滤掉前者的 info/debug。保留 tracing 调用本身是有意的：
+/// 它仍然输出到 stdout，`RUST_LOG=debug` 时能在串口/控制台看到英文细节
+/// （`log_entry!` 只写缓冲，不经过 tracing，串口上是看不到的），
+/// 只是不再占用 Web 页面的缓冲。
+///
+/// **warn/error 一律不过滤**：宁可让这两级在页面上出现中英各一条，也不能冒
+/// 「将来有人在 mqtt_service.rs 加了 `error!` 却忘了配 `log_entry!`，于是这条错误
+/// 在 Web 页面上彻底消失」的风险。设备无人值守，看不见的错误比重复的错误危险得多。
+/// 重复的代价只是多一行噪音，丢失的代价是排障时完全没有线索。
+///
+/// 新增模块若同样双写，把它的 target 末段加进来即可。
+const SELF_LOGGING_MODULES: &[&str] = &["mqtt_service"];
+
+/// 判断一条 tracing 事件是否应因「双写去重」而被丢弃。
+///
+/// 抽成纯函数是为了能直接单元测试这条规则，不必在测试里搭一套 tracing subscriber。
+fn should_dedup(module: &str, level: &str) -> bool {
+    let is_routine = level == "info" || level == "debug";
+    is_routine && SELF_LOGGING_MODULES.contains(&module)
+}
+
 /// tracing Layer：把进程的 tracing 日志转发到内存环形缓冲，供“系统日志”页面查看。
 ///
 /// 使用 `with_target(false)` 后 `target` 为空；这里从事件元数据的 `target` 提取模块名，
@@ -179,9 +207,6 @@ where
         let metadata = event.metadata();
         let level = metadata.level().as_str().to_lowercase();
 
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
-
         // 模块名取 target 的最后一段（如 "udx710::dbus" -> "dbus"），既保证页面可读，
         // 又兼容 RUST_LOG 开启后 target 为空的场景。
         let module = metadata
@@ -191,6 +216,15 @@ where
             .filter(|s| !s.is_empty())
             .unwrap_or("app")
             .to_string();
+
+        // 双写模块的 info/debug 跳过，避免与它们自己的 log_entry! 重复；
+        // warn/error 保留（理由见 SELF_LOGGING_MODULES 的文档）
+        if should_dedup(&module, &level) {
+            return;
+        }
+
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
 
         push(&level, &module, visitor.message);
     }
@@ -347,6 +381,31 @@ mod tests {
         // 空字符串 / 纯空白不应把结果清空
         assert!(!super::snapshot_filtered(0, 500, Some("")).is_empty());
         assert!(!super::snapshot_filtered(0, 500, Some("   ")).is_empty());
+    }
+
+    /// 双写去重规则：mqtt_service 的 info/debug 丢弃（避免与 log_entry! 重复），
+    /// 但 warn/error 必须保留，且未登记的模块完全不受影响。
+    #[test]
+    fn self_logging_module_routine_events_are_deduped() {
+        use super::should_dedup;
+
+        // info/debug：丢弃
+        assert!(should_dedup("mqtt_service", "info"));
+        assert!(should_dedup("mqtt_service", "debug"));
+
+        // warn/error：保留。宁可页面上中英各一条，也不能让将来漏配 log_entry! 的
+        // 错误在 Web UI 上彻底消失——无人值守设备看不见错误比重复错误危险得多。
+        assert!(!should_dedup("mqtt_service", "warn"));
+        assert!(!should_dedup("mqtt_service", "error"));
+
+        // 未登记为双写的模块：任何等级都不过滤
+        for level in ["debug", "info", "warn", "error"] {
+            assert!(!should_dedup("dbus", level), "dbus/{level} 不应被过滤");
+            assert!(
+                !should_dedup("mqtt", level),
+                "log_entry! 写的 mqtt 模块不应被过滤: {level}"
+            );
+        }
     }
 
     #[test]

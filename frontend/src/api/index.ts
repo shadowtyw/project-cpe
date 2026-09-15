@@ -10,6 +10,7 @@
  */
 import type {
   ApiResponse,
+  HealthDetail,
   DeviceInfo,
   SimInfo,
   NetworkInfo,
@@ -192,9 +193,28 @@ export function backoffRemainingMs(): number {
 
 // API 类
 class UDX710API {
-  // 健康检查
-  async health() {
-    return request<{ status: string; message: string; version: string }>('/health')
+  // 健康检查（带明细）：/api/health 在不健康时返回 503，通用 request() 会直接抛错，
+  // 从而丢掉 body 里的 checks 明细，页面只能显示「系统异常」却不知道是哪一项坏了。
+  // 这里容忍非 2xx 并解析响应体，让 UI 能指名到具体组件（ofono / database）。
+  // MQTT 连接状态也在 checks 里，但后端标记为 affects_health=false，仅作展示。
+  //
+  // 注：原先还有一个用 request() 的 health()，它拿不到 checks，已被本方法取代并删除。
+  async healthDetail(): Promise<HealthDetail | null> {
+    const token = typeof window === 'undefined' ? '' : getApiToken()
+    try {
+      const response = await fetch(`${API_BASE}/health`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      })
+      const body = (await response.json()) as HealthDetail
+      // 401/500 等场景 body 可能不含 status，用 HTTP 状态兜底
+      return { ...body, status: body.status ?? (response.ok ? 'ok' : 'degraded') }
+    } catch {
+      // 网络层失败（后端没起来）：返回 null，由 UI 显示「后端无响应」
+      return null
+    }
   }
 
   // 设备信息（IMEI、制造商、型号等）

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
@@ -17,6 +17,12 @@ use zbus::Connection;
 /// 但本模块的关键事件通过 `log_entry!` 显式写入 `"mqtt"`，使前端 MQTT 页可以只筛选
 /// 这一类日志，与系统日志页的全量视图区分开。
 const LOG_MODULE: &str = "mqtt";
+
+/// MQTT 单包大小上限（收/发同值），单位字节。
+///
+/// 必须显式设置：rumqttc 的默认值是 10KB，而完整设备状态报告 JSON 约 10.3KB，
+/// 刚好越线，导致发布状态时直接报错并断开重连（表现为「MQTT 无法连接」）。
+const MAX_PACKET_SIZE: usize = 64 * 1024;
 
 // ── 通知发送器 trait（由 main.rs 注入） ──────────────────────
 
@@ -55,7 +61,7 @@ fn send_mqtt_notification(event: &str, command: &str, message: &str) {
 }
 
 /// MQTT 运行时状态
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MqttRuntimeState {
     /// 配置里是否启用（关闭后 UI 应显示「已停用」而非「未连接」）
     pub enabled: bool,
@@ -66,20 +72,6 @@ pub struct MqttRuntimeState {
     pub last_command: Option<String>,
     pub error_message: Option<String>,
     pub broker_index: usize,
-}
-
-impl Default for MqttRuntimeState {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            connected: false,
-            current_broker: String::new(),
-            last_heartbeat: None,
-            last_command: None,
-            error_message: None,
-            broker_index: 0,
-        }
-    }
 }
 
 /// 全局运行时状态
@@ -171,6 +163,10 @@ impl MqttService {
         let nodes = &config.nodes;
         let mut broker_index = 0usize;
         let mut consecutive_failures: u32 = 0;
+        // 会话中断的独立退避计数：与 consecutive_failures 分开，
+        // 因为「连上过又掉线」不代表节点不可达，退避上限也应更短（30s vs 60s）。
+        // 每次成功进入事件循环后归零，避免长期运行时退避一路涨到上限。
+        let mut session_retries: u32 = 0;
 
         // 从 active_broker 对应的节点开始
         if let Some(idx) = nodes.iter().position(|n| n.display() == config.active_broker) {
@@ -207,6 +203,7 @@ impl MqttService {
                 state.error_message = None;
             }).await;
 
+            let session_started = Instant::now();
             match self.connect_broker(node, &client_id, config).await {
                 BrokerOutcome::Disabled => {
                     // 连接期间被关闭，teardown 已在 connect_broker 内完成
@@ -221,6 +218,40 @@ impl MqttService {
                     consecutive_failures = 0;
                     debug!("MQTT connection to {endpoint} closed gracefully, trying next");
                     broker_index += 1;
+                }
+                BrokerOutcome::SessionLost(e) => {
+                    // 连上过又掉线：节点是可达的，原地重连同一个节点即可。
+                    // 这里既不改 broker_index（不轮换到别的节点），
+                    // 也不累加 consecutive_failures（不是「全部节点不可达」），
+                    // 只做一个短的、仍受上限约束的退避，避免掉线时疯狂重连。
+                    // 掉线常见原因：broker 侧踢掉旧 client_id、网络抖动、
+                    // 或发布超限被 broker 断开。
+                    consecutive_failures = 0;
+                    // 会话如果撑过 60s，说明链路本身是好的，这次掉线按「偶发」处理：
+                    // 退避计数归零，下次仍从 3s 起。否则长期运行的设备每掉一次线
+                    // 就把退避推高一档，最终固定在 30s，重连越来越慢。
+                    if session_started.elapsed() >= Duration::from_secs(60) {
+                        session_retries = 0;
+                    }
+                    let wait = min(
+                        Duration::from_secs(3)
+                            .saturating_mul(2u32.saturating_pow(session_retries.min(5))),
+                        Duration::from_secs(30),
+                    );
+                    session_retries += 1;
+                    warn!("MQTT session lost on {endpoint}: {e}; reconnecting in {}s", wait.as_secs());
+                    crate::log_entry!(
+                        warn,
+                        LOG_MODULE,
+                        "会话中断，{}秒后重连同一节点：{}",
+                        wait.as_secs(),
+                        endpoint
+                    );
+                    if self.sleep_responsive_to_disable(wait).await {
+                        Self::teardown("配置已关闭").await;
+                        return;
+                    }
+                    // 不递增 broker_index：下一轮循环会重连同一个节点
                 }
                 BrokerOutcome::Failed(e) => {
                     let err_msg = format!("{endpoint}: {e}");
@@ -299,6 +330,13 @@ impl MqttService {
         let mut mqttoptions = MqttOptions::new(client_id, host.clone(), port);
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_clean_session(true);
+        // rumqttc 默认单包上限只有 10KB，而完整状态报告 JSON 就有 10KB 出头，
+        // 会在发布时被本地拦下并报 "Cannot send packet of size ... greater than
+        // the broker's maximum packet size"——注意这条错误文案里的 "broker's" 是
+        // rumqttc 的措辞误导，实际比的是我们自己的 max_outgoing_packet_size。
+        // 放开到 64KB：MQTT 5 允许的最大值是 256MB，公共云 broker（EMQX 等）
+        // 普遍在 1MB 量级，64KB 既够用又不至于把单包做大到超时。
+        mqttoptions.set_max_packet_size(MAX_PACKET_SIZE, MAX_PACKET_SIZE);
 
         // TLS
         if use_tls {
@@ -422,13 +460,19 @@ impl MqttService {
                         Err(e) => {
                             let err_msg = e.to_string();
                             error!("MQTT event loop error on {endpoint}: {err_msg}");
-                            crate::log_entry!(error, LOG_MODULE, "事件循环错误（{}）：{}", endpoint, err_msg);
+                            crate::log_entry!(error, LOG_MODULE, "连接中断（{}）：{}", endpoint, err_msg);
                             MQTT_CLIENT.lock().await.take();
+                            // 克隆进闭包：err_msg 还要作为 SessionLost 的载荷返回
+                            let state_err = err_msg.clone();
                             Self::update_state_static(|state| {
                                 state.connected = false;
-                                state.error_message = Some(err_msg);
+                                state.error_message = Some(state_err);
                             }).await;
-                            return BrokerOutcome::Failed(e.to_string());
+                            // 注意：走到这里说明 ConnAck 早已收到、订阅也已成功，
+                            // 这是「会话中断」而不是「节点不可达」。必须用独立变体，
+                            // 否则上层会按连接失败累加退避，日志也会误报
+                            // 「节点连接失败 / 全部节点不可达」（节点其实是通的）。
+                            return BrokerOutcome::SessionLost(err_msg);
                         }
                     }
                 }
@@ -511,8 +555,12 @@ enum BrokerOutcome {
     ConfigChanged,
     /// 已连接后被 broker 正常断开（应尝试下一节点，重置退避）
     Closed,
-    /// 连接或事件循环出错
+    /// 连接阶段失败：从没收到 ConnAck，节点可能确实不可达 → 轮换到下一节点并累加退避
     Failed(String),
+    /// 会话中断：ConnAck 早已收到、订阅成功，是运行期掉线而非「节点不可达」。
+    /// 必须与 `Failed` 区分——两者混用会让上层把一个明明连得上的节点
+    /// 报成「节点连接失败 / 全部节点不可达」，并无谓地轮换到别的节点。
+    SessionLost(String),
 }
 
 /// 在独立 task 中处理 MQTT 指令（由 EventLoop spawn 调用）。
@@ -665,7 +713,7 @@ pub fn is_mqtt_enabled() -> bool {
 /// 检查 MQTT 是否已连接
 pub async fn is_mqtt_connected() -> bool {
     let state_guard = MQTT_STATE.lock().await;
-    state_guard.as_ref().map_or(false, |s| s.connected)
+    state_guard.as_ref().is_some_and(|s| s.connected)
 }
 
 #[cfg(test)]
@@ -681,6 +729,23 @@ mod tests {
             topic_pub: "cpe/{imei}/status".to_string(),
             ..MqttConfig::default()
         }
+    }
+
+    /// 手写 `Default` 换成 `#[derive(Default)]` 后的等价性保障：
+    /// 初始状态必须是「未启用 + 未连接 + 无 broker」，
+    /// 否则 UI 会在进程刚起来时显示一个假的已连接状态。
+    #[test]
+    fn runtime_state_default_is_fully_disconnected() {
+        use super::MqttRuntimeState;
+
+        let s = MqttRuntimeState::default();
+        assert!(!s.enabled, "默认不应显示为已启用");
+        assert!(!s.connected, "默认不应显示为已连接");
+        assert!(s.current_broker.is_empty(), "默认不应有 broker");
+        assert!(s.error_message.is_none());
+        assert!(s.last_heartbeat.is_none());
+        assert!(s.last_command.is_none());
+        assert_eq!(s.broker_index, 0);
     }
 
     #[test]
@@ -771,6 +836,184 @@ mod tests {
             ..base_config()
         };
         assert_ne!(connection_signature(&two), connection_signature(&swapped));
+    }
+
+    /// 回归测试：rumqttc 默认单包上限 10KB，而完整状态报告 JSON 约 10.3KB，
+    /// 会刚好越线导致发布失败 + 断连重连（现场表现为「MQTT 无法连接」）。
+    /// 这里断言 MAX_PACKET_SIZE 明确大于实测报告体积，且留足余量。
+    ///
+    /// 用真实采集器的序列化结果而非硬编码字节数，这样报告结构以后变大时
+    /// 测试会跟着变严，不会退化成一句永远为真的断言。
+    #[test]
+    fn max_packet_size_exceeds_realistic_report() {
+        use super::MAX_PACKET_SIZE;
+        use crate::device_report::DeviceReport;
+        use crate::models::{
+            AirplaneModeResponse, CpuLoadInfo, DeviceInfoResponse, DiskInfo, IpAddress,
+            MemoryInfo, NetworkInfoResponse, NetworkInterfaceInfo, ServingCell, SystemInfo,
+            ThermalZone,
+        };
+
+        // 构造一份与现场同量级的报告。体积主要来自两块：
+        // 1) 可选块全部填充（device/network/serving_cell/airplane/memory/cpu_load/system）
+        //    ——真机上这些都有值，空报告只有 2.5KB，远不足以复现越线
+        // 2) 9 个温度传感器（与实测日志的 *-thmzone 数量一致）+ 多网卡多磁盘
+        let report = DeviceReport {
+            timestamp: "2026-09-14T09:24:02.051140786+00:00".to_string(),
+            app_version: "3.6.2".to_string(),
+            git_commit: "95c1a2d".to_string(),
+            device: Some(DeviceInfoResponse {
+                imei: "868659060480591".to_string(),
+                manufacturer: "Fake Modem Manufacturer".to_string(),
+                model: "Fake Modem Model".to_string(),
+                revision: Some("UDX710_V1.0.0_B05".to_string()),
+                online: true,
+                powered: true,
+            }),
+            network: Some(NetworkInfoResponse {
+                operator_name: "China Telecom".to_string(),
+                registration_status: "registered".to_string(),
+                technology_preference: "NR 5G/LTE auto".to_string(),
+                signal_strength: 41,
+                mcc: Some("460".to_string()),
+                mnc: Some("11".to_string()),
+            }),
+            serving_cell: Some(ServingCell {
+                tech: "nr".to_string(),
+                cell_id: 0,
+                tac: 13_607_681,
+            }),
+            signal_strength: Some(41),
+            data_connected: Some(true),
+            airplane: Some(AirplaneModeResponse {
+                enabled: false,
+                ..AirplaneModeResponse::default()
+            }),
+            memory: Some(MemoryInfo {
+                total_bytes: 206_569_472,
+                available_bytes: 105_906_176,
+                available_percent: 51.0,
+                free_bytes: 74_973_184,
+                cached_bytes: 32_505_856,
+                buffers_bytes: 1_048_576,
+                reclaimable_bytes: 31_457_280,
+                buff_cache_bytes: 32_505_856,
+                shared_bytes: 4_194_304,
+                process_non_reclaimable_used_bytes: 68_157_440,
+                available_estimated: false,
+                available_source: "kernel".to_string(),
+                ..MemoryInfo::default()
+            }),
+            cpu_usage_percent: Some(42.9),
+            cpu_load: Some(CpuLoadInfo {
+                load_1min: 2.30,
+                load_5min: 1.13,
+                load_15min: 0.44,
+                core_count: 2,
+                load_percent: 115.0,
+            }),
+            thermal: (0..9)
+                .map(|i| ThermalZone {
+                    zone: format!("thermal_zone{i}"),
+                    sensor_type: format!("sensor{i}-thmzone"),
+                    temperature: 41.2,
+                })
+                .collect(),
+            uptime_seconds: Some(131),
+            disks: (0..6)
+                .map(|i| DiskInfo {
+                    mount_point: format!("/mnt/data{i}"),
+                    fs_type: "ubifs".to_string(),
+                    total_bytes: 1_000_000_000,
+                    used_bytes: 470_000_000,
+                    available_bytes: 530_000_000,
+                    used_percent: 47.0,
+                })
+                .collect(),
+            interfaces: (0..8)
+                .map(|i| NetworkInterfaceInfo {
+                    name: format!("eth{i}"),
+                    status: "up".to_string(),
+                    mac_address: Some("aa:bb:cc:dd:ee:ff".to_string()),
+                    mtu: 1500,
+                    // 每块网卡带 IPv4 + IPv6，贴近真机（IPv6 通常有多个地址）
+                    ip_addresses: vec![
+                        IpAddress {
+                            address: "10.132.240.44".to_string(),
+                            prefix_len: 24,
+                            ip_type: "ipv4".to_string(),
+                            scope: "private".to_string(),
+                        },
+                        IpAddress {
+                            address: "fe80::a8bb:ccff:fedd:eeff".to_string(),
+                            prefix_len: 64,
+                            ip_type: "ipv6".to_string(),
+                            scope: "link-local".to_string(),
+                        },
+                        IpAddress {
+                            address: "2409:8934:1234:5678::1".to_string(),
+                            prefix_len: 64,
+                            ip_type: "ipv6".to_string(),
+                            scope: "public".to_string(),
+                        },
+                    ],
+                    rx_bytes: 123_456_789,
+                    tx_bytes: 987_654_321,
+                    rx_packets: 100_000,
+                    tx_packets: 90_000,
+                    rx_errors: 0,
+                    tx_errors: 0,
+                })
+                .collect(),
+            system: Some(SystemInfo {
+                sysname: "Linux".to_string(),
+                nodename: "udx710-cpe".to_string(),
+                release: "4.14.98".to_string(),
+                version: "#1 SMP PREEMPT aarch64".to_string(),
+                machine: "aarch64".to_string(),
+                domainname: String::new(),
+                full_info: "Linux udx710-cpe 4.14.98 #1 SMP PREEMPT aarch64 GNU/Linux".to_string(),
+            }),
+        };
+
+        let payload = serde_json::to_string(&report).expect("报告应可序列化");
+        let size = payload.len();
+
+        // ── 断言 1：修复本身成立 ───────────────────────────────
+        // 必须明显超过 rumqttc 的 10KB 默认上限，否则等于没修。
+        const RUMQTTC_DEFAULT_LIMIT: usize = 10 * 1024;
+        assert!(
+            MAX_PACKET_SIZE > RUMQTTC_DEFAULT_LIMIT,
+            "MAX_PACKET_SIZE={MAX_PACKET_SIZE} 未超过 rumqttc 默认的 {RUMQTTC_DEFAULT_LIMIT}B，修复无效"
+        );
+
+        // ── 断言 2：对现场实测体积留有足够余量 ─────────────────
+        // 用户现场日志里的失败包体为 10306 / 10315 / 10324 字节（真机网卡、
+        // 磁盘、传感器数量都比本测试构造的多）。直接拿这个实测最大值做基准，
+        // 而不是试图在测试里精确复刻真机的接口列表——复刻不出来，硬凑数量
+        // 只会得到一个「看起来像」但守不住任何东西的假基准。
+        // 要求至少 4 倍余量：现场 10.3KB × 4 ≈ 41KB < 64KB，成立；
+        // 若将来有人把上限改回 16KB，这条会立刻失败。
+        const FIELD_OBSERVED_MAX_PACKET: usize = 10_324;
+        assert!(
+            MAX_PACKET_SIZE >= FIELD_OBSERVED_MAX_PACKET * 4,
+            "MAX_PACKET_SIZE={MAX_PACKET_SIZE}B 相对现场实测最大包体 \
+             {FIELD_OBSERVED_MAX_PACKET}B 余量不足 4 倍，报告再加字段就会越线"
+        );
+
+        // ── 断言 3：本测试构造的报告确实是个「非平凡」的载荷 ──
+        // 防止 fixture 哪天被改瘦到几百字节，导致上面两条断言空转。
+        // 6KB 是构造版报告的实际量级，留 5KB 阈值给字段增减的波动空间。
+        assert!(
+            size > 5 * 1024,
+            "构造的报告只有 {size}B，太小了——它必须是一份填满了可选块、\
+             传感器、磁盘与网卡的完整报告，否则断言 1/2 就失去了参照物"
+        );
+        // 构造版报告必须放得下（它比真机的瘦，这是必然的，但也要显式守住）
+        assert!(
+            size < MAX_PACKET_SIZE,
+            "报告体积 {size}B 超过上限 {MAX_PACKET_SIZE}B"
+        );
     }
 }
 

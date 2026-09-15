@@ -488,12 +488,19 @@ pub async fn get_airplane_mode_handler(State(conn): State<Arc<Connection>>) -> i
 
 /// GET /api/health - Health check endpoint
 ///
-/// 探测三项核心依赖的真实健康状态：
+/// 探测本进程自身的核心依赖：
 /// 1. ofono D-Bus 是否可达
 /// 2. SQLite 数据库是否可读写
-/// 3. MQTT broker 是否已连接（如启用）
 ///
-/// 任意一项不健康返回 503，而非 200 OK 假阳性。
+/// 这两项不健康返回 503，而非 200 OK 假阳性。
+///
+/// MQTT 连接状态**不影响**整体健康判定，只作为 `checks` 里的一项明细返回：
+/// broker 是外部第三方服务，它不可达并不代表本后端进程有问题——进程仍在正常
+/// 提供 HTTP 服务、D-Bus 与数据库都是好的。把它算成不健康会造成两个具体危害：
+/// - Web 页面显示「系统异常 / 后端服务异常」，与事实相反，误导排障方向
+/// - 若有人拿这个端点做存活探测，503 会让 supervisor 无限重启一个本来健康的进程
+///
+/// MQTT 的真实连接状态由 `/api/mqtt/status` 和 MQTT 页面的三态指示卡提供。
 pub async fn health_check(
     State(conn): State<Arc<Connection>>,
     State(db): State<Arc<crate::db::Database>>,
@@ -521,17 +528,14 @@ pub async fn health_check(
         healthy = false;
     }
 
-    // 3. MQTT 连接状态（已启用但未连接视为不健康）
+    // 3. MQTT 连接状态（仅明细，不参与 healthy 判定，理由见函数文档）
     let mqtt_enabled = crate::mqtt_service::is_mqtt_enabled();
     let mqtt_connected = crate::mqtt_service::is_mqtt_connected().await;
-    let mqtt_healthy = !mqtt_enabled || mqtt_connected;
     checks.push(json!({
         "component": "mqtt",
-        "status": if mqtt_connected { "connected" } else if mqtt_enabled { "disconnected" } else { "disabled" }
+        "status": if mqtt_connected { "connected" } else if mqtt_enabled { "disconnected" } else { "disabled" },
+        "affects_health": false
     }));
-    if !mqtt_healthy {
-        healthy = false;
-    }
 
     let status_code = if healthy { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     let body = json!({
