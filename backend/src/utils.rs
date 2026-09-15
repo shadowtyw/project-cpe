@@ -353,6 +353,41 @@ pub fn parse_neighbor_cells(tech: &str, parsed_data: &[Vec<String>]) -> Vec<Cell
     result
 }
 
+/// 读取 sysfs / procfs 中的小文件到栈上定长缓冲，避免堆分配。
+///
+/// `fs::read_to_string` 对每个文件都要走 openat → newfstatat → read → close 四趟系统调用，
+/// 其中 fstat 仅用于给 `read_to_end` 提供容量提示，对单值 sysfs 文件纯属浪费；此外还要在堆上
+/// 分配一个 String。这里改用固定栈缓冲一次 read 完成，系统调用少一趟、零堆分配。
+///
+/// 收益集中在循环里：温度传感器每 zone 两个文件、网卡计数器每次采样每接口两个文件，
+/// 单次 `/api/stats` 可省下数十次 fstat 与等量的 String 分配。
+fn read_small_file(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+
+    // sysfs 单值文件都只有几十字节；256 足够覆盖 type 字符串与所有计数器。
+    let mut buf = [0u8; 256];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = file.read(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf[..n]).trim().to_string())
+}
+
+/// 同 [`read_small_file`]，但直接解析成 u64，全程零堆分配。
+///
+/// 用于网卡 rx/tx 字节计数这类纯数字文件。读不满、非 UTF-8、非整数一律返回 `None`，
+/// 由调用方决定容错策略（与原先 `Result` 版本的失败语义一致）。
+fn read_small_u64(path: &std::path::Path) -> Option<u64> {
+    use std::io::Read;
+
+    let mut buf = [0u8; 64];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = file.read(&mut buf).ok()?;
+    std::str::from_utf8(&buf[..n])
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
 /// 读取全部温度传感器数据。
 ///
 /// 遍历 `/sys/class/thermal/thermal_zone*`，读取 `type` 与 `temp`（毫摄氏度）。
@@ -373,14 +408,11 @@ pub fn read_temperature_sensors() -> Vec<crate::models::ThermalZone> {
             if name.starts_with("thermal_zone") {
                 let zone_path = entry.path();
 
-                let sensor_type = fs::read_to_string(zone_path.join("type"))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
+                let sensor_type = read_small_file(&zone_path.join("type")).unwrap_or_default();
 
                 // temp 缺失或非整数时按 0.0 处理，避免整份报告被一个坏传感器拖垮
-                let temperature = fs::read_to_string(zone_path.join("temp"))
-                    .ok()
-                    .and_then(|s| s.trim().parse::<i32>().ok())
+                let temperature = read_small_file(&zone_path.join("temp"))
+                    .and_then(|s| s.parse::<i32>().ok())
                     .map(|t| t as f64 / 1000.0)
                     .unwrap_or(0.0);
 
@@ -770,23 +802,16 @@ pub fn now_beijing_format(fmt: &str) -> String {
 /// # Returns
 /// (rx_bytes, tx_bytes)
 pub fn read_interface_stats(interface: &str) -> Result<(u64, u64), String> {
-    use std::fs;
-    
+    use std::path::Path;
+
     let rx_path = format!("/sys/class/net/{}/statistics/rx_bytes", interface);
     let tx_path = format!("/sys/class/net/{}/statistics/tx_bytes", interface);
-    
-    let rx_bytes = fs::read_to_string(&rx_path)
-        .map_err(|e| format!("Failed to read {}: {}", rx_path, e))?
-        .trim()
-        .parse::<u64>()
-        .map_err(|e| format!("Failed to parse rx_bytes: {}", e))?;
-    
-    let tx_bytes = fs::read_to_string(&tx_path)
-        .map_err(|e| format!("Failed to read {}: {}", tx_path, e))?
-        .trim()
-        .parse::<u64>()
-        .map_err(|e| format!("Failed to parse tx_bytes: {}", e))?;
-    
+
+    let rx_bytes = read_small_u64(Path::new(&rx_path))
+        .ok_or_else(|| format!("Failed to read rx_bytes for {}", interface))?;
+    let tx_bytes = read_small_u64(Path::new(&tx_path))
+        .ok_or_else(|| format!("Failed to read tx_bytes for {}", interface))?;
+
     Ok((rx_bytes, tx_bytes))
 }
 
@@ -826,19 +851,28 @@ pub fn get_active_interfaces() -> Result<Vec<String>, String> {
 /// 从 /proc/stat 解析 CPU 时间
 /// 返回 (total, idle)
 fn parse_cpu_stat() -> Result<(u64, u64), String> {
-    use std::fs;
-    
-    let stat = fs::read_to_string("/proc/stat")
+    use std::io::Read;
+    use std::path::Path;
+
+    // 只需要首行聚合 "cpu " 行（user nice system idle iowait irq softirq steal guest…），
+    // 一次定长栈读即可覆盖，避免 read_to_string 把整份含 per-CPU 行的 /proc/stat 读进堆，
+    // 再逐行扫描。单次 /api/stats 会调用本函数两次（200ms 采样窗口首尾各一次）。
+    let mut buf = [0u8; 512];
+    let mut file = std::fs::File::open(Path::new("/proc/stat"))
+        .map_err(|e| format!("Failed to open /proc/stat: {}", e))?;
+    let n = file
+        .read(&mut buf)
         .map_err(|e| format!("Failed to read /proc/stat: {}", e))?;
-    
-    for line in stat.lines() {
+    let head = String::from_utf8_lossy(&buf[..n]);
+
+    for line in head.lines() {
         if line.starts_with("cpu ") {
             let values: Vec<u64> = line
                 .split_whitespace()
                 .skip(1) // 跳过 "cpu"
                 .filter_map(|s| s.parse::<u64>().ok())
                 .collect();
-            
+
             if values.len() >= 4 {
                 // user + nice + system + idle + iowait + irq + softirq + steal
                 let user = values.first().copied().unwrap_or(0);
@@ -849,15 +883,15 @@ fn parse_cpu_stat() -> Result<(u64, u64), String> {
                 let irq = values.get(5).copied().unwrap_or(0);
                 let softirq = values.get(6).copied().unwrap_or(0);
                 let steal = values.get(7).copied().unwrap_or(0);
-                
+
                 let total = user + nice + system + idle + iowait + irq + softirq + steal;
                 let idle_total = idle + iowait;
-                
+
                 return Ok((total, idle_total));
             }
         }
     }
-    
+
     Err("Failed to parse /proc/stat".to_string())
 }
 

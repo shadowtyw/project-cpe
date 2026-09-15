@@ -582,32 +582,49 @@ fn connection_signature(config: &MqttConfig) -> String {
 ///
 /// 开机竞态：`data_connection_watchdog` 刚把 ofono 的 context 标成 `Active=true` 时，
 /// 底层 DNS 解析与默认路由往往还没稳定，此时直接发起 MQTT/TLS 握手会卡在
-/// `Network timeout`（现场约 59s）。这里先用「DNS 解析 + 短超时 TCP connect」探一次
-/// broker 的 host:port：每 2s 重试、最多 5 次，链路确认可达才放行正式连接。
+/// `Network timeout`（现场 57~59s）。这里先用「轻量 DNS + 短超时 TCP connect」探一次
+/// broker 的 host:port，链路确认可达才放行正式连接——探测成功前**绝不**触碰底层
+/// rumqttc connect。
+///
+/// 关键：DNS 解析本身也可能在 `getaddrinfo` 上长时间不返回，必须用
+/// `tokio::time::timeout` 硬顶（单次 1.5s），否则又退回「操作系统超时」的老路。
+/// 失败后休眠 2s 再试，最多 5 次，把每次连接前的探测成本压在 ~17s 内。
 ///
 /// 显式取 host:port 而不只 ping 公网 IP：同时验证了 DNS 可用（设备可能指向一台
 /// 尚未就绪的自建 DNS），以及到 broker 的端到端路由连通。
 async fn probe_broker_reachable(node: &MqttBrokerNode) -> Result<(), String> {
+    const PROBE_DNS_TIMEOUT: Duration = Duration::from_millis(1500);
+    const PROBE_TCP_TIMEOUT: Duration = Duration::from_secs(2);
     const PROBE_ATTEMPTS: u32 = 5;
     const PROBE_INTERVAL: Duration = Duration::from_secs(2);
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
     let (host, _) = node.resolve();
     let port = node.effective_port();
 
     let mut last_err = String::from("无法解析任何地址");
     for attempt in 0..PROBE_ATTEMPTS {
-        // 1) DNS 解析：能拿到可路由地址即证明 DNS + 默认路由已就绪。
-        let addrs: Vec<std::net::SocketAddr> =
-            match tokio::net::lookup_host((host.as_str(), port)).await {
-                Ok(iter) => iter.collect(),
-                Err(e) => {
-                    last_err = format!("DNS 解析失败: {e}");
-                    debug!("MQTT preconnect probe DNS pending (attempt {}): {e}", attempt + 1);
-                    tokio::time::sleep(PROBE_INTERVAL).await;
-                    continue;
-                }
-            };
+        // 1) DNS 解析（1.5s 硬超时）：能拿到可路由地址即证明 DNS + 默认路由已就绪。
+        let lookup = tokio::time::timeout(
+            PROBE_DNS_TIMEOUT,
+            tokio::net::lookup_host((host.as_str(), port)),
+        )
+        .await;
+
+        let addrs: Vec<std::net::SocketAddr> = match lookup {
+            Ok(Ok(iter)) => iter.collect(),
+            Ok(Err(e)) => {
+                last_err = format!("DNS 解析失败: {e}");
+                debug!("MQTT preconnect probe DNS error (attempt {}): {e}", attempt + 1);
+                tokio::time::sleep(PROBE_INTERVAL).await;
+                continue;
+            }
+            Err(_) => {
+                last_err = "DNS 解析超时 (1.5s)".to_string();
+                debug!("MQTT preconnect probe DNS timeout (attempt {})", attempt + 1);
+                tokio::time::sleep(PROBE_INTERVAL).await;
+                continue;
+            }
+        };
         if addrs.is_empty() {
             last_err = "DNS 解析无结果".to_string();
             tokio::time::sleep(PROBE_INTERVAL).await;
@@ -615,7 +632,7 @@ async fn probe_broker_reachable(node: &MqttBrokerNode) -> Result<(), String> {
         }
         // 2) TCP 探测：连上即证明公网可达，立即断开，不进 TLS（省一次握手）。
         for addr in addrs.iter().take(3) {
-            match tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(addr)).await {
+            match tokio::time::timeout(PROBE_TCP_TIMEOUT, tokio::net::TcpStream::connect(addr)).await {
                 Ok(Ok(_)) => {
                     debug!("MQTT preconnect probe OK: {host}:{port}");
                     return Ok(());

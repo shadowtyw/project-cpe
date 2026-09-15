@@ -275,7 +275,7 @@ pub struct SetUsbModeRequest {
 }
 
 /// USB模式查询响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct UsbModeResponse {
     /// 当前硬件实际运行的模式（始终从 configfs 读取）
     pub current_mode: Option<u8>,
@@ -315,7 +315,7 @@ pub struct NetworkSpeed {
 }
 
 /// 网速信息响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct NetworkSpeedResponse {
     /// 所有网络接口的速度信息
     pub interfaces: Vec<NetworkSpeed>,
@@ -345,7 +345,7 @@ pub struct MemoryProcessesResponse {
 }
 
 /// 内存信息响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct MemoryInfo {
     /// 总内存 (MemTotal，字节)
     pub total_bytes: u64,
@@ -378,7 +378,7 @@ pub struct MemoryInfo {
 }
 
 /// 系统运行时间响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct UptimeInfo {
     /// 系统运行时长（秒）
     pub uptime_seconds: u64,
@@ -389,7 +389,7 @@ pub struct UptimeInfo {
 }
 
 /// 系统信息（uname）
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct SystemInfo {
     /// 系统名称（如 Linux）
     pub sysname: String,
@@ -409,7 +409,7 @@ pub struct SystemInfo {
 }
 
 /// 综合系统状态响应
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct SystemStatsResponse {
     /// 网速信息
     pub network_speed: NetworkSpeedResponse,
@@ -430,7 +430,7 @@ pub struct SystemStatsResponse {
 }
 
 /// 磁盘/分区信息
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct DiskInfo {
     /// 挂载点
     pub mount_point: String,

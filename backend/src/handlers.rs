@@ -896,65 +896,88 @@ pub async fn get_memory_processes() -> impl IntoResponse {
 ///   }
 /// }
 /// ```
-pub async fn get_system_stats() -> impl IntoResponse {
+/// 系统指标采集结果的缓存 TTL：3 秒。
+///
+/// 一次完整采集要做 30+ 次 sysfs/procfs 读取，并且必须硬睡 200ms
+/// （CPU 使用率与网速都依赖差值采样窗口），是全部 API 里最重的一步。
+/// 以下场景会在同一秒内并发触发多份采集：
+/// - 仪表盘轮询 tick 与用户点开「一键诊断」同时发生（两者数据同源）
+/// - 多个浏览器标签页 / 手机+电脑同时开着仪表盘
+/// - 页面可见性恢复瞬间，多个 useAdaptivePolling 同时触发 immediate tick
+///
+/// 3 秒窗口内只采一份、其余调用方直接复用克隆；仪表盘默认 5s 轮询 > TTL，
+/// 每个 tick 仍然拿到全新样本，感知不到缓存存在。
+const STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+lazy_static::lazy_static! {
+    /// 采集结果缓存，同时充当「单飞」锁：
+    /// 首个调用方持锁采样（~200ms+），并发调用方在锁上排队；拿到锁后发现
+    /// 缓存仍在 TTL 内就直接返回，天然把 N 个并发请求折叠成 1 次采集。
+    static ref STATS_CACHE: tokio::sync::Mutex<Option<(std::time::Instant, SystemStatsResponse)>> =
+        tokio::sync::Mutex::new(None);
+}
+
+/// 带单飞 + TTL 缓存的系统指标采集入口。
+///
+/// `/api/stats` 与 `/api/diag/report` 共用本函数，保证两处数据一致，
+/// 也保证同一时间窗口内最多只有一份采样在跑。
+///
+/// 采集失败时不写缓存：错误是暂态的（如 /proc 瞬时不可读），下一个请求重试。
+async fn system_stats_cached() -> Result<SystemStatsResponse, String> {
+    let mut guard = STATS_CACHE.lock().await;
+
+    if let Some((sampled_at, cached)) = guard.as_ref() {
+        if sampled_at.elapsed() < STATS_CACHE_TTL {
+            return Ok(cached.clone());
+        }
+    }
+
+    let fresh = collect_system_stats().await?;
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+/// 真正执行一次系统指标采集（无缓存）。
+///
+/// 原 `/api/stats` 与 `/api/diag/report` 各有一份几乎相同的内联实现，
+/// 现合并于此：所有文件读取都在阻塞线程池进行，绝不占用 async worker。
+async fn collect_system_stats() -> Result<SystemStatsResponse, String> {
     use std::time::{Duration, Instant};
     use tokio::time::sleep;
 
-    let result: Result<SystemStatsResponse, String> = async {
-        // 1. 接口计数首采样（/sys 读取，轻量，放在阻塞线程）
-        let interfaces = tokio::task::spawn_blocking(get_active_interfaces)
-            .await
-            .map_err(|e| format!("Failed to enumerate interfaces: {}", e))??;
+    // 1. 接口计数首采样（/sys 读取，轻量，放在阻塞线程）
+    let interfaces = tokio::task::spawn_blocking(get_active_interfaces)
+        .await
+        .map_err(|e| format!("Failed to enumerate interfaces: {}", e))??;
 
-        let mut first_samples = Vec::new();
-        for interface in &interfaces {
-            if let Ok((rx, tx)) = read_interface_stats(interface) {
-                first_samples.push((interface.clone(), rx, tx));
-            }
+    let mut first_samples = Vec::new();
+    for interface in &interfaces {
+        if let Ok((rx, tx)) = read_interface_stats(interface) {
+            first_samples.push((interface.clone(), rx, tx));
         }
+    }
 
-        // 2. CPU 采样（异步 200ms）与其余静态读取（阻塞线程）并行进行
-        let cpu_usage_future = sample_cpu_usage();
-        let static_future = tokio::task::spawn_blocking(|| {
-            let memory = read_memory_info().ok();
-            let disk = read_disk_info();
-            let cpu_load_base = read_cpu_load_sync().ok();
-            let (uptime, idle) = read_uptime().ok().unwrap_or((0, 0));
-            let system_info = read_system_info().ok();
-            let temperature = read_temperature_sensors();
-            let usb_mode = Some(match usb_switch::get_usb_mode_config() {
-                Ok(config) => UsbModeResponse {
-                    current_mode: config.current_mode,
-                    current_mode_name: get_mode_name(config.current_mode),
-                    permanent_mode: config.permanent_mode,
-                    temporary_mode: config.temporary_mode,
-                    needs_reboot: true,
-                    read_mode: "hardware".to_string(),
-                },
-                Err(_) => UsbModeResponse::default(),
-            });
-            (
-                memory,
-                disk,
-                cpu_load_base,
-                uptime,
-                idle,
-                system_info,
-                temperature,
-                usb_mode,
-            )
+    // 2. CPU 采样（异步 200ms）与其余静态读取（阻塞线程）并行进行
+    let cpu_usage_future = sample_cpu_usage();
+    let static_future = tokio::task::spawn_blocking(|| {
+        let memory = read_memory_info().ok();
+        let disk = read_disk_info();
+        let cpu_load_base = read_cpu_load_sync().ok();
+        let (uptime, idle) = read_uptime().ok().unwrap_or((0, 0));
+        let system_info = read_system_info().ok();
+        let temperature = read_temperature_sensors();
+        let usb_mode = Some(match usb_switch::get_usb_mode_config() {
+            Ok(config) => UsbModeResponse {
+                current_mode: config.current_mode,
+                current_mode_name: get_mode_name(config.current_mode),
+                permanent_mode: config.permanent_mode,
+                temporary_mode: config.temporary_mode,
+                needs_reboot: true,
+                read_mode: "hardware".to_string(),
+            },
+            Err(_) => UsbModeResponse::default(),
         });
-
-        let start = Instant::now();
-        let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
-
-        // 补足到 200ms 的最小采样间隔，保证网速计算有足够的时间窗口
-        let elapsed_so_far = start.elapsed();
-        if elapsed_so_far < Duration::from_millis(200) {
-            sleep(Duration::from_millis(200) - elapsed_so_far).await;
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        let (
+        (
             memory,
             disk,
             cpu_load_base,
@@ -963,55 +986,76 @@ pub async fn get_system_stats() -> impl IntoResponse {
             system_info,
             temperature,
             usb_mode,
-        ) = static_future
-            .await
-            .map_err(|e| format!("Failed to read static stats: {}", e))?;
+        )
+    });
 
-        // 3. 接口计数二次采样，计算速率
-        let mut speed_data = Vec::new();
-        for (interface, rx1, tx1) in first_samples {
-            if let Ok((rx2, tx2)) = read_interface_stats(&interface) {
-                let rx_speed = ((rx2.saturating_sub(rx1)) as f64 / elapsed) as u64;
-                let tx_speed = ((tx2.saturating_sub(tx1)) as f64 / elapsed) as u64;
+    let start = Instant::now();
+    let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
 
-                speed_data.push(NetworkSpeed {
-                    interface,
-                    rx_bytes_per_sec: rx_speed,
-                    tx_bytes_per_sec: tx_speed,
-                    total_rx_bytes: rx2,
-                    total_tx_bytes: tx2,
-                });
-            }
-        }
-
-        let memory = memory.ok_or("Failed to read memory info")?;
-        let system_info = system_info.ok_or("Failed to read system info")?;
-
-        // CPU 负载：使用采样得到的实时使用率
-        let mut cpu_load = cpu_load_base.unwrap_or_default();
-        cpu_load.load_percent = cpu_usage;
-
-        Ok(SystemStatsResponse {
-            network_speed: NetworkSpeedResponse {
-                interfaces: speed_data,
-                interval_seconds: elapsed,
-            },
-            memory,
-            disk,
-            cpu_load,
-            uptime: UptimeInfo {
-                uptime_seconds: uptime,
-                idle_seconds: idle,
-                uptime_formatted: format_uptime(uptime),
-            },
-            system_info,
-            temperature,
-            usb_mode: usb_mode.unwrap_or_default(),
-        })
+    // 补足到 200ms 的最小采样间隔，保证网速计算有足够的时间窗口
+    let elapsed_so_far = start.elapsed();
+    if elapsed_so_far < Duration::from_millis(200) {
+        sleep(Duration::from_millis(200) - elapsed_so_far).await;
     }
-    .await;
+    let elapsed = start.elapsed().as_secs_f64();
+    let (
+        memory,
+        disk,
+        cpu_load_base,
+        uptime,
+        idle,
+        system_info,
+        temperature,
+        usb_mode,
+    ) = static_future
+        .await
+        .map_err(|e| format!("Failed to read static stats: {}", e))?;
 
-    match result {
+    // 3. 接口计数二次采样，计算速率
+    let mut speed_data = Vec::new();
+    for (interface, rx1, tx1) in first_samples {
+        if let Ok((rx2, tx2)) = read_interface_stats(&interface) {
+            let rx_speed = ((rx2.saturating_sub(rx1)) as f64 / elapsed) as u64;
+            let tx_speed = ((tx2.saturating_sub(tx1)) as f64 / elapsed) as u64;
+
+            speed_data.push(NetworkSpeed {
+                interface,
+                rx_bytes_per_sec: rx_speed,
+                tx_bytes_per_sec: tx_speed,
+                total_rx_bytes: rx2,
+                total_tx_bytes: tx2,
+            });
+        }
+    }
+
+    let memory = memory.ok_or("Failed to read memory info")?;
+    let system_info = system_info.ok_or("Failed to read system info")?;
+
+    // CPU 负载：使用采样得到的实时使用率
+    let mut cpu_load = cpu_load_base.unwrap_or_default();
+    cpu_load.load_percent = cpu_usage;
+
+    Ok(SystemStatsResponse {
+        network_speed: NetworkSpeedResponse {
+            interfaces: speed_data,
+            interval_seconds: elapsed,
+        },
+        memory,
+        disk,
+        cpu_load,
+        uptime: UptimeInfo {
+            uptime_seconds: uptime,
+            idle_seconds: idle,
+            uptime_formatted: format_uptime(uptime),
+        },
+        system_info,
+        temperature,
+        usb_mode: usb_mode.unwrap_or_default(),
+    })
+}
+
+pub async fn get_system_stats() -> impl IntoResponse {
+    match system_stats_cached().await {
         Ok(data) => (
             StatusCode::OK,
             Json(ApiResponse::success_with_message("Success", data)),
@@ -3332,71 +3376,10 @@ pub async fn get_diagnostic_report(
     let device = get_device_info_data(&conn).await.ok();
     let network = get_network_info_data(&conn).await.ok();
 
-    let system_stats = {
-        use std::time::{Duration, Instant};
-        use tokio::time::sleep;
-
-        let result: Result<SystemStatsResponse, String> = async {
-            // 复用与 get_system_stats 相同的采样逻辑，保持数据一致
-            let interfaces = get_active_interfaces()?;
-            let mut first_samples = Vec::new();
-            for interface in &interfaces {
-                if let Ok((rx, tx)) = read_interface_stats(interface) {
-                    first_samples.push((interface.clone(), rx, tx));
-                }
-            }
-            let cpu_usage_future = sample_cpu_usage();
-            let start = Instant::now();
-            let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
-            let elapsed_so_far = start.elapsed();
-            if elapsed_so_far < Duration::from_millis(200) {
-                sleep(Duration::from_millis(200) - elapsed_so_far).await;
-            }
-            let elapsed = start.elapsed().as_secs_f64();
-
-            let mut speed_data = Vec::new();
-            for (interface, rx1, tx1) in first_samples {
-                if let Ok((rx2, tx2)) = read_interface_stats(&interface) {
-                    speed_data.push(NetworkSpeed {
-                        interface,
-                        rx_bytes_per_sec: ((rx2.saturating_sub(rx1)) as f64 / elapsed) as u64,
-                        tx_bytes_per_sec: ((tx2.saturating_sub(tx1)) as f64 / elapsed) as u64,
-                        total_rx_bytes: rx2,
-                        total_tx_bytes: tx2,
-                    });
-                }
-            }
-
-            let memory = read_memory_info()?;
-            let disk = read_disk_info();
-            let mut cpu_load = read_cpu_load_sync().unwrap_or_default();
-            cpu_load.load_percent = cpu_usage;
-            let (uptime, idle) = read_uptime()?;
-            let system_info = read_system_info()?;
-            let temperature = read_temperature_sensors();
-
-            Ok(SystemStatsResponse {
-                network_speed: NetworkSpeedResponse {
-                    interfaces: speed_data,
-                    interval_seconds: elapsed,
-                },
-                memory,
-                disk,
-                cpu_load,
-                uptime: UptimeInfo {
-                    uptime_seconds: uptime,
-                    idle_seconds: idle,
-                    uptime_formatted: format_uptime(uptime),
-                },
-                system_info,
-                temperature,
-                usb_mode: UsbModeResponse::default(),
-            })
-        }
-        .await;
-
-        result.ok()
-    };
+    // 与 /api/stats 共用带缓存的采样入口：数据完全一致，且若仪表盘刚采过
+    // （3 秒 TTL 内）直接复用，不再重复一遍 200ms 采样 + 30 次文件读取。
+    // 诊断报告是用户手动触发的低频操作，命中缓存只可能带来毫秒级延迟，无感知。
+    let system_stats = system_stats_cached().await.ok();
 
     let sms_stats = db.get_sms_stats().ok();
     let call_stats = db.get_call_stats().ok();
