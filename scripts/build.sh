@@ -167,22 +167,38 @@ if [ "$BUILD_BACKEND" = true ]; then
     if [ "$USE_UPX" = true ]; then
         echo ""
         echo "UPX 压缩..."
-    
+
         if ! command -v upx &> /dev/null; then
             echo "错误: 未找到 upx 命令"
             exit 1
         fi
         BEFORE_SIZE=$(stat -f%z "$BINARY_PATH" 2>/dev/null || stat -c%s "$BINARY_PATH" 2>/dev/null)
-        upx --best --lzma "$BINARY_PATH"
+        # --ultra-brute --lzma：UPX 最高压缩档（暴力穷举 + LZMA），比 --best 再省
+        # 5%~10%。代价是压缩耗时从秒级涨到分钟级，但这是发布构建，值得换体积。
+        upx --ultra-brute --lzma "$BINARY_PATH"
         AFTER_SIZE=$(stat -f%z "$BINARY_PATH" 2>/dev/null || stat -c%s "$BINARY_PATH" 2>/dev/null)
         RATIO=$(echo "scale=1; 100 - ($AFTER_SIZE * 100 / $BEFORE_SIZE)" | bc)
         echo "压缩完成！节省: ${RATIO}%"
         ls -lh "$BINARY_PATH"
     fi
-    
+
     echo ""
     echo "📋 文件信息:"
     file "$BINARY_PATH"
+
+    # ==================== 体积闸门 ====================
+    # 目标设备根分区仅剩 ~24MB，OTA 解包要在 /tmp(tmpfs，占用物理内存 197MB) 里
+    # 同时容纳压缩包与解包产物。二进制超过 8MB 就该停下来查依赖，而不是等现场变砖。
+    FINAL_SIZE=$(stat -f%z "$BINARY_PATH" 2>/dev/null || stat -c%s "$BINARY_PATH" 2>/dev/null || echo 0)
+    WARN_BYTES=$((8 * 1024 * 1024))
+    echo ""
+    if [ "$FINAL_SIZE" -gt "$WARN_BYTES" ]; then
+        echo "⚠️  警告: 后端二进制 $((FINAL_SIZE / 1024 / 1024))MB 超过 8MB 预期上限"
+        echo "   设备根分区仅剩 ~24MB，请检查是否引入了冗余依赖或丢失了 UPX 压缩"
+        echo "   (opt-level=\"z\" + lto + codegen-units=1 + strip + UPX 正常应落在 2~3MB)"
+    else
+        echo "✅ 后端体积检查通过: $((FINAL_SIZE / 1024))KB"
+    fi
 fi
 
 # ==================== 复制到 userdata ====================

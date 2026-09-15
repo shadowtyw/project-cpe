@@ -19,7 +19,15 @@ const OTA_NEW_WWW_PATH: &str = "/home/root/.www.ota-new";
 /// 安装进行中哨兵：存在表示上一次安装被中断（进程崩溃/断电），下次启动应自动回滚。
 const OTA_INSTALLING_SENTINEL: &str = "/tmp/ota_installing";
 const MAX_ARCHIVE_FILES: usize = 4096;
-const MAX_EXTRACTED_BYTES: u64 = 200 * 1024 * 1024;
+/// 解包产物总字节上限。
+///
+/// 必须远小于设备物理内存：`/tmp` 是 tmpfs，解包内容直接占用 RAM。整机只有
+/// ~197MB 物理内存，旧值 200MB 意味着一个畸形/恶意归档就能把 tmpfs 撑满并触发
+/// OOM，连后端进程一起被内核杀掉（变砖级故障）。正常 OTA 包（UPX 二进制 ~3MB +
+/// www ~1.5MB）解包后不过几 MB，64MB 既留足余量又把上界钉死在内存之下。
+const MAX_EXTRACTED_BYTES: u64 = 64 * 1024 * 1024;
+/// 解包前要求 /tmp 至少留出的空闲字节。低于此值直接拒绝，避免把 tmpfs 写满。
+const MIN_TMP_FREE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PATH_DEPTH: usize = 16;
 const TARGET_ARCH: &str = "aarch64-unknown-linux-musl";
 
@@ -72,6 +80,19 @@ pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
     }
     if data.len() > 50 * 1024 * 1024 {
         return Err("OTA package exceeds the 50 MiB limit".to_string());
+    }
+
+    // 解包前先确认 /tmp(tmpfs) 有足够空间。上传的归档与解包产物都落在 tmpfs 上，
+    // 直接吃物理内存；空间不足时宁可拒绝这次升级，也绝不能把内存写满触发 OOM
+    // 把后端进程一起带走（设备只剩 197MB 内存，根分区也仅剩 ~24MB）。
+    if let Some(free) = tmp_free_bytes() {
+        if free < MIN_TMP_FREE_BYTES {
+            return Err(format!(
+                "Insufficient /tmp space for OTA: {} MiB free, need at least {} MiB",
+                free / 1024 / 1024,
+                MIN_TMP_FREE_BYTES / 1024 / 1024
+            ));
+        }
     }
 
     let _ = fs::remove_dir_all(OTA_STAGING_DIR);
@@ -127,10 +148,25 @@ fn validate_archive_entries(archive_path: &Path) -> Result<(), String> {
     }
 
     let mut entries = HashSet::new();
+    // 解包前的解压后总体积闸门：`tar -tvzf` 的列表里带每个成员的**未压缩**大小，
+    // 在这里累加就能在真正写盘之前识破 gzip 炸弹（高压缩比归档）。
+    // 事后的 validate_extracted_tree 也查总字节数，但那时 tmpfs 已经被写满了。
+    let mut declared_bytes: u64 = 0;
     for raw_line in String::from_utf8_lossy(&output.stdout).lines() {
         let entry_type = raw_line.as_bytes().first().copied().unwrap_or_default();
         if entry_type != b'-' && entry_type != b'd' {
             return Err(format!("OTA archive contains forbidden entry type: {}", raw_line));
+        }
+        if entry_type == b'-' {
+            if let Some(size) = parse_tar_listing_size(raw_line) {
+                declared_bytes = declared_bytes.saturating_add(size);
+                if declared_bytes > MAX_EXTRACTED_BYTES {
+                    return Err(format!(
+                        "OTA archive declares more than {} MiB of uncompressed data",
+                        MAX_EXTRACTED_BYTES / 1024 / 1024
+                    ));
+                }
+            }
         }
         let raw_name = raw_line
             .split_whitespace()
@@ -156,6 +192,22 @@ fn validate_archive_entries(archive_path: &Path) -> Result<(), String> {
         return Err("OTA archive must contain a www directory".to_string());
     }
     Ok(())
+}
+
+/// 从 `tar -tvzf` 的一行里解析出成员的未压缩字节数；解析不出来返回 `None`。
+///
+/// 设备端是 GNU tar / busybox tar，详细列表形如：
+/// ```text
+/// -rw-r--r-- root/root      1234 2026-09-15 12:00 www/index.html
+/// ```
+/// 字段 1 是权限、字段 2 是 `owner/group`（含斜杠，非纯数字）、字段 3 才是大小，
+/// 字段 4 是带连字符的日期（也解析不成 u64）。因此「前 4 个字段里第一个能解析为
+/// 数字的」必然命中大小字段。窗口收窄到 4 是为了绝不触碰可能为纯数字的文件名。
+/// 解析失败返回 `None`，调用方退回事后校验（validate_extracted_tree）兜底。
+fn parse_tar_listing_size(line: &str) -> Option<u64> {
+    line.split_whitespace()
+        .take(4)
+        .find_map(|field| field.parse::<u64>().ok())
 }
 
 fn normalize_archive_name(raw_name: &str) -> Result<String, String> {
@@ -675,6 +727,24 @@ pub fn cancel_pending_update() -> Result<(), String> {
 
 fn detect_zip_format(data: &[u8]) -> bool {
     data.len() >= 4 && data[0..4] == [0x50, 0x4B, 0x03, 0x04]
+}
+
+/// 读取 `/tmp` 所在文件系统的可用字节数；失败返回 `None`（调用方按「不阻断」处理）。
+///
+/// 返回 `None` 而不是报错，是为了让 `statvfs` 不可用的环境（容器、单测、
+/// `/proc` 未挂载）仍能完成升级——空间闸门是防呆，不是准入门槛。
+fn tmp_free_bytes() -> Option<u64> {
+    use std::ffi::CString;
+
+    let path = CString::new("/tmp").ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: stat 是本函数的局部变量，path 指向以 NUL 结尾的静态字符串，
+    // 两者生命周期都覆盖整个调用；statvfs 只写入 stat，不持有指针。
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    // f_bavail 是「非特权用户可用块数」，比 f_bfree 更保守，正是我们要的判据。
+    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
 fn set_file_mode(_path: &Path, _mode: u32) -> Result<(), String> {

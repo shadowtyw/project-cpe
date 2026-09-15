@@ -63,6 +63,7 @@ mod state;
 mod traffic;
 mod usb_switch;
 mod utils;
+mod watchdog;
 mod webhook;
 
 use config::{ensure_loader_hooks_init, get_default_config_path, get_persistent_root_dir, ConfigManager};
@@ -231,6 +232,13 @@ async fn async_main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .with(log_buffer::LogBufferLayer)
         .init();
+
+    // 硬件看门狗须尽早接管：放在所有后台任务与 D-Bus 交互之前启动，确保即使下方
+    // 任何一步初始化卡死，整机也仍有内核看门狗在计时兜底。无 /dev/watchdog 的环境
+    // 静默降级（返回 false，不阻塞主流程）。
+    if watchdog::spawn_hardware_watchdog() {
+        log_entry!(info, "app", "Hardware watchdog armed (/dev/watchdog feeding every 5s)");
+    }
 
     // 解析命令行参数
     let args = Args::parse();

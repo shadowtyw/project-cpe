@@ -23,6 +23,13 @@ use tracing::{info, warn};
 const DEFAULT_LOADER_SCRIPT: &str = r#"#!/bin/sh
 /home/root/ttyd/start.sh &
 /home/root/udx710 -p 80 &
+UDX710_PID=$!
+# 降低内核 OOM 命中优先级：整机仅 ~197MB 物理内存，一旦内存吃紧，内核会挑
+# oom_score_adj 最高的进程先杀。把管理后台钉在 -900（可设区间 [-1000, 1000]，
+# 值越小越难被杀），确保 OOM 时优先牺牲其它进程而非把核心服务一并带走。
+# 写负值需要 CAP_SYS_RESOURCE（root），loader 以 root 运行；写入失败（非 root、
+# 无该权限或进程已退出）静默忽略，不影响启动。
+echo -900 > /proc/$UDX710_PID/oom_score_adj 2>/dev/null || true
 "#;
 const LOADER_SCRIPT_PATH: &str = "/home/root/loader.sh";
 const INIT_SCRIPT_PATH: &str = "/home/root/init.sh";

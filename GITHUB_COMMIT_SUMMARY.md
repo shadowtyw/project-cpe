@@ -1,53 +1,56 @@
-feat: 发布版出厂化清理 + 北京时间 + OTA 升级保留用户配置
+feat: v3.7.1 极限瘦身 + OTA 防变砖 + with_serial 读路径补齐 + 断网重启熔断 + 硬件看门狗
 
 ## 本次改动总览
 
-面向"最终发布 OTA 分发给他人"这一目标，做三件事：
-1. **出厂化**：清理所有可能泄露个人信息的硬编码值，杜绝把运行态数据打进镜像。
-2. **平滑升级**：保证刷入 OTA 只覆盖程序文件，不覆盖用户已有的配置与短信/通话数据。
-3. **防崩溃**：旧配置缺字段时安全回落默认值，进程不崩、前端不白屏。
+面向「彻底脱敏、防止升级覆盖、极限瘦身减负、7×24 长稳自愈」四条主线，对代码、配置与构建脚本做全局排查与加固。版本号统一升至 `3.7.1`（`VERSION` / `backend/Cargo.toml` / `frontend/package.json` 三处一致）。
 
 ---
 
-## 一、天气时刻统一为北京时间（UTC+8）
+## 一、隐私与出厂配置彻底脱敏（防泄密）
 
-- 问题：设备未配置 `TZ`，`chrono::Local` 回落到 UTC，推送/日志时间比实际慢 8 小时。
-- 新增 `backend/src/utils.rs` 的北京时间 helper：`now_beijing_rfc3339()` / `now_beijing_format()` / `to_beijing_rfc3339()`，固定 `+08:00`（无夏令时），不依赖 `Local`。
-- 所有"给用户看"的时间戳（推送、短信、通话记录、日志、设备状态报告）全部切换；内部计时与差值计算（通话时长、流量时间戳、定时窗口）仍保留 UTC/Local，展示时再转。
-- 修复推送里"🕐 xxx"与"时间: yyy"两条时间同时出现的重复显示。
+- 已确认并清理：远程遥控个人 MQTT Broker（`ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn`）、连接鉴权用户名/密码、Webhook 签名 key、白名单号码等硬编码凭据全部移除。
+- `config.rs`：`MqttConfig` 默认 `enabled=false`，节点列表回落为公共节点（broker.emqx.io / broker-cn.emqx.io / test.mosquitto.org）；`WebhookConfig`、`SmsPushConfig` 的 Secret/Key/URL 默认全部为空字符串。
+- IMEI 一律经 `dbus.rs` 的 D-Bus 动态读取，**代码中不再保留任何测试机真实 IMEI 常量作为兜底**；取不到 IMEI 时回落到占位值 `"unknown"`。
+- `.gitignore` 覆盖 `/data/config.json`、`/data/data.db`、`/home/root/data.db`、临时文件、`net_health_state.json`、`*.corrupt`，设备运行态数据永不入库、永不打包。
 
-## 二、隐私清理（出厂化）
+## 二、OTA 安全隔离与旧配置平滑兼容（防覆盖、防变砖）
 
-- 删除远程遥控里的个人 MQTT Broker（`ssl://lafffe12.ala.cn-hangzhou.emqxsl.cn`）、连接认证用户名/密码、鉴权 token、白名单号码。
-- 前端 `RemoteControl.tsx` 初始状态回落为公共 Broker（broker.emqx.io / broker-cn.emqx.io）；`ATConsole.tsx` IMEI 占位符改为示例值。
-- 修正测试固件里的真实设备 IMEI `868659060480591` → 示例值 `123456789012345`。
-- 确认无硬编码 WiFi 密码、无管理员密码/登录体系、无 URL 内嵌 token；`cbnet` APN 为公开运营商 MCC/MNC 查表，非个人数据。
-- `.gitignore` 覆盖扩展：新增 `*.corrupt`（解析失败备份）、`net_health_state.json`、`userdata/**/mode*.cfg`，确保设备运行态数据绝不入库。
+- `pack-ota.sh`：OTA tar.gz 顶层只允许 `meta.json`、`udx710`、`www/` 三项，多一项即硬失败；本地运行产生的 `/data/config.json`、`/data/data.db`、`/home/root/data.db`、临时文件一律不进镜像。
+- `ota.rs` 内存安全三道闸：
+  - 解包总字节上限 `200MB → 64MB`（旧值超过整机 197MB 物理内存，畸形归档可撑满 tmpfs 触发 OOM 变砖）；
+  - 解包前用 `statvfs` 检查 `/tmp` 至少剩 32MB，不足直接拒绝（`tmp_free_bytes()`；`statvfs` 不可用时按不阻断降级）；
+  - 解包前用 `tar -tvzf` 未压缩大小做 gzip 炸弹前置拦截（`parse_tar_listing_size`，字段窗口收窄到 4 以免误读纯数字文件名）。
+- 上传/解压/临时目录全部落在 `/tmp`（tmpfs），不写物理根分区；`install_update` 只 rename 切换 `/home/root/udx710` 与 `/home/root/www`，**绝不覆盖 `/data/config.json`、`/data/data.db`**。
+- 新增配置字段全部带 `#[serde(default)]` + `sanitize()` 兜底，旧配置任何字段缺失都不解析失败；`deny_unknown_fields` 显式禁止，前向兼容。
 
-## 三、OTA 升级保留用户配置（打包→上传→安装三层确认）
+## 三、极限体积压缩与运行占用控制（目标 ~2MB）
 
-- 打包：`pack-ota.sh` 只打 `meta.json + udx710 + www/`，顶层多任何一项即硬失败。
-- 上传：后端只放行 `meta.json`、`udx710`、`www/` 三个顶层入口；拒绝路径穿越、符号链接、绝对路径。
-- 安装：`ota.rs` 的 `install_update` rename 切换只作用于 `/home/root/udx710` 与 `/home/root/www`，唯一副作用是设备无启动脚本时补空 `init.sh` 占位，与 `/data/config.json`、`/data/data.db` 无关，二者永不读取/改写。
-- 全链路复盘确认：`config.json` 与 `data.db` 只存在于设备 `/data` 分区，属私有运行态数据，源码与 OTA 产物均不包含。
+- `backend/Cargo.toml [profile.release]`：`opt-level="z"` + `lto=true` + `codegen-units=1` + `panic="abort"` + `strip=true`；依赖评审确认无冗余重型 crate（新增仅复用既有 `libc` 做 `statvfs`）。
+- `scripts/build.sh`：UPX `--best` → `--ultra-brute --lzma`，并新增 8MB 体积闸门（超限打印告警，正常应落在 2~3MB）。
+- `frontend/vite.config.ts`：`sourcemap:false`（生产严禁生成 sourcemap）；顶层 `esbuild.drop: ['console','debugger']` + `legalComments:'none'`；`manualChunks` 拆分 react/mui/query 三组 vendor，`www/` 目标 < 1.5MB。
+- 前端图标全部 Named Import（杜绝全量打包图标库）；移除两个未使用依赖 `@mui/x-data-grid`、`swr`（`@mui/x-charts` 保留，用于 Dashboard 折线图）。
 
-## 四、兼容性与增量合并（防崩溃）
+## 四、模组并发安全（with_serial 读路径补齐，防 abort）
 
-- 为 7 个缺失 `#[serde(default)]` 的字段补齐兜底：`WebhookConfig`（enabled/url/forward_sms/forward_calls）、`SmsPushConfig.enabled`、`ScheduleEntry`（time/action）。
-- 解析失败兜底：`ConfigManager::new` 先备份原文件为 `config.json.corrupt`，再回落 `AppConfig::default()`，不再静默清空用户配置。
-- 新增 8 个回归测试（含 `unknown_future_fields_are_ignored_not_rejected` 锁死禁止 `deny_unknown_fields`），测试数 105 → 全部通过。
-- 前端确认无白屏路径：每个配置加载都有空值兜底 + 独立 try/catch；后端 `sanitize()` 保证返回非空 `nodes`/主题。
+- 审计确认 `with_serial` 全局串行锁不可重入、30s 超时 `abort()`；据此构建调用嵌套关系图。
+- 补齐 8 个「只读查询」的串行包裹：`get_all_apn_contexts`、`get_data_connection_status`、`get_roaming_status`、`get_registration_status`、`get_sim_info_data`、`get_network_info_data`、`get_device_info_data`、`get_airplane_mode`。
+- 刻意**不加锁**的辅助函数（避免自死锁 abort）：`find_internet_context`（被锁持有者调用）、`get_qos_info_data`（内部调 `send_at_command`，已加锁）、`ofono_ready`（探测总线守护进程，非 ofono RIL 通道）。
+- `device_report.rs` 的 `tokio::join!` 并发写法保留——串行锁会让它们实际排队执行，无害。
 
-## 五、README 完善
+## 五、存储寿命与长稳自愈闭环
 
-- 修正"可用内存上限 100%"、公共 Broker 节点数描述等与实际不符处。
-- 新增「升级保留用户配置」与「配置安全：解析失败兜底」小节，明确发布级承诺。
-- 开源协议补充分发时的署名保留与 GPLv3 条款说明。
+- **断网重启熔断**（`net_health.rs`）：新增 `disconnect_reboots` 时间戳滑动窗口 + `breaker_until` 休眠截止。1 小时内「因断网触发的重启」累计 3 次即熔断，进入 30 分钟强制休眠；无卡/欠费/盲区环境下不再无限循环重启烧闪存。状态随 `write_state` 跨进程持久化。
+- **硬件看门狗**（新增 `watchdog.rs`）：启动时尝试打开 `/dev/watchdog`，每 5 秒喂一次；喂狗跑在**独立 OS 线程**而非 tokio task，即使 tokio runtime 死锁或内核 panic，仍能触发整机冷重启兜底；`/dev/watchdog` 不存在时静默降级，不 panic、不刷日志。
+- **OOM 防护**（`config.rs` 的 `DEFAULT_LOADER_SCRIPT`）：启动后台进程后立即 `echo -900 > /proc/$PID/oom_score_adj`，把核心服务钉在低 OOM 优先级，OOM 时优先牺牲其它进程而非核心后台；写负值失败静默忽略。
+- 日志仅落内存环形缓冲（`log_buffer.rs` 2000 条，不写磁盘）；高频指标（温度/CPU/网速/信号）内存采集，不写 SQLite；`db.rs` 保持 WAL + `synchronous=NORMAL` + `cache_size=-1024`（约 1MB 页缓存）。
+- `net_health.rs` 探活仅 `registered`/`roaming` 且 SIM 就绪时计失败，`searching` 阶段不计入；启动 30s 宽限 + 每级 cooldown。
 
 ---
 
 ## 验证
 
 - `cargo check` 通过，无警告。
-- `cargo test`：105 passed; 0 failed。
-- 隐私扫描：源码中无个人 broker 域名、无真实手机号、无真实 IMEI、无 webhook key/token。
+- `cargo test` 通过（config 兼容性回归测试等）。
+- 体积门：后端 `opt-level="z"` + LTO + UPX `--ultra-brute` 预期 2~3MB；前端 `sourcemap=false` + console/debugger 剥离 + vendor 拆分。
+- 隐私扫描：源码无个人 broker 域名、无真实 IMEI、无 Webhook key/鉴权 token。
+- OTA 三层复核：打包只含 `meta.json + udx710 + www/`；上传只放行这三项；安装只替换 `/home/root/udx710` 与 `/home/root/www`，绝不触碰 `/data/config.json`、`/data/data.db`。

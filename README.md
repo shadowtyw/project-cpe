@@ -2,7 +2,7 @@
 
 面向成品 5G CPE / 通讯壳的 Web 管理系统。后端采用 Rust + Axum + zbus，通过 ofono D-Bus 管理 5G/LTE 调制解调器；前端基于 React + Vite + @tanstack/react-query，提供网络、短信、电话、频段、小区、USB、OTA、Webhook 和系统状态管理界面。
 
-> 当前版本：`3.7.0`  
+> 当前版本：`3.7.1`  
 > 目标平台：`aarch64-unknown-linux-musl`（展锐 UDX710 SoC）  
 > 授权协议：[GNU GPLv3](LICENSE)
 
@@ -53,9 +53,10 @@ project-cpe-main/
 │       ├── restart.rs          # 自动重启策略（周期/低内存）
 │       ├── schedule.rs         # 定时计划（每天/工作日/每天指定时间执行动作）
 │       ├── traffic.rs          # 流量统计与预警
-│       ├── net_health.rs       # 外网探活与分级断网自愈（L1/L2/L3 阶梯恢复）
+│       ├── net_health.rs       # 外网探活与分级断网自愈（L1/L2/L3 阶梯恢复 + 熔断）
 │       ├── band_manager.rs     # 频段/小区锁持久化与开机/重连自动重套
 │       ├── log_buffer.rs       # 内存环形日志缓冲（2000条，不写磁盘）
+│       ├── watchdog.rs         # 硬件看门狗 /dev/watchdog 喂狗心跳（独立 OS 线程）
 │       ├── state.rs            # 前端运行时状态
 │       ├── process_monitor.rs  # 进程内存占用读取
 │       ├── iptables.rs         # 防火墙规则辅助
@@ -142,7 +143,7 @@ project-cpe-main/
 - **SoC**：展锐 UDX710（aarch64）
 - **系统**：Linux（systemd 管理）
 - **二进制**：aarch64-unknown-linux-musl（静态链接）
-- **构建优化**：LTO + codegen-units=1 + panic=abort + strip
+- **构建优化**：opt-level="z" + LTO + codegen-units=1 + panic=abort + strip + UPX --ultra-brute --lzma（最终 2~3MB）
 
 ---
 
@@ -458,8 +459,10 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 ### 1. D-Bus 操作保护
 
 - **全局串行化**：`with_serial` 确保所有 ofono 操作互斥执行
+- **读路径同样串行**：不只 AT 写入与写操作，所有只读查询（设备/SIM/网络/漫游/注册/飞行模式状态等）也统一包进 `with_serial`。ofono 的 `SendAtcmd` 与属性读取共用同一条 RIL 通道，读写并发同样会触发 "Operation already in progress"
 - **超时保护**：默认 30s 超时，超时后 `process::abort()` 由 systemd 重启恢复
 - **可配置超时**：长时间操作（如运营商扫描 150s）使用 `with_serial_timeout`
+- **嵌套安全**：内部被锁持有者调用的辅助函数（`find_internet_context` 等）刻意不加锁，避免在非重入锁上二次获取自死锁
 
 ### 2. 后台任务监督
 
@@ -524,6 +527,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   - **L2**：连续失败 6 次 → 飞行模式复位基带（Online=false→true）
   - **L3**：连续失败 10 次 → 系统重启
 - **失败计数持久化**：写入 `net_health_state.json`，进程重启不清零
+- **断网重启熔断**：无卡 / 欠费 / 盲区环境下，设备可能「能注册但数据不通」，每次探活失败都会沿 L1→L2→L3 阶梯走到重启，重启后再次进入同一死循环。现在对「因断网触发的重启」做 1 小时滑动窗口计数，**1 小时内累计 3 次即熔断**，进入 30 分钟强制休眠期：探活失败不再触发重启，给运营商侧与网络环境留出恢复时间；窗口滑出后重新获得有限的重启额度，环境仍不可用则再次熔断，杜绝无限重启烧闪存
 - **防误判设计**：
   - 仅在 `registered`/`roaming` 状态下才判失败，`searching` 阶段不计入
   - 启动后 30 秒启动宽限
@@ -613,6 +617,21 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **默认关闭**：`MqttConfig.enabled` 默认 `false`，需手动开启
 - **延迟启动**：服务启动 10 秒后自动获取 IMEI 并尝试连接
 - **配置向后兼容**：旧版 `broker_list` + 全局 `port`/`tls`/`active_broker` 会在加载时自动迁移为节点列表；保存时同步回写旧字段镜像，OTA 回滚到旧版本二进制仍可读取。迁移在反序列化层完成且不抛错——单个字段残缺不会导致整份配置被重置为默认值
+
+### 13. 硬件看门狗与 OOM 防护
+
+- **硬件看门狗喂狗**：启动即尝试打开 `/dev/watchdog` 并每 5 秒喂一次。软件层面 `supervise()` 只能捕获 panic，而 `panic = "abort"` 的 release 构建下 panic 直接杀进程、主线程死锁则连 panic 都没有——内核看门狗是软件完全失控后最后一道整机冷重启兜底。喂狗跑在**独立 OS 线程**而非 tokio task，即使 tokio runtime 因死锁停止调度，喂狗仍持续进行
+- **静默降级**：`/dev/watchdog` 不存在（容器 / 未加载驱动）时直接退出，不 panic、不刷日志、不影响主流程
+- **OOM 优先级钉死**：`loader.sh` 启动后台进程后立即 `echo -900 > /proc/$PID/oom_score_adj`。整机仅 ~197MB 物理内存，OOM 时内核优先杀 `oom_score_adj` 值最高的进程；把核心服务钉在 -900（可设区间 [-1000, 1000]）保证内存吃紧时优先牺牲其它进程而非核心后台。写负值需 root（loader 以 root 运行），失败静默忽略
+- **极限体积打包**：`opt-level = "z"` + LTO + codegen-units=1 + strip，再用 UPX `--ultra-brute --lzma` 压到 2~3MB，缓解设备根分区仅剩 ~24MB 的存储压力
+
+### 14. OTA 解包内存防护
+
+设备根分区仅剩 ~24MB，OTA 上传、解压与临时目录全部强制落在 `/tmp`（tmpfs，占用物理内存而非闪存）：
+
+- **解包总字节上限**：从 200MB 下调到 64MB——旧值超过整机 197MB 物理内存，一个畸形/恶意高压缩比归档就能把 tmpfs 写满触发 OOM（变砖级故障）。正常 OTA 包（二进制 ~3MB + www ~1.5MB）解包后不过几 MB
+- **解包前空间闸门**：写盘前用 `statvfs` 检查 `/tmp` 至少剩 32MB，不足直接拒绝，绝不在空间不足时把内存写满
+- **gzip 炸弹前置拦截**：用 `tar -tvzf` 的**未压缩**大小列表在真正解压前累加校验，事后校验兜底（事后校验时 tmpfs 已被写满，为时已晚）
 
 ---
 
@@ -745,7 +764,7 @@ udx710-ota-<version>.tar.gz.sha256
 - 包大小 ≤ 50 MiB
 - 拒绝 ZIP 格式（仅接受 tar.gz）
 - 路径安全检查（拒绝 `..`、绝对路径、非允许路径）
-- 条目数 ≤ 4096，解压总大小 ≤ 200 MiB，目录深度 ≤ 16
+- 条目数 ≤ 4096，解压总大小 ≤ 64 MiB，目录深度 ≤ 16
 - 禁止符号链接和非普通文件
 - 顶层只允许 `meta.json`、`udx710`、`www`
 - 二进制必须是 aarch64 ELF

@@ -214,57 +214,59 @@ pub async fn find_internet_context(conn: &Connection) -> zbus::Result<String> {
 /// # Returns
 /// APN Context 列表
 pub async fn get_all_apn_contexts(conn: &Connection) -> zbus::Result<Vec<ApnContext>> {
-    let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
-    let contexts: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> = 
-        proxy.call("GetContexts", &()).await?;
+    with_serial(async {
+        let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
+        let contexts: Vec<(zbus::zvariant::OwnedObjectPath, HashMap<String, OwnedValue>)> =
+            proxy.call("GetContexts", &()).await?;
     
-    let mut result = Vec::new();
+        let mut result = Vec::new();
     
-    for (path, props) in contexts {
-        let context_type = props
-            .get("Type")
-            .and_then(|v| String::try_from(v.clone()).ok())
-            .unwrap_or_default();
+        for (path, props) in contexts {
+            let context_type = props
+                .get("Type")
+                .and_then(|v| String::try_from(v.clone()).ok())
+                .unwrap_or_default();
         
-        // 只返回 internet 类型的 context
-        if context_type == "internet" {
-            let apn_context = ApnContext {
-                path: path.to_string(),
-                name: props
-                    .get("Name")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_else(|| "Internet".to_string()),
-                active: props
-                    .get("Active")
-                    .and_then(|v| bool::try_from(v.clone()).ok())
-                    .unwrap_or(false),
-                apn: props
-                    .get("AccessPointName")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_default(),
-                protocol: props
-                    .get("Protocol")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_else(|| "ip".to_string()),
-                username: props
-                    .get("Username")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_default(),
-                password: props
-                    .get("Password")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_default(),
-                auth_method: props
-                    .get("AuthenticationMethod")
-                    .and_then(|v| String::try_from(v.clone()).ok())
-                    .unwrap_or_else(|| "chap".to_string()),
-                context_type,
-            };
-            result.push(apn_context);
+            // 只返回 internet 类型的 context
+            if context_type == "internet" {
+                let apn_context = ApnContext {
+                    path: path.to_string(),
+                    name: props
+                        .get("Name")
+                        .and_then(|v| String::try_from(v.clone()).ok())
+                        .unwrap_or_else(|| "Internet".to_string()),
+                    active: props
+                        .get("Active")
+                        .and_then(|v| bool::try_from(v.clone()).ok())
+                        .unwrap_or(false),
+                    apn: props
+                        .get("AccessPointName")
+                        .and_then(|v| String::try_from(v.clone()).ok())
+                        .unwrap_or_default(),
+                    protocol: props
+                        .get("Protocol")
+                        .and_then(|v| String::try_from(v.clone()).ok())
+                        .unwrap_or_else(|| "ip".to_string()),
+                    username: props
+                        .get("Username")
+                        .and_then(|v| String::try_from(v.clone()).ok())
+                        .unwrap_or_default(),
+                    password: props
+                        .get("Password")
+                        .and_then(|v| String::try_from(v.clone()).ok())
+                        .unwrap_or_default(),
+                    auth_method: props
+                        .get("AuthenticationMethod")
+                        .and_then(|v| String::try_from(v.clone()).ok())
+                        .unwrap_or_else(|| "chap".to_string()),
+                    context_type,
+                };
+                result.push(apn_context);
+            }
         }
-    }
-    
-    Ok(result)
+
+        Ok(result)
+    }).await
 }
 
 /// 设置 APN 属性
@@ -410,21 +412,27 @@ pub async fn set_data_connection(conn: &Connection, active: bool) -> zbus::Resul
 /// # Returns
 /// 数据连接是否激活
 pub async fn get_data_connection_status(conn: &Connection) -> zbus::Result<bool> {
-    // 自动查找有效的 internet context
-    let context_path = find_internet_context(conn).await?;
-    
-    let proxy = ConnectionContextProxy::builder(conn)
-        .path(context_path)?
-        .build()
-        .await?;
-    let properties = proxy.get_properties().await?;
-    
-    let active = properties
-        .get("Active")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
-    
-    Ok(active)
+    // 只读查询同样要串行：ofono 的 SendAtcmd/属性读取共用一条 RIL 通道，
+    // 与写操作并发时会返回 "Operation already in progress"。
+    // 注意：内部调用的 find_internet_context 必须保持「不加锁」，否则会在这里
+    // 二次获取同一把 tokio Mutex 而自死锁（30s 后 abort 整个进程）。
+    with_serial(async {
+        // 自动查找有效的 internet context
+        let context_path = find_internet_context(conn).await?;
+
+        let proxy = ConnectionContextProxy::builder(conn)
+            .path(context_path)?
+            .build()
+            .await?;
+        let properties = proxy.get_properties().await?;
+
+        let active = properties
+            .get("Active")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+
+        Ok(active)
+    }).await
 }
 
 /// 获取漫游状态
@@ -435,27 +443,29 @@ pub async fn get_data_connection_status(conn: &Connection) -> zbus::Result<bool>
 /// # Returns
 /// (roaming_allowed, is_roaming) 元组
 pub async fn get_roaming_status(conn: &Connection) -> zbus::Result<(bool, bool)> {
-    // 获取 ConnectionManager 的 RoamingAllowed 属性
-    let cm_proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
-    let cm_props: std::collections::HashMap<String, OwnedValue> = cm_proxy.call("GetProperties", &()).await?;
-    
-    let roaming_allowed = cm_props
-        .get("RoamingAllowed")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
-    
-    // 获取 NetworkRegistration 的 Status 属性判断是否漫游
-    let net_proxy = NetworkRegistrationProxy::new(conn).await?;
-    let net_props = net_proxy.get_properties().await?;
-    
-    let status = net_props
-        .get("Status")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    let is_roaming = status == "roaming";
-    
-    Ok((roaming_allowed, is_roaming))
+    with_serial(async {
+        // 获取 ConnectionManager 的 RoamingAllowed 属性
+        let cm_proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.ConnectionManager").await?;
+        let cm_props: std::collections::HashMap<String, OwnedValue> = cm_proxy.call("GetProperties", &()).await?;
+
+        let roaming_allowed = cm_props
+            .get("RoamingAllowed")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+
+        // 获取 NetworkRegistration 的 Status 属性判断是否漫游
+        let net_proxy = NetworkRegistrationProxy::new(conn).await?;
+        let net_props = net_proxy.get_properties().await?;
+
+        let status = net_props
+            .get("Status")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let is_roaming = status == "roaming";
+
+        Ok((roaming_allowed, is_roaming))
+    }).await
 }
 
 /// 设置漫游开关
@@ -710,12 +720,14 @@ async fn auto_configure_apn(conn: &Connection, context_path: &str) -> Result<Str
 /// # Arguments
 /// * `conn` - D-Bus 连接
 pub async fn get_registration_status(conn: &Connection) -> Option<String> {
-    let net_proxy = NetworkRegistrationProxy::new(conn).await.ok()?;
-    let props = net_proxy.get_properties().await.ok()?;
-    props
-        .get("Status")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .or_else(|| Some("unknown".to_string()))
+    with_serial(async {
+        let net_proxy = NetworkRegistrationProxy::new(conn).await.ok()?;
+        let props = net_proxy.get_properties().await.ok()?;
+        props
+            .get("Status")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .or_else(|| Some("unknown".to_string()))
+    }).await
 }
 
 /// 检查并恢复数据连接
@@ -851,76 +863,78 @@ pub async fn data_connection_watchdog(
 /// # Returns
 /// SIM 卡信息结构（整合 SimManager + MessageManager）
 pub async fn get_sim_info_data(conn: &Connection) -> zbus::Result<SimInfoResponse> {
-    let sim_proxy = SimManagerProxy::new(conn).await?;
-    let msg_proxy = MessageManagerProxy::new(conn).await?;
-    
-    let sim_props = sim_proxy.get_properties().await?;
-    let msg_props = msg_proxy.get_properties().await?;
+    with_serial(async {
+        let sim_proxy = SimManagerProxy::new(conn).await?;
+        let msg_proxy = MessageManagerProxy::new(conn).await?;
 
-    // 基本状态
-    let present = sim_props
-        .get("Present")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
+        let sim_props = sim_proxy.get_properties().await?;
+        let msg_props = msg_proxy.get_properties().await?;
 
-    // ICCID
-    let iccid = sim_props
-        .get("CardIdentifier")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // 基本状态
+        let present = sim_props
+            .get("Present")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
 
-    // IMSI
-    let imsi = sim_props
-        .get("SubscriberIdentity")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // ICCID
+        let iccid = sim_props
+            .get("CardIdentifier")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    // 手机号码列表
-    let phone_numbers: Vec<String> = sim_props
-        .get("SubscriberNumbers")
-        .and_then(|v| <Vec<String>>::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // IMSI
+        let imsi = sim_props
+            .get("SubscriberIdentity")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    // 短信中心
-    let sms_center = msg_props
-        .get("ServiceCenterAddress")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // 手机号码列表
+        let phone_numbers: Vec<String> = sim_props
+            .get("SubscriberNumbers")
+            .and_then(|v| <Vec<String>>::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    // MCC/MNC
-    let mcc = sim_props
-        .get("MobileCountryCode")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // 短信中心
+        let sms_center = msg_props
+            .get("ServiceCenterAddress")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    let mnc = sim_props
-        .get("MobileNetworkCode")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // MCC/MNC
+        let mcc = sim_props
+            .get("MobileCountryCode")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    // PIN 状态
-    let pin_required = sim_props
-        .get("PinRequired")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_else(|| "none".to_string());
+        let mnc = sim_props
+            .get("MobileNetworkCode")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    // 首选语言
-    let preferred_languages: Vec<String> = sim_props
-        .get("PreferredLanguages")
-        .and_then(|v| <Vec<String>>::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        // PIN 状态
+        let pin_required = sim_props
+            .get("PinRequired")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_else(|| "none".to_string());
 
-    Ok(SimInfoResponse {
-        present,
-        iccid,
-        imsi,
-        phone_numbers,
-        sms_center,
-        mcc,
-        mnc,
-        pin_required,
-        preferred_languages,
-    })
+        // 首选语言
+        let preferred_languages: Vec<String> = sim_props
+            .get("PreferredLanguages")
+            .and_then(|v| <Vec<String>>::try_from(v.clone()).ok())
+            .unwrap_or_default();
+
+        Ok(SimInfoResponse {
+            present,
+            iccid,
+            imsi,
+            phone_numbers,
+            sms_center,
+            mcc,
+            mnc,
+            pin_required,
+            preferred_languages,
+        })
+    }).await
 }
 
 /// 获取网络信息
@@ -931,48 +945,50 @@ pub async fn get_sim_info_data(conn: &Connection) -> zbus::Result<SimInfoRespons
 /// # Returns
 /// 网络信息结构
 pub async fn get_network_info_data(conn: &Connection) -> zbus::Result<NetworkInfoResponse> {
-    let net_proxy = NetworkRegistrationProxy::new(conn).await?;
-    let radio_proxy = RadioSettingsProxy::new(conn).await?;
-    
-    let net_props = net_proxy.get_properties().await?;
-    let radio_props = radio_proxy.get_properties().await?;
+    with_serial(async {
+        let net_proxy = NetworkRegistrationProxy::new(conn).await?;
+        let radio_proxy = RadioSettingsProxy::new(conn).await?;
 
-    let operator_name = net_props
-        .get("Name")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        let net_props = net_proxy.get_properties().await?;
+        let radio_props = radio_proxy.get_properties().await?;
 
-    let registration_status = net_props
-        .get("Status")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_else(|| "unknown".to_string());
+        let operator_name = net_props
+            .get("Name")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    let technology_preference = radio_props
-        .get("TechnologyPreference")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        let registration_status = net_props
+            .get("Status")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_else(|| "unknown".to_string());
 
-    let signal_strength = net_props
-        .get("Strength")
-        .and_then(|v| u8::try_from(v.clone()).ok())
-        .unwrap_or(0);
+        let technology_preference = radio_props
+            .get("TechnologyPreference")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    let mcc = net_props
-        .get("MobileCountryCode")
-        .and_then(|v| String::try_from(v.clone()).ok());
+        let signal_strength = net_props
+            .get("Strength")
+            .and_then(|v| u8::try_from(v.clone()).ok())
+            .unwrap_or(0);
 
-    let mnc = net_props
-        .get("MobileNetworkCode")
-        .and_then(|v| String::try_from(v.clone()).ok());
+        let mcc = net_props
+            .get("MobileCountryCode")
+            .and_then(|v| String::try_from(v.clone()).ok());
 
-    Ok(NetworkInfoResponse {
-        operator_name,
-        registration_status,
-        technology_preference,
-        signal_strength,
-        mcc,
-        mnc,
-    })
+        let mnc = net_props
+            .get("MobileNetworkCode")
+            .and_then(|v| String::try_from(v.clone()).ok());
+
+        Ok(NetworkInfoResponse {
+            operator_name,
+            registration_status,
+            technology_preference,
+            signal_strength,
+            mcc,
+            mnc,
+        })
+    }).await
 }
 
 /// 获取设备信息（来自 D-Bus Modem 接口）
@@ -983,46 +999,48 @@ pub async fn get_network_info_data(conn: &Connection) -> zbus::Result<NetworkInf
 /// # Returns
 /// 设备信息结构
 pub async fn get_device_info_data(conn: &Connection) -> zbus::Result<DeviceInfoResponse> {
-    let proxy = ModemProxy::new(conn).await?;
-    let props = proxy.get_properties().await?;
+    with_serial(async {
+        let proxy = ModemProxy::new(conn).await?;
+        let props = proxy.get_properties().await?;
 
-    let imei = props
-        .get("Serial")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        let imei = props
+            .get("Serial")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    let manufacturer = props
-        .get("Manufacturer")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        let manufacturer = props
+            .get("Manufacturer")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    let model = props
-        .get("Model")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .unwrap_or_default();
+        let model = props
+            .get("Model")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
 
-    let revision = props
-        .get("Revision")
-        .and_then(|v| String::try_from(v.clone()).ok());
+        let revision = props
+            .get("Revision")
+            .and_then(|v| String::try_from(v.clone()).ok());
 
-    let online = props
-        .get("Online")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
+        let online = props
+            .get("Online")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
 
-    let powered = props
-        .get("Powered")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
+        let powered = props
+            .get("Powered")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
 
-    Ok(DeviceInfoResponse {
-        imei,
-        manufacturer,
-        model,
-        revision,
-        online,
-        powered,
-    })
+        Ok(DeviceInfoResponse {
+            imei,
+            manufacturer,
+            model,
+            revision,
+            online,
+            powered,
+        })
+    }).await
 }
 
 /// 获取QoS信息
@@ -1188,27 +1206,29 @@ pub fn spawn_airplane_recovery(conn: &Connection) {
 /// 飞行模式状态判断：
 /// - enabled = !Online (Online=false 表示飞行模式已启用)
 pub async fn get_airplane_mode(conn: &Connection) -> zbus::Result<AirplaneModeResponse> {
-    let proxy = ModemProxy::new(conn).await?;
-    let props = proxy.get_properties().await?;
-    
-    let powered = props
-        .get("Powered")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
-    
-    let online = props
-        .get("Online")
-        .and_then(|v| bool::try_from(v.clone()).ok())
-        .unwrap_or(false);
-    
-    // 飞行模式状态：Online=false 表示飞行模式已启用
-    let enabled = !online;
-    
-    Ok(AirplaneModeResponse {
-        enabled,
-        powered,
-        online,
-    })
+    with_serial(async {
+        let proxy = ModemProxy::new(conn).await?;
+        let props = proxy.get_properties().await?;
+
+        let powered = props
+            .get("Powered")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+
+        let online = props
+            .get("Online")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+
+        // 飞行模式状态：Online=false 表示飞行模式已启用
+        let enabled = !online;
+
+        Ok(AirplaneModeResponse {
+            enabled,
+            powered,
+            online,
+        })
+    }).await
 }
 
 /// 获取射频模式

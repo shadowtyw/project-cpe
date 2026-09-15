@@ -31,6 +31,20 @@ const PROBE_TARGETS: [&str; 2] = ["223.5.5.5", "119.29.29.29"];
 /// 首轮激活竞争。
 const STARTUP_GRACE_SECONDS: u64 = 30;
 
+/// 断网重启熔断窗口：统计「因断网触发重启」的滑动时间窗（秒）。
+///
+/// 无卡 / 欠费 / 盲区环境下，设备可能表现为「能注册但数据不通」，一旦探活失败
+/// 就会沿 Level 1→2→3 阶梯走到重启，重启后又重新进入同一死循环。用 1 小时窗口
+/// 累计断网重启次数，超过上限即熔断，杜绝无限重启。
+const DISCONNECT_REBOOT_WINDOW_SECS: i64 = 60 * 60;
+
+/// 1 小时窗口内允许的断网重启次数上限。
+const DISCONNECT_REBOOT_MAX: u32 = 3;
+
+/// 熔断后的强制休眠时长（秒）：给网络环境与运营商侧恢复留足时间。休眠结束后
+/// 滑动窗口可能已滑出，设备重新获得有限的重启额度；若环境仍不可用则再次熔断。
+const BREAKER_SLEEP_SECONDS: u64 = 30 * 60;
+
 enum RecoveryLevel {
     None,
     ResetConnection,
@@ -62,6 +76,13 @@ struct NetHealthState {
     /// 失败计数永远无法累积到 Level 3，设备将永久离线且无兜底。
     #[serde(default)]
     stuck_in_airplane: bool,
+    /// 最近一次「因断网触发重启」的 Unix 时间戳列表（每次重启追加一个，旧值滑动
+    /// 淘汰）。用于 1 小时内 3 次的熔断判定。不存在该字段的旧状态文件按空列表解析。
+    #[serde(default)]
+    disconnect_reboots: Vec<i64>,
+    /// 熔断休眠截止时间戳；为 `Some` 表示当前处于熔断期，探活失败不再触发重启。
+    #[serde(default)]
+    breaker_until: Option<i64>,
 }
 
 fn state_path() -> std::path::PathBuf {
@@ -90,6 +111,61 @@ fn write_state(state: &NetHealthState) {
     if let Err(e) = result {
         let _ = std::fs::remove_file(tmp);
         warn!(error = %e, "Failed to persist net health state");
+    }
+}
+
+/// 决策是否放行本次「因断网触发」的重启；返回 `false` 表示被熔断拦截。
+///
+/// 三级判定：
+/// 1. 正处于熔断期（`breaker_until` 未到期）→ 拒绝，静默等待窗口滑出；
+/// 2. 滑动窗口内历史断网重启已达 `DISCONNECT_REBOOT_MAX` 次 → 首次触发熔断，
+///    记录 `breaker_until` 并清空时间戳 → 拒绝；
+/// 3. 否则记录本次重启时间戳（在真正重启前随 `write_state` 落盘，跨重启累计）
+///    → 放行。
+fn disconnect_reboot_allowed(state: &mut NetHealthState) -> bool {
+    let now = chrono::Utc::now().timestamp();
+
+    if state
+        .breaker_until
+        .is_some_and(|until| now < until)
+    {
+        warn!("Net health breaker OPEN: disconnect-triggered reboot suppressed");
+        return false;
+    }
+
+    state
+        .disconnect_reboots
+        .retain(|ts| now.saturating_sub(*ts) < DISCONNECT_REBOOT_WINDOW_SECS);
+
+    if state.disconnect_reboots.len() as u32 >= DISCONNECT_REBOOT_MAX {
+        state.breaker_until = Some(now + BREAKER_SLEEP_SECONDS as i64);
+        state.disconnect_reboots.clear();
+        warn!(
+            window_secs = DISCONNECT_REBOOT_WINDOW_SECS,
+            sleep_secs = BREAKER_SLEEP_SECONDS,
+            "Net health breaker TRIPPED: too many disconnect-triggered reboots; entering cooldown"
+        );
+        return false;
+    }
+
+    state.disconnect_reboots.push(now);
+    true
+}
+
+/// 熔断休眠：被断开后落盘状态并长时间停止判死，给运营商侧与网络环境充分恢复时间。
+///
+/// 拆成 60s 一段而非单个 30 分钟 sleep，是为了保持对进程取消/关停的响应，避免
+/// 单个超长 `sleep` 让 watchdog 在关机时无法及时让出。同时清零失败计数：休眠结束
+/// 后设备从干净状态重新走 L1→L2→L3 阶梯，而不是因残留的 ≥L3 计数立刻再次重启。
+async fn breaker_hold(state: &mut NetHealthState) {
+    state.consecutive_failures = 0;
+    state.last_level = 0;
+    write_state(state);
+    let mut remaining = BREAKER_SLEEP_SECONDS;
+    while remaining > 0 {
+        let step = remaining.min(60);
+        tokio::time::sleep(std::time::Duration::from_secs(step)).await;
+        remaining -= step;
     }
 }
 
@@ -138,12 +214,18 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
                 let failures = state.consecutive_failures;
                 if failures >= config.l3_failures {
                     warn!(failures, "Net health: still offline after failed airplane reset; escalating to Level 3 reboot");
-                    if crate::restart::schedule_reboot("airplane_stuck", 3) {
-                        state.last_level = 3;
-                        state.stuck_in_airplane = false;
+                    if disconnect_reboot_allowed(&mut state) {
+                        if crate::restart::schedule_reboot("airplane_stuck", 3) {
+                            state.last_level = 3;
+                            state.stuck_in_airplane = false;
+                        }
+                        write_state(&state);
+                    } else {
+                        breaker_hold(&mut state).await;
                     }
+                } else {
+                    write_state(&state);
                 }
-                write_state(&state);
             } else if state.consecutive_failures != 0 {
                 state.consecutive_failures = 0;
                 write_state(&state);
@@ -217,9 +299,16 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
             }
             RecoveryLevel::Reboot => {
                 warn!(failures, "Net health Level 3: scheduling system reboot");
-                if crate::restart::schedule_reboot("net_unreachable", 3) {
-                    state.last_level = 3;
-                    write_state(&state);
+                // 断网重启前经过熔断闸门：无卡 / 欠费 / 盲区环境下若放任每次都走到
+                // 这里，设备会在「重启→搜网→仍不通→再重启」间无限循环，既烧闪存
+                // 又无法自愈。1 小时内累计 3 次即熔断休眠。
+                if disconnect_reboot_allowed(&mut state) {
+                    if crate::restart::schedule_reboot("net_unreachable", 3) {
+                        state.last_level = 3;
+                        write_state(&state);
+                    }
+                } else {
+                    breaker_hold(&mut state).await;
                 }
             }
         }

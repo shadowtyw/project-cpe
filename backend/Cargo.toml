@@ -1,6 +1,6 @@
 [package]
 name = "udx710"
-version = "3.7.0"
+version = "3.7.1"
 edition = "2021"
 
 [dependencies]
@@ -27,8 +27,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rumqttc = { version = "0.24", features = ["use-rustls"] }
 
 [profile.release]
-strip = true
-opt-level = 3
+# 极致体积优先：目标设备根分区仅剩 ~24MB，二进制每省 1MB 都是闪存寿命与
+# OTA 上传时间的直接收益。opt-level="z" 让 LLVM 以最小体积而非最快速度优化，
+# 配合 LTO + 单 codegen unit 消除跨 crate 死代码，再用 UPX 加壳压到 2~3MB。
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = true
