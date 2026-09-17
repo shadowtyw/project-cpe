@@ -105,7 +105,7 @@ jobs:
           pnpm run build
 
       - name: Package and self-check OTA
-        run: ./scripts/pack-ota.sh
+        run: bash ./scripts/pack-ota.sh
 
       - name: Upload OTA package
         uses: actions/upload-artifact@v6
