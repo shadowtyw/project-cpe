@@ -1,0 +1,20 @@
+meta {
+  name: Get Automatic Restart Configuration
+  type: http
+  seq: 205
+}
+
+get {
+  url: http://192.168.67.1/api/restart/config
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  获取自动重启配置。
+  周期重启按设备连续运行天数计算；低内存策略按 MemAvailable 百分比计算。
+}

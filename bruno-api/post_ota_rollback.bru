@@ -1,0 +1,28 @@
+meta {
+  name: Roll Back OTA Update
+  type: http
+  seq: 204
+}
+
+post {
+  url: http://192.168.67.1/api/ota/rollback
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "restart_now": true
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  恢复设备自动保存的上一版本。
+
+  前提：至少完成过一次由支持回滚的新版本执行的 OTA 更新。
+  此操作会将当前版本交换为下一次可恢复的版本。
+}

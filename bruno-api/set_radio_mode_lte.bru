@@ -1,0 +1,23 @@
+meta {
+  name: set_radio_mode_lte
+  type: http
+  seq: 26
+}
+
+post {
+  url: http://192.168.67.1/api/radio-mode
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "mode": "lte"
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+

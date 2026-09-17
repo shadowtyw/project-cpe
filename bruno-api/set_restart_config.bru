@@ -1,0 +1,32 @@
+meta {
+  name: Set Automatic Restart Configuration
+  type: http
+  seq: 206
+}
+
+post {
+  url: http://192.168.67.1/api/restart/config
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "schedule_enabled": false,
+    "schedule_interval_days": 7,
+    "low_memory_enabled": false,
+    "low_memory_threshold_percent": 10
+  }
+}
+
+settings {
+  encodeUrl: true
+}
+
+docs {
+  保存自动重启配置。所有策略默认关闭。
+
+  - schedule_interval_days: 1–365 天；从设备启动开始按连续运行时间计算。
+  - low_memory_threshold_percent: 5–50；可用内存连续 3 次低于阈值才会触发。
+  - 低内存策略有 10 分钟启动宽限，且 24 小时内最多自动重启一次。
+}

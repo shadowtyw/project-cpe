@@ -1,0 +1,16 @@
+meta {
+  name: Get NITZ Time
+  type: http
+  seq: 202
+}
+
+get {
+  url: http://192.168.67.1/api/network/nitz
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
+
