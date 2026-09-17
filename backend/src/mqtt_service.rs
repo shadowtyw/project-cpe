@@ -872,7 +872,7 @@ mod tests {
         // 2) 9 个温度传感器（与实测日志的 *-thmzone 数量一致）+ 多网卡多磁盘
         let report = DeviceReport {
             timestamp: "2026-09-14T09:24:02.051140786+00:00".to_string(),
-            app_version: "3.6.2".to_string(),
+            app_version: "3.7.0".to_string(),
             git_commit: "95c1a2d".to_string(),
             device: Some(DeviceInfoResponse {
                 imei: "868659060480591".to_string(),
