@@ -3,6 +3,7 @@ use crate::device_report::DeviceReport;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
+use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -327,47 +328,79 @@ impl MqttService {
         let port = node.effective_port();
         let endpoint = node.endpoint();
 
-        let mut mqttoptions = MqttOptions::new(client_id, host.clone(), port);
+        // ── DNS 预解析（spawn_blocking + 独立超时） ─────────────────
+        //
+        // **v3.7.1 核心修复**：在 aarch64-unknown-linux-musl 目标上，
+        // rumqttc 内部的 TCP 建连调用 getaddrinfo()——这是 libc 的**同步阻塞**
+        // DNS 解析，会直接卡死 tokio 工作线程。tokio::time::timeout 无法取消
+        // 已阻塞的 OS 线程，于是每次建连重试都白白堵住一个 worker 长达 60s
+        // （内核 TCP SYN 重传上限），快速耗尽 tokio 线程池，导致整个 MQTT
+        // 子系统"假死"——直到手动开关重建 Task 时 DNS 已缓存才瞬间成功。
+        //
+        // 这里把 DNS 解析放到专用阻塞线程上，配一个 4s 独立超时：
+        // 超时后我们已知 DNS 不可达，直接走退避重试，不占用 async 工作线程。
+        // TLS 节点跳过预解析——证书校验需要原始域名。
+        let connect_host = if use_tls {
+            host.clone()
+        } else {
+            let host_for_dns = host.clone();
+            let dns_result = timeout(Duration::from_secs(4), tokio::task::spawn_blocking(move || {
+                format!("{host_for_dns}:{port}").to_socket_addrs().ok()
+            }))
+            .await;
+            match dns_result {
+                Ok(Ok(Some(addrs))) => {
+                    // 取第一个可路由地址
+                    if let Some(addr) = addrs
+                        .filter(|a| a.is_ipv4())  // 优先 IPv4（嵌入式 CPE 场景）
+                        .next()
+                        .or_else(|| {
+                            format!("{host}:{port}").to_socket_addrs().ok()
+                                .and_then(|mut a| a.next())
+                        })
+                    {
+                        debug!("MQTT DNS resolved {host} -> {}", addr.ip());
+                        addr.ip().to_string()
+                    } else {
+                        debug!("MQTT DNS: no routable address for {host}, using hostname");
+                        host.clone()
+                    }
+                }
+                _ => {
+                    debug!("MQTT DNS timeout or error for {host}, using hostname fallback");
+                    host.clone()
+                }
+            }
+        };
+
+        // ── 建连阶段：4 秒硬超时（全局 Runtime） ────────────────
+        //
+        // DNS 已在上一步完成预解析，此 async block 内不再发生阻塞调用，
+        // tokio::time::timeout 可以正确取消超时的 TCP SYN 挂起。
+        let topic_sub = config.topic_sub.replace("{imei}", &self.imei);
+        let topic_pub = config.topic_pub.replace("{imei}", &self.imei);
+
+        let mut mqttoptions = MqttOptions::new(client_id, connect_host, port);
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_clean_session(true);
-        // rumqttc 默认单包上限只有 10KB，而完整状态报告 JSON 就有 10KB 出头，
-        // 会在发布时被本地拦下并报 "Cannot send packet of size ... greater than
-        // the broker's maximum packet size"——注意这条错误文案里的 "broker's" 是
-        // rumqttc 的措辞误导，实际比的是我们自己的 max_outgoing_packet_size。
-        // 放开到 64KB：MQTT 5 允许的最大值是 256MB，公共云 broker（EMQX 等）
-        // 普遍在 1MB 量级，64KB 既够用又不至于把单包做大到超时。
         mqttoptions.set_max_packet_size(MAX_PACKET_SIZE, MAX_PACKET_SIZE);
-
-        // TLS
         if use_tls {
             mqttoptions.set_transport(Transport::tls_with_default_config());
             debug!("MQTT TLS enabled for {host} (system CA certs)");
         }
-
-        // 用户名密码认证
         if let Some(ref user) = config.username {
             let pass = config.password.as_deref().unwrap_or("");
             mqttoptions.set_credentials(user, pass);
             debug!("MQTT credentials set for user {user}");
         }
 
-        // ── 建连阶段：整个 TCP/MQTT 握手阶段包裹 4 秒硬超时 ──
-        // 关键修复：旧实现把 timeout 只套在 ConnAck 轮询上，
-        // AsyncClient::new() 与 subscribe() 仍然在超时保护外。
-        // 当网络未就绪时（开机阶段）底层 TCP 栈缺省超时可达数十秒，
-        // 导致整个进程被挂起 54 秒。现在把 AsyncClient::new()、
-        // subscribe() 与 ConnAck 轮询全部纳入 4s 硬超时。
-        let topic_sub = config.topic_sub.replace("{imei}", &self.imei);
-        let topic_pub = config.topic_pub.replace("{imei}", &self.imei);
         let connect_deadline = Duration::from_secs(4);
-
         let conn_result = timeout(connect_deadline, async {
             let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
             client
                 .subscribe(&topic_sub, QoS::AtLeastOnce)
                 .await
                 .map_err(|e| format!("subscribe {topic_sub}: {e}"))?;
-            // 可能先收到其它包（如 SubAck），循环直到 ConnAck 或超时
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => break,
@@ -872,7 +905,7 @@ mod tests {
         // 2) 9 个温度传感器（与实测日志的 *-thmzone 数量一致）+ 多网卡多磁盘
         let report = DeviceReport {
             timestamp: "2026-09-14T09:24:02.051140786+00:00".to_string(),
-            app_version: "3.7.0".to_string(),
+            app_version: "3.7.1".to_string(),
             git_commit: "95c1a2d".to_string(),
             device: Some(DeviceInfoResponse {
                 imei: "868659060480591".to_string(),
