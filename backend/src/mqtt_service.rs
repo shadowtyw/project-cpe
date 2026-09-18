@@ -12,6 +12,24 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 use zbus::Connection;
 
+/// 外网连通性探测目标：阿里 DNS TCP 端口。
+///
+/// 选用 TCP 53 而非 ICMP ping：ICMP 可能需要 root / raw socket，
+/// 而 TCP connect 无需特权且精确对应「能否建立外网 socket」的判断。
+/// 阿里 DNS 223.5.5.5 是国内可达性最好的公共地址之一。
+const PROBE_ADDR: &str = "223.5.5.5:53";
+
+/// 单次探测超时。
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// 探测失败后的重试间隔。
+const PROBE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 冷启动首轮"外网连通性已确认"标记。
+///
+/// 进程生命周期内仅生效一次：首次通过探测后置位，后续循环直接跳过。
+static NETWORK_PROBE_PASSED: AtomicBool = AtomicBool::new(false);
+
 /// MQTT 模块在前端日志里的独立模块名。
 ///
 /// `LogBufferLayer` 默认从 `target` 取末段（`udx710::mqtt_service` → `mqtt_service`），
@@ -85,13 +103,6 @@ static MQTT_CLIENT: Mutex<Option<(AsyncClient, String)>> = Mutex::const_new(None
 /// 数据连接看门狗恢复连接后置位，用于中断退避 sleep 立即重连。
 static DATA_CONNECTION_RESTORED: AtomicBool = AtomicBool::new(false);
 
-/// 冷启动延迟就绪标记：进程生命周期内仅生效一次。
-///
-/// 冷开机时基带注网通常需要 1-2 分钟，在此窗口内尝试 TCP 建连必然触发
-/// 内核 SYN 重传，徒增开机阶段的热量与 CPU 争抢。首个循环执行 90s 休眠
-/// 后置位此标记，后续循环（包括用户手动关闭再开启）直接跳过延迟。
-static COLD_BOOT_GRACE_DONE: AtomicBool = AtomicBool::new(false);
-
 /// 由数据连接看门狗在恢复后调用，唤醒退避中的 MQTT 重连循环。
 pub fn notify_data_connection_restored() {
     DATA_CONNECTION_RESTORED.store(true, Ordering::SeqCst);
@@ -152,46 +163,26 @@ impl MqttService {
                 state.enabled = true;
             }).await;
 
-            // ── 冷启动就绪延迟：开机 90s 内不发起任何建连 ────
+            // ── 外网连通性探测门禁 ────
             //
-            // 5G CPE 模组被动散热，开机初期基带注网需 1-2 分钟。
-            // 在此期间 DNS / TCP 建连注定超时，仅增加发热与 CPU 争抢，
-            // 不如安静等待蜂窝网络自稳。
+            // v3.7.5：用轻量 TCP connect 验证蜂窝路由是否真正打通，
+            // 替代 v3.7.4 的固定 90s 盲等。固定延时无法适应不同基带
+            // 注网速度的差异——有时 90s 不够，有时 45s 就已就绪。
             //
-            // 策略：进程生命周期内首轮无条件休眠 90s，之后永远跳过。
-            // 用户在 Web 上手动关闭再开启 MQTT 时，由于标记已置位，
-            // 视为主动调试行为，直接建连，不再等待。
-            if !COLD_BOOT_GRACE_DONE.load(Ordering::SeqCst) {
-                COLD_BOOT_GRACE_DONE.store(true, Ordering::SeqCst);
-                crate::log_entry!(
-                    info,
-                    LOG_MODULE,
-                    "冷启动，等待 90s 让蜂窝网络就绪…"
-                );
-                // 分段 sleep：允许用户在此期间关闭 MQTT 开关从而打断等待
-                let mut remaining = Duration::from_secs(90);
-                let step = Duration::from_secs(5);
-                while remaining > Duration::ZERO {
-                    let this = min(remaining, step);
-                    sleep(this).await;
-                    remaining = remaining.saturating_sub(this);
-                    if !self.config_manager.get_mqtt().enabled {
-                        crate::log_entry!(
-                            info,
-                            LOG_MODULE,
-                            "MQTT 在冷启动等待期间被关闭"
-                        );
-                        break;
-                    }
-                }
-                // 因 disable 退出 → 回到外层循环顶部进入 teardown 分支
+            // 策略：首轮循环依次执行 TCP 探测（1.5s 超时），失败则
+            // 静默休眠 5s 再试，不发起任何 MQTT 建连、不产生 error 日志。
+            // 一旦探测通过标记即永久置位，后续循环（含用户手动关→开）跳过。
+            if !NETWORK_PROBE_PASSED.load(Ordering::SeqCst) {
+                self.wait_for_network_probe().await;
+                // 等待期间被用户关闭 MQTT → 回到外层循环顶部 teardown
                 if !self.config_manager.get_mqtt().enabled {
                     continue;
                 }
+                // 探测成功；以 info 级别告知用户连通时间点
                 crate::log_entry!(
                     info,
                     LOG_MODULE,
-                    "冷启动延时结束，开始 MQTT 建连"
+                    "外网连通性确认，开始 MQTT 建连"
                 );
             }
 
@@ -201,6 +192,40 @@ impl MqttService {
 
             // 重连间隔
             sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// 外网连通性探测等待循环。
+    ///
+    /// 每 5s 发起一次轻量 TCP connect 到阿里 DNS 53 端口（1.5s 超时），
+    /// 通网即返回并置位 `NETWORK_PROBE_PASSED`。期间仅打 debug 级别日志，
+    /// 不产生 error、不发起 MQTT 建连，将开机脉冲发热降到最低。
+    async fn wait_for_network_probe(&self) {
+        let mut first = true;
+        loop {
+            if !self.config_manager.get_mqtt().enabled {
+                return;
+            }
+            if first {
+                crate::log_entry!(info, LOG_MODULE, "等待外网连通（探测 {}）…", PROBE_ADDR);
+                first = false;
+            }
+            if probe_network().await {
+                NETWORK_PROBE_PASSED.store(true, Ordering::SeqCst);
+                return;
+            }
+            debug!("Network probe failed, retrying in {}s", PROBE_RETRY_INTERVAL.as_secs());
+            // 分段 sleep：允许用户在此期间关闭 MQTT
+            let mut remaining = PROBE_RETRY_INTERVAL;
+            let tick = Duration::from_secs(1);
+            while remaining > Duration::ZERO {
+                let this = min(remaining, tick);
+                sleep(this).await;
+                remaining = remaining.saturating_sub(this);
+                if !self.config_manager.get_mqtt().enabled {
+                    return;
+                }
+            }
         }
     }
 
@@ -629,6 +654,18 @@ impl MqttService {
         let state = state_guard.get_or_insert_with(MqttRuntimeState::default);
         f(state);
     }
+}
+
+/// 外网连通性轻量探测：对阿里 DNS 53 端口发起 TCP connect。
+///
+/// 不涉及 DNS 解析（直接用 IP）、不涉及 TLS 握手、不产生任何日志输出。
+/// 1.5s 超时足以覆盖最差的蜂窝链路建立场景。
+/// 返回 `true` 表示外网路由已就绪，`false` 表示仍不可达。
+async fn probe_network() -> bool {
+    timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(PROBE_ADDR))
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
 }
 
 /// 计算「会影响当前连接」的配置指纹。
