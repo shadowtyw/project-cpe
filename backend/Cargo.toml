@@ -1,6 +1,6 @@
 [package]
 name = "udx710"
-version = "3.7.2"
+version = "3.7.3"
 edition = "2021"
 
 [dependencies]

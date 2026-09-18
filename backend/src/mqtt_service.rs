@@ -85,9 +85,18 @@ static MQTT_CLIENT: Mutex<Option<(AsyncClient, String)>> = Mutex::const_new(None
 /// 数据连接看门狗恢复连接后置位，用于中断退避 sleep 立即重连。
 static DATA_CONNECTION_RESTORED: AtomicBool = AtomicBool::new(false);
 
+/// 首次网络就绪信号：冷开机阶段 MQTT 必须等待此标志才发起第一次建连。
+///
+/// 冷开机时基带尚未完成 APN 拨号与路由下发，此时盲目尝试 TCP 建连会触发
+/// 内核 SYN 重传，白白消耗 58 秒 CPU 与发热后才等到看门狗确认网络畅通。
+/// 此标志由数据看门狗在首次确认 `Connected` / `Connection restored` 后置位，
+/// 且永不回退——后续重连只由 `DATA_CONNECTION_RESTORED` 与退避逻辑管理。
+static FIRST_NETWORK_READY: AtomicBool = AtomicBool::new(false);
+
 /// 由数据连接看门狗在恢复后调用，唤醒退避中的 MQTT 重连循环。
 pub fn notify_data_connection_restored() {
     DATA_CONNECTION_RESTORED.store(true, Ordering::SeqCst);
+    FIRST_NETWORK_READY.store(true, Ordering::SeqCst);
 }
 
 /// MQTT 指令
@@ -144,6 +153,35 @@ impl MqttService {
             Self::update_state_static(|state| {
                 state.enabled = true;
             }).await;
+
+            // ── 网络就绪门禁：首轮建连前必须确认蜂窝网络畅通 ────
+            //
+            // 冷开机时基带尚未完成 APN 拨号与路由下发，此时盲目发起 MQTT
+            // TCP 建连只会触发内核 SYN 重传，白白消耗数十秒 CPU 并增加发热。
+            // 此门禁阻塞当前任务但不占用 tokio worker（通过 async sleep 让出），
+            // 等待数据连接看门狗确认链路就绪后再放行。
+            //
+            // FIRST_NETWORK_READY 一旦置位永不回退，故只有冷开机首轮会在此等待；
+            // 后续重连仅由 DATA_CONNECTION_RESTORED 与退避逻辑驱动。
+            if !FIRST_NETWORK_READY.load(Ordering::SeqCst) {
+                crate::log_entry!(info, LOG_MODULE, "等待蜂窝网络就绪…");
+                loop {
+                    // 等待期间仍允许用户关闭 MQTT 开关跳出门禁
+                    if !self.config_manager.get_mqtt().enabled {
+                        crate::log_entry!(info, LOG_MODULE, "MQTT 在等待网络期间被关闭");
+                        break;
+                    }
+                    if FIRST_NETWORK_READY.load(Ordering::SeqCst) {
+                        crate::log_entry!(info, LOG_MODULE, "蜂窝网络已就绪，开始 MQTT 建连");
+                        break;
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                }
+                // 因 disable 退出 → 回到外层循环顶部进入 teardown 分支
+                if !self.config_manager.get_mqtt().enabled {
+                    continue;
+                }
+            }
 
             // connect_and_run 会在「被关闭」或「所有节点失败」时返回。
             // 返回后回到循环顶部重读配置，因此关闭开关能在一轮内生效。
