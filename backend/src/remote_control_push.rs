@@ -4,7 +4,6 @@
 //! 支持独立的启用开关、URL、请求头和签名密钥。
 
 use crate::config::{ConfigManager, RemoteControlPushConfig};
-use chrono::Utc;
 use reqwest::Client;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -131,7 +130,7 @@ impl RemoteControlPushSender {
         }
 
         let test_payload = serde_json::json!({
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": crate::utils::beijing_now_rfc3339(),
             "type": "remote_control_test",
             "data": {
                 "event": "test",

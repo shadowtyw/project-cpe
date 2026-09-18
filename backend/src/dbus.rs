@@ -835,8 +835,12 @@ pub async fn data_connection_watchdog(
                 info!("Watchdog: data connection: {}", result);
                 last_data_log = result.clone();
                 // 重连成功后重套持久化的射频模式 / 频段锁 / 小区锁
-                if result.starts_with("Connection restored") {
+                if result.starts_with("Connection restored") || result.starts_with("Connected") {
                     crate::band_manager::apply_persisted_locks(&conn, &config_manager).await;
+                    // 解除退避中的 MQTT 重连循环。
+                    // "Connected" 覆盖开机首轮（init_data_connection 已激活）的场景，
+                    // 避免 MQTT 因 DNS 未就绪进入退避后空等整个 backoff 窗口。
+                    crate::mqtt_service::notify_data_connection_restored();
                 }
             }
         }

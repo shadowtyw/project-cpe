@@ -48,7 +48,7 @@ fn notify(payload: &serde_json::Value) {
 }
 
 fn send_mqtt_notification(event: &str, command: &str, message: &str) {
-    let ts = chrono::Utc::now().to_rfc3339();
+    let ts = crate::utils::beijing_now_rfc3339();
     let msg = serde_json::json!({
         "timestamp": ts,
         "type": "mqtt_control",
@@ -81,6 +81,14 @@ static MQTT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// 已连接的 MQTT 客户端（用于发布消息，避免每次创建临时客户端）
 static MQTT_CLIENT: Mutex<Option<(AsyncClient, String)>> = Mutex::const_new(None);
+
+/// 数据连接看门狗恢复连接后置位，用于中断退避 sleep 立即重连。
+static DATA_CONNECTION_RESTORED: AtomicBool = AtomicBool::new(false);
+
+/// 由数据连接看门狗在恢复后调用，唤醒退避中的 MQTT 重连循环。
+pub fn notify_data_connection_restored() {
+    DATA_CONNECTION_RESTORED.store(true, Ordering::SeqCst);
+}
 
 /// MQTT 指令
 #[derive(Debug, Deserialize)]
@@ -236,8 +244,8 @@ impl MqttService {
                     }
                     let wait = min(
                         Duration::from_secs(3)
-                            .saturating_mul(2u32.saturating_pow(session_retries.min(5))),
-                        Duration::from_secs(30),
+                            .saturating_mul(2u32.saturating_pow(session_retries.min(3))),
+                        Duration::from_secs(10),
                     );
                     session_retries += 1;
                     warn!("MQTT session lost on {endpoint}: {e}; reconnecting in {}s", wait.as_secs());
@@ -265,12 +273,12 @@ impl MqttService {
                     consecutive_failures += 1;
                     broker_index += 1;
 
-                    // 所有节点都试过且全部失败 → 指数退避
+                    // 所有节点都试过且全部失败 → 指数退避（上限 10s）
                     if broker_index >= nodes.len() {
                         let wait = min(
                             Duration::from_secs(3)
-                                .saturating_mul(2u32.saturating_pow(consecutive_failures.min(5))),
-                            Duration::from_secs(60),
+                                .saturating_mul(2u32.saturating_pow(consecutive_failures.min(3))),
+                            Duration::from_secs(10),
                         );
                         warn!("All MQTT brokers unreachable, backing off {}s", wait.as_secs());
                         crate::log_entry!(
@@ -296,7 +304,8 @@ impl MqttService {
 
     /// 分段睡眠，期间若配置被关闭则提前返回 `true`。
     ///
-    /// 指数退避最长 60s，若整段 sleep 会让「关闭开关」迟迟不生效。
+    /// 同时监听 `DATA_CONNECTION_RESTORED` 信号：数据连接恢复时清除标志
+    /// 并提前返回 `false`，让上层立即重试建连而不走 teardown。
     async fn sleep_responsive_to_disable(&self, total: Duration) -> bool {
         let mut remaining = total;
         let step = Duration::from_secs(1);
@@ -306,6 +315,11 @@ impl MqttService {
             remaining = remaining.saturating_sub(this);
             if !self.config_manager.get_mqtt().enabled {
                 return true;
+            }
+            if DATA_CONNECTION_RESTORED.swap(false, Ordering::SeqCst) {
+                info!("MQTT: data connection restored, waking early from backoff");
+                crate::log_entry!(info, LOG_MODULE, "数据连接已恢复，提前结束退避");
+                return false;
             }
         }
         false
@@ -367,8 +381,11 @@ impl MqttService {
                     }
                 }
                 _ => {
-                    debug!("MQTT DNS timeout or error for {host}, using hostname fallback");
-                    host.clone()
+                    // DNS 预解析超时或错误 → 直接失败，绝不 fallback 到 hostname。
+                    // 若传 hostname 给 rumqttc，它内部又会触发阻塞 getaddrinfo()，
+                    // 卡死 tokio worker 线程 60s，timeout 无法打断。
+                    debug!("MQTT DNS timeout or error for {host}, failing fast");
+                    return BrokerOutcome::Failed(format!("DNS resolution failed for {host}"));
                 }
             }
         };
@@ -905,7 +922,7 @@ mod tests {
         // 2) 9 个温度传感器（与实测日志的 *-thmzone 数量一致）+ 多网卡多磁盘
         let report = DeviceReport {
             timestamp: "2026-09-14T09:24:02.051140786+00:00".to_string(),
-            app_version: "3.7.1".to_string(),
+            app_version: "3.7.2".to_string(),
             git_commit: "95c1a2d".to_string(),
             device: Some(DeviceInfoResponse {
                 imei: "868659060480591".to_string(),

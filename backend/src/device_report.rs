@@ -110,7 +110,7 @@ impl DeviceReport {
             .unwrap_or_default();
 
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::utils::beijing_now_rfc3339(),
             app_version: env!("APP_VERSION").to_string(),
             git_commit: env!("GIT_COMMIT").to_string(),
             device,

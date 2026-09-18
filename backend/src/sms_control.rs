@@ -148,7 +148,7 @@ pub async fn handle_incoming_sms(
     // 推送通知：告知管理员有人通过短信遥控执行了指令
     {
         let cmd_name = command_display_name(command);
-        let ts = chrono::Utc::now().to_rfc3339();
+        let ts = crate::utils::beijing_now_rfc3339();
         let msg = serde_json::json!({
             "timestamp": ts,
             "type": "sms_control",

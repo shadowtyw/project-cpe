@@ -13,8 +13,21 @@
 //! 包含 AT 指令解析、数据处理等工具函数
 
 use crate::models::{CellInfo, IpAddress, NetworkInterfaceInfo};
+use chrono::FixedOffset;
 use std::collections::HashMap;
 use std::net::IpAddr;
+
+/// 返回东八区（UTC+8 / Asia/Shanghai）当前时间的 RFC 3339 字符串。
+///
+/// 嵌入式设备通常未配置时区，`Local::now()` 会回落 UTC。
+/// 使用固定 +08:00 偏移，确保推送通知、日志时间戳对国内用户直观可读。
+pub fn beijing_now_rfc3339() -> String {
+    let offset = FixedOffset::east_opt(8 * 3600).expect("8*3600 is a valid offset");
+    chrono::Utc::now()
+        .with_timezone(&offset)
+        .format("%Y-%m-%dT%H:%M:%S%.3f+08:00")
+        .to_string()
+}
 
 /// 小区信息查询指令配置
 #[derive(Debug, Clone)]
