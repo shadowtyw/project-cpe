@@ -12,18 +12,20 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 use zbus::Connection;
 
-/// 外网连通性探测目标：阿里 DNS TCP 端口。
+/// 外网连通性探测目标：阿里 DNS TCP 端口（预解析为 SocketAddr）。
 ///
-/// 选用 TCP 53 而非 ICMP ping：ICMP 可能需要 root / raw socket，
-/// 而 TCP connect 无需特权且精确对应「能否建立外网 socket」的判断。
-/// 阿里 DNS 223.5.5.5 是国内可达性最好的公共地址之一。
-const PROBE_ADDR: &str = "223.5.5.5:53";
+/// 直接使用 SocketAddr 而非 &str，避免 `TcpStream::connect` 内部调用
+/// `to_socket_addrs()` → `getaddrinfo()`。在 musl + 基带未就绪的窗口期，
+/// getaddrinfo 可能对 IP 字面量返回局部/不完整结果，导致 connect 在
+/// 20ms 内"成功"——实际连到了错误地址或本地 socket。
+const PROBE_TARGET: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5)), 53);
 
 /// 单次探测超时。
-const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const PROBE_TIMEOUT_MS: u64 = 1500;
 
-/// 探测失败后的重试间隔。
-const PROBE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// 探测失败后重试间隔。
+const PROBE_RETRY_SECS: u64 = 3;
 
 /// 冷启动首轮"外网连通性已确认"标记。
 ///
@@ -170,7 +172,7 @@ impl MqttService {
             // 注网速度的差异——有时 90s 不够，有时 45s 就已就绪。
             //
             // 策略：首轮循环依次执行 TCP 探测（1.5s 超时），失败则
-            // 静默休眠 5s 再试，不发起任何 MQTT 建连、不产生 error 日志。
+            // 静默休眠 3s 再试，不发起任何 MQTT 建连、不产生 error 日志。
             // 一旦探测通过标记即永久置位，后续循环（含用户手动关→开）跳过。
             if !NETWORK_PROBE_PASSED.load(Ordering::SeqCst) {
                 self.wait_for_network_probe().await;
@@ -197,9 +199,9 @@ impl MqttService {
 
     /// 外网连通性探测等待循环。
     ///
-    /// 每 5s 发起一次轻量 TCP connect 到阿里 DNS 53 端口（1.5s 超时），
-    /// 通网即返回并置位 `NETWORK_PROBE_PASSED`。期间仅打 debug 级别日志，
-    /// 不产生 error、不发起 MQTT 建连，将开机脉冲发热降到最低。
+    /// 每 3s 发起一次 TCP connect 到阿里 DNS 53 端口（1.5s 超时），
+    /// 仅 `Ok(Ok(_stream))` 视为连通——任何超时、连接拒绝、路由不可达
+    /// 均进入下一轮休眠，绝不误判放行。通网后置位 `NETWORK_PROBE_PASSED`。
     async fn wait_for_network_probe(&self) {
         let mut first = true;
         loop {
@@ -207,16 +209,35 @@ impl MqttService {
                 return;
             }
             if first {
-                crate::log_entry!(info, LOG_MODULE, "等待外网连通（探测 {}）…", PROBE_ADDR);
+                crate::log_entry!(
+                    info,
+                    LOG_MODULE,
+                    "等待外网连通（探测 {}）…",
+                    PROBE_TARGET
+                );
                 first = false;
             }
-            if probe_network().await {
-                NETWORK_PROBE_PASSED.store(true, Ordering::SeqCst);
-                return;
+            // ── 关键：只有 Ok(Ok(_stream)) 才是真正连通 ────────
+            // timeout 返回 Result<io::Result<TcpStream>, Elapsed>。
+            // Ok(Ok(_))  = TCP 三次握手完成，外网路由确实就绪。
+            // Ok(Err(_)) = 连接被拒 / 路由不可达（20ms 级立即返回），
+            // Err(_)     = 1.5s 超时，两种都必须在 catch-all 分支休眠。
+            match tokio::time::timeout(
+                Duration::from_millis(PROBE_TIMEOUT_MS),
+                tokio::net::TcpStream::connect(PROBE_TARGET),
+            )
+            .await
+            {
+                Ok(Ok(_stream)) => {
+                    // 显式 drop stream，立即关闭探测连接
+                    drop(_stream);
+                    NETWORK_PROBE_PASSED.store(true, Ordering::SeqCst);
+                    return;
+                }
+                _ => {}
             }
-            debug!("Network probe failed, retrying in {}s", PROBE_RETRY_INTERVAL.as_secs());
             // 分段 sleep：允许用户在此期间关闭 MQTT
-            let mut remaining = PROBE_RETRY_INTERVAL;
+            let mut remaining = Duration::from_secs(PROBE_RETRY_SECS);
             let tick = Duration::from_secs(1);
             while remaining > Duration::ZERO {
                 let this = min(remaining, tick);
@@ -654,18 +675,6 @@ impl MqttService {
         let state = state_guard.get_or_insert_with(MqttRuntimeState::default);
         f(state);
     }
-}
-
-/// 外网连通性轻量探测：对阿里 DNS 53 端口发起 TCP connect。
-///
-/// 不涉及 DNS 解析（直接用 IP）、不涉及 TLS 握手、不产生任何日志输出。
-/// 1.5s 超时足以覆盖最差的蜂窝链路建立场景。
-/// 返回 `true` 表示外网路由已就绪，`false` 表示仍不可达。
-async fn probe_network() -> bool {
-    timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(PROBE_ADDR))
-        .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false)
 }
 
 /// 计算「会影响当前连接」的配置指纹。
