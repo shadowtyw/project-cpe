@@ -558,7 +558,7 @@ impl MqttService {
         let topic_pub = config.topic_pub.replace("{imei}", &self.imei);
 
         let mut mqttoptions = MqttOptions::new(client_id, connect_host, port);
-        mqttoptions.set_keep_alive(Duration::from_secs(60));
+        mqttoptions.set_keep_alive(Duration::from_secs(120));
         mqttoptions.set_clean_session(true);
         mqttoptions.set_max_packet_size(MAX_PACKET_SIZE, MAX_PACKET_SIZE);
         if use_tls {
@@ -640,7 +640,7 @@ impl MqttService {
         //    publish 需要 EventLoop 轮询来完成网络 I/O，不能在 poll 回调中 await。
         // 3. 过滤 topic_pub 上的自回环：如果 topic_pub == topic_sub，忽略自己发布的消息。
         // 4. disable_timer 周期性检查 enabled，使「连接中关闭开关」能在 5s 内断开。
-        let heartbeat_interval = Duration::from_secs(300);
+        let heartbeat_interval = Duration::from_secs(900);
         let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
         // 第一次 tick 立即触发，跳过它
         heartbeat_timer.tick().await;
@@ -908,8 +908,7 @@ async fn publish_report(report: &DeviceReport) {
 
     match client.publish(&topic_pub, QoS::AtLeastOnce, false, payload.as_bytes()).await {
         Ok(_) => {
-            debug!("Published status to {topic_pub}");
-            crate::log_entry!(debug, LOG_MODULE, "已发布状态到 {}", topic_pub);
+            // 定时状态上报成功，不记日志以降低 I/O 唤醒、拉长基带休眠窗口
             MqttService::update_state_static(|state| {
                 state.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
             }).await;
