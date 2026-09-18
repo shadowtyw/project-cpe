@@ -589,35 +589,25 @@ async fn async_main() -> Result<()> {
     // MQTT 的整个生命周期（等待网卡就绪、DNS 解析、TLS 建连、重试循环）
     // 均在独立的 tokio 任务中执行，WebUI、D-Bus 看门狗和系统服务无需等待
     // MQTT 建连结果即可立即就绪。
-    //
-    // 外层 supervise 负责 IMEI 获取阶段的崩溃恢复；
-    // 内层自愈 loop 负责 MqttService::run() 的 panic 恢复。
     {
         let conn_clone = Arc::clone(&dbus_conn);
         let config_manager = Arc::clone(&config_manager);
         tokio::spawn(async move {
-            let imei = supervise("mqtt_setup", {
-                let conn_clone = Arc::clone(&conn_clone);
-                move || {
-                    let conn_clone = Arc::clone(&conn_clone);
-                    async move {
-                        // 短暂延迟让 D-Bus 就绪
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                        loop {
-                            match crate::dbus::get_device_info_data(&conn_clone).await {
-                                Ok(info) if !info.imei.is_empty() => break info.imei,
-                                _ => {
-                                    crate::log_entry!(
-                                        warn, "mqtt",
-                                        "IMEI 获取失败，30s 后重试"
-                                    );
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                                }
-                            }
+            // IMEI 获取循环：ofono 可能晚于本进程启动，持续重试直到成功。
+            // 不使用 supervise 包装——supervise 要求 Future<Output = ()>，
+            // 而这里需要把 IMEI 传递给下游。
+            let imei = {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                loop {
+                    match crate::dbus::get_device_info_data(&conn_clone).await {
+                        Ok(info) if !info.imei.is_empty() => break info.imei,
+                        _ => {
+                            crate::log_entry!(warn, "mqtt", "IMEI 获取失败，30s 后重试");
+                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         }
                     }
                 }
-            }).await;
+            };
 
             let service = Arc::new(mqtt_service::MqttService::new(
                 Arc::clone(&config_manager),
