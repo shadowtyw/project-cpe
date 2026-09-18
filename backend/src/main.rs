@@ -583,32 +583,65 @@ async fn async_main() -> Result<()> {
         });
     }
 
-    // MQTT 远程控制服务（默认关闭，启用后连接国内公共 Broker 实现远程控制）
+    // MQTT 远程控制服务（默认关闭）
+    //
+    // v3.7.9: 完全后台化，不阻塞系统启动。
+    // MQTT 的整个生命周期（等待网卡就绪、DNS 解析、TLS 建连、重试循环）
+    // 均在独立的 tokio 任务中执行，WebUI、D-Bus 看门狗和系统服务无需等待
+    // MQTT 建连结果即可立即就绪。
+    //
+    // 外层 supervise 负责 IMEI 获取阶段的崩溃恢复；
+    // 内层自愈 loop 负责 MqttService::run() 的 panic 恢复。
     {
         let conn_clone = Arc::clone(&dbus_conn);
         let config_manager = Arc::clone(&config_manager);
         tokio::spawn(async move {
-            supervise("mqtt_service", move || {
+            let imei = supervise("mqtt_setup", {
                 let conn_clone = Arc::clone(&conn_clone);
-                let config_manager = Arc::clone(&config_manager);
-                async move {
-                    // 延迟 10 秒启动，等待数据连接就绪
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-                    // 获取 IMEI 用于生成唯一的 Client ID
-                    let imei = match crate::dbus::get_device_info_data(&conn_clone).await {
-                        Ok(info) if !info.imei.is_empty() => info.imei,
-                        _ => {
-                            tracing::warn!("Failed to get IMEI, using 'unknown' as fallback");
-                            "unknown".to_string()
+                move || {
+                    let conn_clone = Arc::clone(&conn_clone);
+                    async move {
+                        // 短暂延迟让 D-Bus 就绪
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        loop {
+                            match crate::dbus::get_device_info_data(&conn_clone).await {
+                                Ok(info) if !info.imei.is_empty() => break info.imei,
+                                _ => {
+                                    crate::log_entry!(
+                                        warn, "mqtt",
+                                        "IMEI 获取失败，30s 后重试"
+                                    );
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                                }
+                            }
                         }
-                    };
-
-                    let service = mqtt_service::MqttService::new(config_manager, conn_clone, imei);
-                    service.run().await;
+                    }
                 }
-            })
-            .await;
+            }).await;
+
+            let service = Arc::new(mqtt_service::MqttService::new(
+                Arc::clone(&config_manager),
+                Arc::clone(&conn_clone),
+                imei,
+            ));
+
+            // 自愈循环：MqttService::run() 是永不退出的 loop，
+            // 只有 panic 才会到达这里。接管崩溃恢复。
+            loop {
+                let svc = Arc::clone(&service);
+                let handle = tokio::spawn(async move { svc.run().await });
+                match handle.await {
+                    Ok(()) => {
+                        tracing::warn!("mqtt_service exited unexpectedly; restarting in 10s");
+                        crate::log_entry!(warn, "mqtt", "MQTT 服务意外退出，10 秒后重启");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "mqtt_service panicked; restarting in 10s");
+                        crate::log_entry!(error, "mqtt", "MQTT 服务 panic，10 秒后重启：{}", e);
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            }
         });
     }
 
