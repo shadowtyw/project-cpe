@@ -12,25 +12,21 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 use zbus::Connection;
 
-/// 外网连通性探测目标：阿里 DNS TCP 端口（预解析为 SocketAddr）。
+/// 蜂窝数据网卡接口名称。
 ///
-/// 直接使用 SocketAddr 而非 &str，避免 `TcpStream::connect` 内部调用
-/// `to_socket_addrs()` → `getaddrinfo()`。在 musl + 基带未就绪的窗口期，
-/// getaddrinfo 可能对 IP 字面量返回局部/不完整结果，导致 connect 在
-/// 20ms 内"成功"——实际连到了错误地址或本地 socket。
-const PROBE_TARGET: std::net::SocketAddr =
-    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5)), 53);
+/// 冷启动时通过检查该接口是否已获得有效 IPv4 地址来判断蜂窝网络是否就绪，
+/// 替代 v3.7.6 及之前基于 TCP connect 探测的方案——在 musl + 基带未就绪窗口期，
+/// 即使预解析 SocketAddr，内核的 `NetworkUnreachable` 仍可能以极短延迟返回
+/// 并意外穿透 `Ok(Ok(_))` 检查，导致误判放行。
+const DATA_INTERFACE: &str = "sipa_eth0";
 
-/// 单次探测超时。
-const PROBE_TIMEOUT_MS: u64 = 1500;
+/// IP 就绪轮询间隔（秒）。
+const IP_CHECK_POLL_SECS: u64 = 3;
 
-/// 探测失败后重试间隔。
-const PROBE_RETRY_SECS: u64 = 3;
-
-/// 冷启动首轮"外网连通性已确认"标记。
+/// 冷启动首轮"蜂窝网卡 IP 已就绪"标记。
 ///
-/// 进程生命周期内仅生效一次：首次通过探测后置位，后续循环直接跳过。
-static NETWORK_PROBE_PASSED: AtomicBool = AtomicBool::new(false);
+/// 进程生命周期内仅生效一次：首次检测到有效 IPv4 后置位，后续循环直接跳过。
+static DATA_IP_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
 /// MQTT 模块在前端日志里的独立模块名。
 ///
@@ -165,26 +161,28 @@ impl MqttService {
                 state.enabled = true;
             }).await;
 
-            // ── 外网连通性探测门禁 ────
+            // ── 蜂窝网卡 IP 就绪门禁 ────
             //
-            // v3.7.5：用轻量 TCP connect 验证蜂窝路由是否真正打通，
-            // 替代 v3.7.4 的固定 90s 盲等。固定延时无法适应不同基带
-            // 注网速度的差异——有时 90s 不够，有时 45s 就已就绪。
+            // v3.7.7：彻底放弃 TCP Socket 探测（v3.7.5/v3.7.6），改为
+            // 直接检查 sipa_eth0 是否已获得有效 IPv4 地址。
             //
-            // 策略：首轮循环依次执行 TCP 探测（1.5s 超时），失败则
-            // 静默休眠 3s 再试，不发起任何 MQTT 建连、不产生 error 日志。
-            // 一旦探测通过标记即永久置位，后续循环（含用户手动关→开）跳过。
-            if !NETWORK_PROBE_PASSED.load(Ordering::SeqCst) {
-                self.wait_for_network_probe().await;
+            // 前因：在 musl aarch64 + 基带未就绪窗口期，即使预解析
+            // SocketAddr 并用 `Ok(Ok(_))` 匹配，内核的 NetworkUnreachable
+            // 错误仍能在 <50ms 内穿透检查，导致误判放行 MQTT 建连。
+            //
+            // 策略：每 3s 读取一次 sipa_eth0 的 IPv4 地址。只有当接口存在
+            // 且拥有非空、非 0.0.0.0、非 127.0.0.1 的真实 IPv4 时，才认为
+            // 蜂窝网络已就绪，允许 MQTT 开始建连。标记进程生命周期内永久置位。
+            if !DATA_IP_CONFIRMED.load(Ordering::SeqCst) {
+                self.wait_for_data_ip().await;
                 // 等待期间被用户关闭 MQTT → 回到外层循环顶部 teardown
                 if !self.config_manager.get_mqtt().enabled {
                     continue;
                 }
-                // 探测成功；以 info 级别告知用户连通时间点
                 crate::log_entry!(
                     info,
                     LOG_MODULE,
-                    "外网连通性确认，开始 MQTT 建连"
+                    "蜂窝网卡 IP 就绪，开始 MQTT 建连"
                 );
             }
 
@@ -197,12 +195,13 @@ impl MqttService {
         }
     }
 
-    /// 外网连通性探测等待循环。
+    /// 蜂窝网卡 IP 就绪等待循环。
     ///
-    /// 每 3s 发起一次 TCP connect 到阿里 DNS 53 端口（1.5s 超时），
-    /// 仅 `Ok(Ok(_stream))` 视为连通——任何超时、连接拒绝、路由不可达
-    /// 均进入下一轮休眠，绝不误判放行。通网后置位 `NETWORK_PROBE_PASSED`。
-    async fn wait_for_network_probe(&self) {
+    /// 每 3s 读取 `sipa_eth0` 的 IPv4 地址（通过 `/sys/class/net/` 下的
+    /// 文件系统接口，无需执行外部命令）。只有当接口存在且拥有真实 IPv4 地址
+    ///（非空、非 `0.0.0.0`、非 `127.0.0.1`）时，才置位 `DATA_IP_CONFIRMED`
+    /// 并返回。等待期间可通过关闭 MQTT 开关提前退出。
+    async fn wait_for_data_ip(&self) {
         let mut first = true;
         loop {
             if !self.config_manager.get_mqtt().enabled {
@@ -212,32 +211,31 @@ impl MqttService {
                 crate::log_entry!(
                     info,
                     LOG_MODULE,
-                    "等待外网连通（探测 {}）…",
-                    PROBE_TARGET
+                    "等待蜂窝网卡 {} 获取 IP 地址…",
+                    DATA_INTERFACE
                 );
                 first = false;
             }
-            // ── 关键：只有 Ok(Ok(_stream)) 才是真正连通 ────────
-            // timeout 返回 Result<io::Result<TcpStream>, Elapsed>。
-            // Ok(Ok(_))  = TCP 三次握手完成，外网路由确实就绪。
-            // Ok(Err(_)) = 连接被拒 / 路由不可达（20ms 级立即返回），
-            // Err(_)     = 1.5s 超时，两种都必须在 catch-all 分支休眠。
-            match tokio::time::timeout(
-                Duration::from_millis(PROBE_TIMEOUT_MS),
-                tokio::net::TcpStream::connect(PROBE_TARGET),
-            )
-            .await
-            {
-                Ok(Ok(_stream)) => {
-                    // 显式 drop stream，立即关闭探测连接
-                    drop(_stream);
-                    NETWORK_PROBE_PASSED.store(true, Ordering::SeqCst);
+
+            match Self::check_data_interface_ipv4(DATA_INTERFACE) {
+                Some(ip) => {
+                    crate::log_entry!(
+                        info,
+                        LOG_MODULE,
+                        "蜂窝网卡 {} 已获取 IPv4 地址 {}",
+                        DATA_INTERFACE,
+                        ip
+                    );
+                    DATA_IP_CONFIRMED.store(true, Ordering::SeqCst);
                     return;
                 }
-                _ => {}
+                None => {
+                    // 接口尚未就绪或尚无有效 IP，等待后重试
+                }
             }
+
             // 分段 sleep：允许用户在此期间关闭 MQTT
-            let mut remaining = Duration::from_secs(PROBE_RETRY_SECS);
+            let mut remaining = Duration::from_secs(IP_CHECK_POLL_SECS);
             let tick = Duration::from_secs(1);
             while remaining > Duration::ZERO {
                 let this = min(remaining, tick);
@@ -248,6 +246,72 @@ impl MqttService {
                 }
             }
         }
+    }
+
+    /// 读取指定网络接口的主 IPv4 地址。
+    ///
+    /// 仅通过读取 `/sys/class/net/{iface}/` 下的文件来判断——不执行外部命令、
+    /// 不发起任何网络连接。
+    ///
+    /// 返回 `Some(ip_string)` 当接口存在且有一个有效的全局/私有 IPv4 地址；
+    /// 返回 `None` 当接口不存在、没有 IPv4、或地址为无效值（`0.0.0.0`、`127.0.0.1`）。
+    fn check_data_interface_ipv4(iface: &str) -> Option<String> {
+        use std::fs;
+        use std::path::Path;
+
+        let base = Path::new("/sys/class/net").join(iface);
+
+        // 1. 接口必须存在且状态为 up
+        let operstate = fs::read_to_string(base.join("operstate")).ok()?;
+        let operstate = operstate.trim();
+        if operstate != "up" && operstate != "unknown" {
+            return None;
+        }
+
+        // 2. 解析 `ip addr show dev {iface}` 的输出，或用 `ioctl`。
+        //    在嵌入式 Linux 上最可靠的方式是直接读 /proc/net/fib_trie 或
+        //    解析 ip 命令。这里采用轻量的 ip addr show —— 它只读取内核
+        //    接口地址表，不发起网络连接，延迟通常在 1-2ms。
+        let output = std::process::Command::new("ip")
+            .args(["addr", "show", "dev", iface])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        // 查找第一个有效的全局/私有 IPv4 inet 地址
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.starts_with("inet ") {
+                continue;
+            }
+            // 行格式: "    inet 10.132.240.44/24 brd ..." 或 "    inet 10.132.240.44/24 scope global ..."
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let addr_with_prefix = parts[1];
+            let ip_str = match addr_with_prefix.split_once('/') {
+                Some((ip, _prefix)) => ip,
+                None => addr_with_prefix,
+            };
+
+            // 过滤无效值
+            if ip_str.is_empty() || ip_str == "0.0.0.0" || ip_str == "127.0.0.1" {
+                continue;
+            }
+
+            // 确认是合法 IPv4（非 IPv6）
+            if ip_str.parse::<std::net::Ipv4Addr>().is_ok() {
+                return Some(ip_str.to_string());
+            }
+        }
+
+        None
     }
 
     /// 清理连接：丢弃 client、清除 connected 与错误信息。
