@@ -24,7 +24,6 @@ use crate::models::{
     RadioModeResponse, ServingCell, SimInfoResponse,
 };
 use crate::serial::{with_serial, with_serial_timeout};
-use crate::state::FrontendRuntime;
 
 /// ofono NetworkMonitor 代理接口
 #[proxy(
@@ -808,28 +807,13 @@ async fn check_and_restore_data_connection(conn: &Connection) -> String {
 pub async fn data_connection_watchdog(
     conn: Arc<Connection>,
     config_manager: Arc<ConfigManager>,
-    frontend_runtime: Arc<FrontendRuntime>,
 ) {
     let mut last_data_log = String::new();
     // 首次进入循环前先检查一次，避免设备刚启动、连接已断时还要再等满一个 interval。
     let mut first_round = true;
 
     loop {
-        let refresh = config_manager.get_refresh();
-        let heartbeat_timeout = Duration::from_millis(refresh.heartbeat_timeout_ms());
-        let interval = if frontend_runtime.is_recent(heartbeat_timeout) {
-            Duration::from_millis(refresh.active_watchdog_interval_ms())
-        } else {
-            Duration::from_millis(refresh.idle_watchdog_interval_ms())
-        };
-
         if !first_round {
-            tokio::time::sleep(interval).await;
-        }
-        first_round = false;
-
-        // ofono 尚未就绪时先不检查，等下一个周期；真实状态变化才打印日志，避免刷屏。
-        if ofono_ready(&conn).await {
             let result = check_and_restore_data_connection(&conn).await;
             if result != last_data_log {
                 info!("Watchdog: data connection: {}", result);
@@ -842,6 +826,25 @@ pub async fn data_connection_watchdog(
                     // 避免 MQTT 因 DNS 未就绪进入退避后空等整个 backoff 窗口。
                     crate::mqtt_service::notify_data_connection_restored();
                 }
+            }
+
+            // 自适应休眠：已连接时 90s 一次轻量检查，断线时 2s 高频恢复重试。
+            // 不再依赖前端心跳节奏——空闲设备也能在断网后快速自愈。
+            let connected = result.starts_with("Connected");
+            let sleep_secs = if connected { 90u64 } else { 2u64 };
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+        } else {
+            first_round = false;
+            // 首次检查：立刻执行一次，避免启动阶段空等。
+            let result = check_and_restore_data_connection(&conn).await;
+            let connected = result.starts_with("Connection restored") || result.starts_with("Connected");
+            if result != last_data_log {
+                info!("Watchdog: data connection (initial): {}", result);
+                last_data_log = result;
+            }
+            if connected {
+                crate::band_manager::apply_persisted_locks(&conn, &config_manager).await;
+                crate::mqtt_service::notify_data_connection_restored();
             }
         }
     }

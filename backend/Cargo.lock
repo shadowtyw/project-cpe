@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "udx710"
-version = "3.7.2"
+version = "3.8.0"
 dependencies = [
  "anyhow",
  "axum",

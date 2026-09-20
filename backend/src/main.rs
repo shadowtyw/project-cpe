@@ -435,24 +435,7 @@ async fn async_main() -> Result<()> {
         });
     }
 
-    // 通话遥控轮询：检查待确认命令是否过期。
-    // poll() 返回下次需要检查的等待时长；返回 None 表示无任何计时状态，休眠一个
-    // 较长的兜底间隔。这样常态下几乎不唤醒，避免 1 秒一次的高频轮询占用 CPU。
-    {
-        tokio::spawn(async move {
-            supervise("call_control_poll", move || async move {
-                const IDLE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(5);
-                loop {
-                    match crate::call_control::poll().await {
-                        Some(wait) => tokio::time::sleep(wait).await,
-                        None => tokio::time::sleep(IDLE_INTERVAL).await,
-                    }
-                }
-            })
-            .await;
-        });
-    }
-    
+        
     // 自动初始化数据连接
     {
         let conn_clone = Arc::clone(&dbus_conn);
@@ -471,22 +454,21 @@ async fn async_main() -> Result<()> {
         });
     }
     
-    // 启动数据连接 Watchdog（每 15 秒检查一次）
+    // 启动数据连接 Watchdog — 自适应休眠：已连接时 90s 一次轻量检查，
+    // 断线时 2s 高频恢复重试，不再依赖前端心跳决定检查节奏。
     {
         let conn_clone = Arc::clone(&dbus_conn);
         let config_manager = Arc::clone(&config_manager);
-        let frontend_runtime = Arc::clone(&frontend_runtime);
         tokio::spawn(async move {
             supervise("data_connection_watchdog", move || {
                 let conn_clone = Arc::clone(&conn_clone);
                 let config_manager = Arc::clone(&config_manager);
-                let frontend_runtime = Arc::clone(&frontend_runtime);
                 async move {
                     // 初始延迟 5 秒，等待系统稳定
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     tracing::info!("Watchdog started");
                     log_entry!(info, "app", "Data connection watchdog started");
-                    dbus::data_connection_watchdog(conn_clone, config_manager, frontend_runtime).await;
+                    dbus::data_connection_watchdog(conn_clone, config_manager).await;
                 }
             })
             .await;
@@ -575,7 +557,7 @@ async fn async_main() -> Result<()> {
                         if let Err(e) = db_clone.cleanup_old_calls(CALL_KEEP) {
                             crate::log_entry!(warn, "db", "Call history cleanup failed: {}", e);
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(86400)).await;
                     }
                 }
             })

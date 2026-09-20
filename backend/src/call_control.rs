@@ -82,6 +82,64 @@ fn lock_state() -> MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+// ── 孤儿活跃通话清理（不再依赖 poll 轮询） ────────────────
+
+/// 活跃通话最长保留时间：远超单次通话时长，超过则视为 CallRemoved 信号丢失。
+const ACTIVE_CALL_TTL: Duration = Duration::from_secs(600);
+
+/// 通话遥控每次登记新来电或被匹配结束时，顺便清理残留的过期活跃通话条目。
+///
+/// 此函数是 `call_cleanup_loop`（sms_listener.rs）的精确补充：
+/// - `call_cleanup_loop` 每 60 秒全量扫描，覆盖"长时间无新通话"时的孤儿回收。
+/// - 本函数在每次状态变更时顺带调用，零额外唤醒，消灭"上次通话异常挂断后，
+///   下一个遥控来电到来时，残留条目阻塞白名单匹配"的窗口期。
+fn purge_stale_active_call() {
+    let mut state = lock_state();
+    if state
+        .active_call
+        .as_ref()
+        .is_some_and(|a| a.begin.elapsed() > ACTIVE_CALL_TTL)
+    {
+        if let Some(stale) = state.active_call.take() {
+            tracing::warn!(
+                number = %stale.number,
+                path = %stale.path,
+                "Stale call-control active call purged during incoming call handling"
+            );
+        }
+    }
+}
+
+// ── 异步过期定时器（替代轮询） ────────────────────────────
+
+/// 为待确认命令派生一次性过期定时器。
+///
+/// 在 `PendingCommand` 登记后立即派生一个 `tokio::spawn` 任务，精确休眠到
+/// `expires_at` 时刻。唤醒后如果命令尚未被二次来电消耗，则执行过期清理。
+/// 这彻底消除了此前为检查过期而维持的每 5 秒轮询协程——无来电时零唤醒。
+///
+/// 注意：如果同一号码在定时器触发前再次来电（二次确认成功），`on_incoming_call`
+/// 会取出 `PendingCommand`，定时器唤醒后发现 `pending` 已为 `None`，直接退出。
+fn spawn_expiry_timer(expires_at: Instant) {
+    tokio::spawn(async move {
+        let now = Instant::now();
+        if expires_at > now {
+            tokio::time::sleep(expires_at - now).await;
+        }
+        // 取出待确认命令（二次来电会提前消费掉 `pending`，此时为 None）。
+        let expired = lock_state().pending.take();
+        if let Some(pending) = expired {
+            send_notification(&serde_json::json!({
+                "event": "call_control_cancelled",
+                "number": pending.number,
+                "action": format!("{:?}", pending.action),
+                "action_label": pending.action_label,
+                "message": format!("命令已取消: {}（10秒内未收到二次确认来电）", pending.action_label),
+            }));
+        }
+    });
+}
+
 // ── 公开 API ──────────────────────────────────────────────
 
 /// 处理一条新的来电：命中白名单则自动接听并开始计时。
@@ -112,6 +170,9 @@ pub async fn on_incoming_call(
     }) {
         return false;
     }
+
+    // 每次来电顺便清理一次残留的过期活跃通话条目，无需独立轮询任务。
+    purge_stale_active_call();
 
     // 检查是否为二次确认来电
     let is_confirmation = { lock_state().pending.as_ref().is_some_and(|p| p.number == normalized) };
@@ -224,58 +285,12 @@ pub async fn on_call_removed(_conn: &Connection, config: &CallControlConfig, pat
         duration_secs: duration,
         expires_at: Instant::now() + Duration::from_secs(10),
     });
-}
+    let expires_at = state.pending.as_ref().unwrap().expires_at;
+    drop(state);
 
-/// 定时轮询：检查待确认命令是否过期，并清理超时的活跃通话残留。
-///
-/// 返回下次需要检查的等待时长；`None` 表示当前无任何计时状态，调用方可长时间
-/// 休眠（避免 1 秒一次的无谓唤醒，降低嵌入式设备 CPU/功耗占用）。
-pub async fn poll() -> Option<Duration> {
-    /// 活跃通话最长保留时间：远超单次通话时长，超过则视为 CallRemoved 信号丢失。
-    const ACTIVE_CALL_TTL: Duration = Duration::from_secs(600);
-
-    let expired = {
-        let mut state = lock_state();
-
-        // 清理孤儿活跃通话（CallRemoved 信号丢失时防止状态残留，阻塞后续判断）。
-        if state.active_call.as_ref().is_some_and(|a| a.begin.elapsed() > ACTIVE_CALL_TTL) {
-            if let Some(stale) = state.active_call.take() {
-                tracing::warn!(
-                    number = %stale.number,
-                    "Stale call-control active call cleared after {}s",
-                    ACTIVE_CALL_TTL.as_secs()
-                );
-            }
-        }
-
-        match state.pending.as_ref() {
-            Some(p) if p.expires_at > Instant::now() => {
-                // 未到期：精确休眠到到期时刻。
-                return Some(p.expires_at - Instant::now());
-            }
-            Some(_) => state.pending.take(),
-            // 无待确认命令：若还有活跃通话在计时，按其 TTL 兜底唤醒一次即可。
-            None => {
-                return state.active_call.as_ref().map(|a| {
-                    ACTIVE_CALL_TTL
-                        .checked_sub(a.begin.elapsed())
-                        .unwrap_or(Duration::from_secs(1))
-                });
-            }
-        }
-    };
-
-    if let Some(pending) = expired {
-        send_notification(&serde_json::json!({
-            "event": "call_control_cancelled",
-            "number": pending.number,
-            "action": format!("{:?}", pending.action),
-            "action_label": pending.action_label,
-            "message": format!("命令已取消: {}（10秒内未收到二次确认来电）", pending.action_label),
-        }));
-    }
-
-    None
+    // 派生一次性过期定时器，替代每 5 秒一次的轮询循环：定时器精确休眠到
+    // expires_at 时刻才唤醒一次，无来电时协程零开销挂起。
+    spawn_expiry_timer(expires_at);
 }
 
 /// 读取上次触发的通话遥控记录。

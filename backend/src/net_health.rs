@@ -102,10 +102,23 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
     // `state.last_level` 兜底，避免重复动作）。
     let mut last_action_at: Option<std::time::Instant> = None;
 
+    // 自适应探测周期：探测成功后逐步放宽（×1.5 倍，上限 120s），失败则回退到
+    // 配置基准值（默认 60s），避免连接健康时空耗 CPU/功耗做无意义探活。
+    // 初始值取配置基准值。
+    let mut current_interval_secs: u64 = 0; // 0 = 首轮，下次循环再读配置
+
     loop {
         let config = config_manager.get_net_health();
-        let interval = std::time::Duration::from_secs(config.interval_secs);
-        tokio::time::sleep(interval).await;
+        if current_interval_secs == 0 {
+            current_interval_secs = config.interval_secs;
+        }
+        // 配置的基准间隔可能在运行时被前端修改：当前自适应值不得超过
+        // 新基准的 120s/倍上限。
+        if current_interval_secs > 120 || current_interval_secs < config.interval_secs {
+            current_interval_secs = config.interval_secs;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(current_interval_secs)).await;
 
         if !config.enabled {
             continue;
@@ -160,6 +173,9 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
         let reachable = probe_targets(&config).await;
 
         if reachable {
+            // 探测成功：逐步放宽周期，减少健康态无意义唤醒（上限 120s）。
+            current_interval_secs =
+                (current_interval_secs.saturating_mul(3).saturating_div(2)).min(120);
             if state.consecutive_failures != 0 {
                 info!("Net health restored (connection reachable)");
                 state.consecutive_failures = 0;
@@ -170,6 +186,8 @@ pub async fn net_health_watchdog(conn: Arc<Connection>, config_manager: Arc<Conf
         }
 
         state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        // 探测失败：间隔回落至配置基准值，加速下一轮重试。
+        current_interval_secs = config.interval_secs;
         let failures = state.consecutive_failures;
 
         // 决定本次应执行的动作等级。
