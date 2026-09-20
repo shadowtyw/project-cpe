@@ -28,6 +28,13 @@ const IP_CHECK_POLL_SECS: u64 = 3;
 /// 进程生命周期内仅生效一次：首次检测到有效 IPv4 后置位，后续循环直接跳过。
 static DATA_IP_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
+/// 进程启动时间，用于冷启动 120s 延迟门禁。
+///
+/// v3.8.2：首次进入 `run()` 的建连路径时读取，计算距进程启动已过多久。
+/// 若不足 120s，补足剩余时长让 5G 基站外网路由彻底收敛后再建连；
+/// 若已超过 120s（进程运行许久后用户手动开启 MQTT），则立即建连。
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 /// MQTT 模块在前端日志里的独立模块名。
 ///
 /// `LogBufferLayer` 默认从 `target` 取末段（`udx710::mqtt_service` → `mqtt_service`），
@@ -141,6 +148,13 @@ impl MqttService {
         info!("MQTT service started");
         crate::log_entry!(info, LOG_MODULE, "MQTT 服务已启动");
 
+        // v3.8.2：冷启动 120s 延迟门禁。仅进程首次进入本函数时设立截止时刻，
+        // 后续调用（panic 重启、手动开/关后重新进入）若截止时刻已过则零等待。
+        // 配合外部 tokio::spawn，此 sleep 完全在 MQTT 专属协程内执行，
+        // 不影响 WebUI、D-Bus 监听等其他核心服务的秒级就绪。
+        let cold_boot_deadline = PROCESS_START
+            .get_or_init(|| Instant::now() + Duration::from_secs(120));
+
         loop {
             let config = self.config_manager.get_mqtt().sanitize();
 
@@ -160,6 +174,51 @@ impl MqttService {
             Self::update_state_static(|state| {
                 state.enabled = true;
             }).await;
+
+            // ── 冷启动延迟门禁 ────
+            //
+            // v3.8.2：首次启用时检查距进程启动是否已满 120s。若不足则补足剩余
+            // 时长，让 5G 基站外网路由彻底收敛后再开始建连。延迟仅生效一次，
+            // 且仅在配置已启用时执行——用户手动关闭再开启 MQTT 时，若截止时刻
+            // 已过则立即跳过。
+            // 注意：此处检查必须在「已启用」分支内，而不是循环顶部。用户在
+            // 循环顶部看到 config.enabled == false 时会走 teardown + continue，
+            // 此时 deadline 已设但 sleep 未执行——这是正确的：延迟只在首次"已启用
+            // 且即将建连"时才休眠，不会在"配置关闭→等待→开启"的切换链中重复等待。
+            if let Some(remaining) = cold_boot_deadline.checked_duration_since(Instant::now()) {
+                if remaining > Duration::ZERO {
+                    crate::log_entry!(
+                        info,
+                        LOG_MODULE,
+                        "MQTT 启动延迟中（{}s 后开始检测网络环境与建连）…",
+                        remaining.as_secs()
+                    );
+                    // 分段 sleep，允许用户在此期间关闭 MQTT
+                    {
+                        let mut left = remaining;
+                        let tick = Duration::from_secs(1);
+                        while left > Duration::ZERO {
+                            let this = min(left, tick);
+                            sleep(this).await;
+                            left = left.saturating_sub(this);
+                            if !self.config_manager.get_mqtt().enabled {
+                                // 用户在延迟期间关闭了 MQTT → 回到循环顶部 teardown
+                                crate::log_entry!(
+                                    info,
+                                    LOG_MODULE,
+                                    "冷启动延迟期间用户关闭了 MQTT，延迟中断"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    crate::log_entry!(
+                        info,
+                        LOG_MODULE,
+                        "MQTT 启动延迟结束（120s），开始检测网络环境与建连…"
+                    );
+                }
+            }
 
             // ── 蜂窝网卡 IP 就绪门禁 ────
             //
