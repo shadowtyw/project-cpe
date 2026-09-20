@@ -2,7 +2,7 @@
 
 面向成品 5G CPE / 通讯壳的 Web 管理系统。后端采用 Rust + Axum + zbus，通过 ofono D-Bus 管理 5G/LTE 调制解调器；前端基于 React + Vite + @tanstack/react-query，提供网络、短信、电话、频段、小区、USB、OTA、Webhook 和系统状态管理界面。
 
-> 当前版本：`3.7.9`  
+> 当前版本：`3.8.3`  
 > 目标平台：`aarch64-unknown-linux-musl`（展锐 UDX710 SoC）  
 > 授权协议：[GNU GPLv3](LICENSE)
 
@@ -56,9 +56,10 @@ project-cpe-main/
 │       ├── net_health.rs       # 外网探活与分级断网自愈（L1/L2/L3 阶梯恢复）
 │       ├── band_manager.rs     # 频段/小区锁持久化与开机/重连自动重套
 │       ├── log_buffer.rs       # 内存环形日志缓冲（2000条，不写磁盘）
-│       ├── state.rs            # 前端运行时状态
+│       ├── state.rs            # 前端运行时状态 + 连通性防抖状态
 │       ├── process_monitor.rs  # 进程内存占用读取
 │       ├── iptables.rs         # 防火墙规则辅助
+│       ├── remote_control_push.rs # 遥控通知推送（通话/短信/MQTT 统一通道）
 │       └── utils.rs            # 系统工具（/proc 读取、命令执行）
 ├── frontend/                   # React 前端（Vite + TanStack Query）
 │   ├── package.json
@@ -130,11 +131,11 @@ project-cpe-main/
 
 | 组件 | 技术 | 用途 |
 |------|------|------|
-| 框架 | React 18 | 组件化 UI |
-| 构建 | Vite | 快速开发与构建 |
-| 数据获取 | @tanstack/react-query | 缓存、轮询、自动刷新 |
-| 路由 | React Router | 页面路由 |
-| 样式 | CSS Modules + 自定义主题 | 深色/浅色模式 |
+| 框架 | React 19 | 组件化 UI |
+| 构建 | Vite 7 | 快速开发与构建 |
+| 数据获取 | @tanstack/react-query / SWR | 缓存、轮询、自动刷新 |
+| 路由 | React Router 7 | 页面路由 |
+| 样式 | Material UI 7 + 自定义主题 | 深色/浅色模式 |
 | 状态 | React Context | 刷新间隔、主题切换 |
 
 ### 目标平台
@@ -142,7 +143,9 @@ project-cpe-main/
 - **SoC**：展锐 UDX710（aarch64）
 - **系统**：Linux（systemd 管理）
 - **二进制**：aarch64-unknown-linux-musl（静态链接）
-- **构建优化**：LTO + codegen-units=1 + panic=abort + strip
+- **构建优化**：LTO + codegen-units=1 + panic=abort + strip + opt-level="z"
+- **UPX 压缩**：--best --lzma（进一步缩减二进制体积）
+- **前端构建**：Vite + es2020 target，关闭 SourceMap（缩减 www/ 约 500KB+）
 
 ---
 
@@ -189,7 +192,7 @@ project-cpe-main/
 核心设计原则：
 
 1. **D-Bus 串行化**：所有 ofono 操作通过 `with_serial` 全局锁串行执行，避免 "Operation already in progress" 错误。30 秒超时后 `process::abort()`，由 systemd 自动重启恢复。
-2. **后台任务监督**：8 个后台任务（SMS/通话监听、数据连接 Watchdog、重启策略、定时计划、流量统计、数据库清理）均通过 `supervise()` 封装，panic 或退出后自动重启。
+2. **后台任务监督**：10 个后台任务（SMS/通话监听、数据连接 Watchdog、MQTT 远程控制、重启策略、定时计划、流量统计、数据库清理、外网探活）均通过 `supervise()` 封装，panic 或退出后自动重启。MQTT 服务额外使用独立 panic 保护（`AssertUnwindSafe`），在 tokio runtime 未完全就绪时也能安全重启。
 3. **阻塞 I/O 隔离**：文件系统操作、进程执行等阻塞 I/O 使用 `spawn_blocking` 卸载到 tokio 阻塞线程池，不占用 HTTP worker。
 4. **锁中毒恢复**：所有 `Mutex`/`RwLock` 获取均使用 `unwrap_or_else(|p| p.into_inner())`，避免锁中毒导致 panic 传播。
 
@@ -463,21 +466,20 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 
 ### 2. 后台任务监督
 
-11 个后台任务通过 `supervise()` 封装，panic 或意外退出后自动重启：
+10 个后台任务通过 `supervise()` 封装，panic 或意外退出后自动重启（MQTT 另由独立 panic 守卫兜底）：
 
 | 任务 | 功能 | 重启间隔 |
 |------|------|----------|
 | `sms_listener` | 监听 D-Bus 短信信号 | 5s |
 | `call_listener` | 监听 D-Bus 通话信号 | 5s |
 | `call_cleanup_loop` | 孤儿通话条目周期清理（60s） | 2s |
-| `call_control_poll` | 通话遥控轮询（按待确认命令到期时间精确定时唤醒，空闲 5s 兜底） | 2s |
-| `data_connection_watchdog` | 数据连接保活（前台 5s / 后台 ≥60s 自适应） | 2s |
-| `net_health_watchdog` | 外网探活与分级断网自愈 | 2s |
+| `data_connection_watchdog` | 数据连接保活（已连接 90s / 断线 2s 自适应，不依赖前端心跳） | 2s |
+| `net_health_watchdog` | 外网探活与分级断网自愈（自适应间隔 默认→×1.5→最大 120s） | 2s |
 | `restart_watchdog` | 自动重启策略（60s） | 2s |
 | `schedule_watchdog` | 定时计划执行 | 2s |
 | `traffic_watchdog` | 流量统计采样（300s） | 2s |
-| `db_cleanup` | 数据库记录清理（3600s） | 2s |
-| `mqtt_service` | MQTT 远程控制（故障转移） | 5s |
+| `db_cleanup` | 数据库记录清理（每天一次，86400s） | 2s |
+| `mqtt_service` | MQTT 远程控制（故障转移 + 冷启动 120s 延迟门禁） | 10s |
 
 ### 3. 数据库稳定性
 
@@ -498,7 +500,8 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **环形日志缓冲**：最多 2000 条，不写磁盘，不磨损 flash
 - **tokio 阻塞线程池上限 8**：默认 512 × 2MB 栈 ≈ 1GB 虚拟内存，收紧为 8 个线程
 - **SQLite 页缓存 1MB**：`cache_size=-1024`，比默认 2MB 少占用约 1MB 常驻内存
-- **孤儿通话条目清理**：30 分钟 TTL 之外，新增 60s 周期清理循环，信号丢失残留的条目也能及时回收
+- **孤儿通话条目清理**：30 分钟 TTL 之外，新增 60s 周期清理循环（`call_cleanup_loop`），信号丢失残留的条目也能及时回收；来电事件触发被动清理作为即时补充
+- **通话遥控事件驱动**：待确认命令到期改为 `tokio::spawn` 一次性精确定时器唤醒，消除原 5s 周期性轮询的 CPU 空转
 - **可用内存语义**：使用 Linux `MemAvailable` 而非 `MemTotal - MemFree`，反映真实可用内存
 
 ### 6. 前端健壮性
@@ -516,7 +519,8 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 
 针对 ofono 状态显示 `registered` 但实际已断流的"假死"问题，增加独立的外网探活 watchdog：
 
-- **周期 ping 公共 IP**：同时探测 `223.5.5.5`（阿里 DNS）和 `119.29.29.29`（腾讯 DNS）
+- **周期 ping 公共 IP**：同时探测 `223.5.5.5`（阿里 DNS）和 `2400:3200::1`（IPv6）
+- **自适应间隔**：探测成功时间隔逐次乘以 1.5×（最大 120s），失败时回退到配置的基础间隔。健康连接减少约 30-50% 唤醒次数
 - **分级恢复阶梯**：
   - **L1**：连续失败 3 次 → 重置数据连接（Active=false→true）
   - **L2**：连续失败 6 次 → 飞行模式复位基带（Online=false→true）
@@ -529,7 +533,16 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
   - 探测命令带硬超时（`timeout_secs + 3`），防止探活命令挂死占住阻塞线程池
 - **飞行模式卡死升级**：L2 复位后若设备仍持续离线（`stuck_in_airplane`），自动升级到 L3 重启，防止远程指令或复位失败导致设备永久卡在飞行模式
 
-### 9. 短信遥控指令
+### 9. 前端连通性显示防抖
+
+Dashboard 的 IPv4/IPv6 连通性指示来自每次 ping 的原始结果。单次探测失败（如网络瞬间抖动）就报断网会导致前端频繁闪烁红色状态，产生误报。
+
+- **三击防抖阈值**：单次 ping 失败不立即报断网，保留并返回上一次的有效延迟值；仅连续 **3 次**探测均失败才对外呈现断网状态
+- **IPv4/IPv6 独立跟踪**：两者各自的失败计数器互不影响，IPv4 短暂闪断不会影响 IPv6 的显示
+- **成功立即复位**：任一协议探测成功后，其失败计数器归零并存储最新有效值
+- **零前端改动**：防抖在 `get_connectivity_check` handler 侧完成，前端无感知
+
+### 10. 短信遥控指令
 
 通讯壳无实体按键，Web UI 不可达时提供外部应急通道：
 
@@ -553,7 +566,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **独立开关**：`SmsControlConfig.enabled` 控制，与通话遥控互不干扰
 - **编码兼容**：支持 GSM 7-bit（含扩展字符如 `€`）与 UCS-2 解码；异常长度 PDU 安全截断，不会 panic
 
-### 10. 通话遥控（时长编码 + 二次确认）
+### 11. 通话遥控（时长编码 + 二次确认）
 
 通讯壳无实体按键，通话遥控提供另一条外部应急通道：
 
@@ -571,7 +584,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **独立开关**：`CallControlConfig.enabled` 控制，与短信遥控互不干扰
 - **配置上限**：最多 10 条时长命令映射，时长范围 3-30 秒
 
-### 11. 频段/小区锁持久化与自动重套
+### 12. 频段/小区锁持久化与自动重套
 
 解决 4G 物联卡自动模式无信号、频段锁定 NVRAM 不可靠、小区锁定 RAM 态丢失问题：
 
@@ -585,7 +598,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **容错设计**：每步失败只打 warn 日志，不阻断后续步骤
 - **工程模式兜底恢复**：小区锁进入 `AT+SFUN=5` 后，无论中间步骤成败都保证恢复 `AT+SFUN=4`，防止 modem 滞留工程模式导致无信号
 
-### 12. MQTT 远程控制
+### 13. MQTT 远程控制
 
 适用于纯数据物联卡（无短信/通话权限）的远程运维通道：
 
@@ -609,9 +622,10 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - **独立日志视图**：MQTT 页面内置日志面板，只筛选 `mqtt` / `mqtt_service` 两个模块的记录，连接、订阅、指令、报错都带节点与主题上下文；系统日志页同时新增「来源模块」下拉，模块列表由后端实时返回而非前端硬编码
 - **日志不再逐条重复**：MQTT 模块每个事件原先成对出现——一行英文 tracing（模块名 `mqtt_service`）加一行中文 `log_entry!`（模块名 `mqtt`），两者都进内存缓冲，于是 Web 日志页每条事件显示两遍。现在双写模块的 **info/debug** 级 tracing 事件不再入缓冲，只保留中文条目；英文细节仍输出到 stdout，`RUST_LOG=debug` 时在串口可见。**warn/error 一律不过滤**：宁可中英各一条，也不能冒「将来新增 `error!` 却漏配 `log_entry!`，导致这条错误在 Web 页面上彻底消失」的风险——无人值守设备上，看不见的错误比重复的错误危险得多
 - **默认关闭**：`MqttConfig.enabled` 默认 `false`，需手动开启
-- **冷启动网络就绪门禁**：进程启动后不立即建连，改为等待蜂窝数据网卡 `sipa_eth0` 获得有效 IPv4 地址（非空、非 `0.0.0.0`、非 `127.0.0.1`），每 3 秒检查一次，IP 就绪后才允许 MQTT 建连。门禁进程生命周期内仅一次，后续重连直接跳过。彻底取代 v3.7.6 及之前基于 TCP connect 的探测方案（在 musl aarch64 + 基带未就绪窗口期，内核 NetworkUnreachable 错误会穿透检查导致误判放行，引发 DNS 阻塞卡死 tokio worker）
+- **冷启动网络就绪门禁**：进程启动后不立即建连，改为等待蜂窝数据网卡 `sipa_eth0` 获得有效 IPv4 地址（非空、非 `0.0.0.0`、非 `127.0.0.1`），每 3 秒检查一次，IP 就绪后追加 5s 稳定性宽限期再建连。门禁进程生命周期内仅一次，后续重连直接跳过。彻底取代 v3.7.6 及之前基于 TCP connect 的探测方案（在 musl aarch64 + 基带未就绪窗口期，内核 NetworkUnreachable 错误会穿透检查导致误判放行，引发 DNS 阻塞卡死 tokio worker）
+- **120s 开机延迟门禁**：进程启动后 MQTT `run()` 休眠至 120s 截止时刻（`OnceLock` 固定），让 5G 基站外网路由彻底收敛。若进程运行许久后用户手动开启 MQTT，`checked_duration_since` 模式确保截止时刻已过时立即跳过等待。延迟期间用户可随时关闭开关中断等待。消除 ~92s 的 Network 超时级联等待 —— 旧实现中 IP 就绪→DNS→TCP→TLS→MQTT 五个环节串行阻塞，任何一步卡住都锁死后续启动
 - **DNS 预解析 + 独立超时**：建连前先通过 `spawn_blocking` 做 DNS 解析（4s 超时），避免 musl 的 `getaddrinfo()` 阻塞 tokio 工作线程。超时直接走退避重试，不再耗尽线程池
-- **建连 4s 硬超时**：`ConnAck` 握手用 `tokio::time::timeout` 包裹，超时立即失败进入退避，不长时间挂起 MQTT 任务
+- **建连 5s 硬超时**：`ConnAck` 握手用 `tokio::time::timeout` 包裹（v3.8.1 由 4s 提升至 5s），超时立即失败进入退避，不长时间挂起 MQTT 任务
 - **数据连接恢复即时唤醒**：数据连接 watchdog 检测到恢复时立即通知 MQTT 模块中断退避 sleep 尝试重连，无需等待整个退避周期
 - **配置向后兼容**：旧版 `broker_list` + 全局 `port`/`tls`/`active_broker` 会在加载时自动迁移为节点列表；保存时同步回写旧字段镜像，OTA 回滚到旧版本二进制仍可读取。迁移在反序列化层完成且不抛错——单个字段残缺不会导致整份配置被重置为默认值
 
