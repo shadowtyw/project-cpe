@@ -227,6 +227,34 @@ impl MqttService {
                         ip
                     );
                     DATA_IP_CONFIRMED.store(true, Ordering::SeqCst);
+
+                    // ── 冷启动静默窗口（5s） ────────────────────
+                    //
+                    // v3.8.1 核心修复：蜂窝网卡获取 IP 地址时，基站侧的外网路由
+                    // 通常尚未完全收敛。此时立即发起 MQTT TCP/TLS 建连会命中
+                    // Network timeout —— 一次超时就是 5s，连续失败后指数退避很快
+                    // 累积到 90s+，表现为「开机后 MQTT 迟迟连不上」。
+                    //
+                    // 这里静等 5s 让路由稳定下来，一次额外的固定等待换取消除首轮
+                    // 2-3 次必然超时的代价。
+                    crate::log_entry!(
+                        info,
+                        LOG_MODULE,
+                        "蜂窝网卡 IP 已就绪（{}），等待 5s 静默窗口让外网路由稳定…",
+                        ip
+                    );
+                    {
+                        let mut grace = Duration::from_secs(5);
+                        let tick = Duration::from_secs(1);
+                        while grace > Duration::ZERO {
+                            let this = min(grace, tick);
+                            sleep(this).await;
+                            grace = grace.saturating_sub(this);
+                            if !self.config_manager.get_mqtt().enabled {
+                                return;
+                            }
+                        }
+                    }
                     return;
                 }
                 None => {
@@ -571,7 +599,14 @@ impl MqttService {
             debug!("MQTT credentials set for user {user}");
         }
 
-        let connect_deadline = Duration::from_secs(4);
+        // v3.8.1: 建连超时由 4s 调整为 5s。
+        //
+        // rumqttc 0.24 的 MqttOptions 不支持 set_connect_timeout()，TCP SYN 超时
+        // 完全依赖内核参数（aarch64 Linux 默认 ~15s）。外部 tokio::time::timeout
+        // 是唯一的硬超时手段。将 deadline 从 4s 上调为 5s 配合新增的冷启动 5s
+        // 静默窗口——在窗口之后，5s 足以让已稳定的路由完成 TCP + TLS 握手。若
+        // 仍超时说明链路确实不通，快速失败走退避重试。
+        let connect_deadline = Duration::from_secs(5);
         let conn_result = timeout(connect_deadline, async {
             let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
             client
