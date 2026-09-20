@@ -46,6 +46,7 @@ use crate::{
 };
 use crate::process_monitor::read_top_memory_processes;
 use crate::state::FrontendRuntime;
+use crate::state::ConnectivityState;
 use std::process::Command;
 
 /// 处理 OPTIONS 请求（CORS 预检）
@@ -2765,18 +2766,26 @@ pub async fn set_apn_handler(
 
 /// GET /api/connectivity - 联网检测
 ///
-/// 通过 ping 检测 IPv4 和 IPv6 连通性
-pub async fn get_connectivity_check() -> (StatusCode, Json<ApiResponse<ConnectivityCheckResponse>>) {
+/// 通过 ping 检测 IPv4 和 IPv6 连通性。
+/// 单次探测失败不立即判定为断网：保留上一次的有效值，
+/// 仅当连续 3 次探测均失败时才对外呈现失败状态。
+pub async fn get_connectivity_check(
+    State(conn_state): State<Arc<ConnectivityState>>,
+) -> (StatusCode, Json<ApiResponse<ConnectivityCheckResponse>>) {
     // ping 是阻塞命令（每次最长约 2 秒），放到 spawn_blocking 避免阻塞 tokio worker。
     // IPv4/IPv6 并行执行，减少总耗时。
-    let (ipv4_result, ipv6_result) = tokio::join!(
+    let (ipv4_raw, ipv6_raw) = tokio::join!(
         tokio::task::spawn_blocking(|| ping_host("223.5.5.5", false)),
         tokio::task::spawn_blocking(|| ping_host("2400:3200::1", true)),
     );
 
+    let ipv4_result = ipv4_raw.unwrap_or_else(|_| failed_ping("223.5.5.5", "IPv4 ping task failed"));
+    let ipv6_result = ipv6_raw.unwrap_or_else(|_| failed_ping("2400:3200::1", "IPv6 ping task failed"));
+
+    // 防抖：单次失败保留上一次有效值，连续 3 次失败才对外报断网
     let response = ConnectivityCheckResponse {
-        ipv4: ipv4_result.unwrap_or_else(|_| failed_ping("223.5.5.5", "IPv4 ping task failed")),
-        ipv6: ipv6_result.unwrap_or_else(|_| failed_ping("2400:3200::1", "IPv6 ping task failed")),
+        ipv4: conn_state.apply_ipv4(&ipv4_result),
+        ipv6: conn_state.apply_ipv6(&ipv6_result),
     };
 
     (

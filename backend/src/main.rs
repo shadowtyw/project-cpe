@@ -70,7 +70,7 @@ use dbus::init_data_connection;
 use handlers::*;
 use db::Database;
 use sms_push::SmsPushSender;
-use state::{AppState, FrontendRuntime};
+use state::{AppState, ConnectivityState, FrontendRuntime};
 use webhook::WebhookSender;
 
 /// 获取二进制文件同级目录下的 www 目录路径。
@@ -290,6 +290,7 @@ async fn async_main() -> Result<()> {
     let sms_push_sender = Arc::new(SmsPushSender::new(Arc::clone(&config_manager)));
     let remote_control_push_sender = Arc::new(remote_control_push::RemoteControlPushSender::new(Arc::clone(&config_manager)));
     let frontend_runtime = Arc::new(FrontendRuntime::new());
+    let connectivity_state = Arc::new(ConnectivityState::new());
 
     // 初始化遥控通知器（通话/短信/MQTT 统一走独立的远程遥控推送 + 短信推送双通道）
     {
@@ -632,6 +633,7 @@ async fn async_main() -> Result<()> {
         sms_push_sender,
         remote_control_push_sender,
         frontend_runtime,
+        connectivity_state,
     );
 
     // Build routes - 使用统一的 AppState

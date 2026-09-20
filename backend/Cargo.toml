@@ -1,6 +1,6 @@
 [package]
 name = "udx710"
-version = "3.8.2"
+version = "3.8.3"
 edition = "2021"
 
 [dependencies]
@@ -28,7 +28,7 @@ rumqttc = { version = "0.24", features = ["use-rustls"] }
 
 [profile.release]
 strip = true
-opt-level = 3
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"

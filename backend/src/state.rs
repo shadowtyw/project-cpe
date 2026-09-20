@@ -17,6 +17,7 @@ use zbus::Connection;
 
 use crate::config::ConfigManager;
 use crate::db::Database;
+use crate::models::PingResult;
 use crate::remote_control_push::RemoteControlPushSender;
 use crate::sms_push::SmsPushSender;
 use crate::webhook::WebhookSender;
@@ -47,6 +48,70 @@ impl FrontendRuntime {
     }
 }
 
+/// 连通性探测防抖状态：单次 ping 失败不立即上报为断网，
+/// 保留上一次的成功值，仅连续 3 次失败后才判定为断开。
+pub struct ConnectivityState {
+    pub ipv4_failures: RwLock<u32>,
+    pub ipv6_failures: RwLock<u32>,
+    pub last_ipv4: RwLock<Option<PingResult>>,
+    pub last_ipv6: RwLock<Option<PingResult>>,
+}
+
+impl ConnectivityState {
+    const THRESHOLD: u32 = 3;
+
+    pub fn new() -> Self {
+        Self {
+            ipv4_failures: RwLock::new(0),
+            ipv6_failures: RwLock::new(0),
+            last_ipv4: RwLock::new(None),
+            last_ipv6: RwLock::new(None),
+        }
+    }
+
+    /// 处理一次 IPv4 探测结果，返回应对外呈现的值
+    pub fn apply_ipv4(&self, result: &PingResult) -> PingResult {
+        let mut failures = self.ipv4_failures.write().unwrap_or_else(|p| p.into_inner());
+        if result.success {
+            *failures = 0;
+            *self.last_ipv4.write().unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
+            result.clone()
+        } else {
+            *failures += 1;
+            if *failures >= Self::THRESHOLD {
+                result.clone()
+            } else {
+                self.last_ipv4
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                    .unwrap_or_else(|| result.clone())
+            }
+        }
+    }
+
+    /// 处理一次 IPv6 探测结果，返回应对外呈现的值
+    pub fn apply_ipv6(&self, result: &PingResult) -> PingResult {
+        let mut failures = self.ipv6_failures.write().unwrap_or_else(|p| p.into_inner());
+        if result.success {
+            *failures = 0;
+            *self.last_ipv6.write().unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
+            result.clone()
+        } else {
+            *failures += 1;
+            if *failures >= Self::THRESHOLD {
+                result.clone()
+            } else {
+                self.last_ipv6
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                    .unwrap_or_else(|| result.clone())
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub dbus_conn: Arc<Connection>,
@@ -56,6 +121,7 @@ pub struct AppState {
     pub sms_push_sender: Arc<SmsPushSender>,
     pub remote_control_push_sender: Arc<RemoteControlPushSender>,
     pub frontend_runtime: Arc<FrontendRuntime>,
+    pub connectivity_state: Arc<ConnectivityState>,
 }
 
 impl AppState {
@@ -67,6 +133,7 @@ impl AppState {
         sms_push_sender: Arc<SmsPushSender>,
         remote_control_push_sender: Arc<RemoteControlPushSender>,
         frontend_runtime: Arc<FrontendRuntime>,
+        connectivity_state: Arc<ConnectivityState>,
     ) -> Self {
         Self {
             dbus_conn,
@@ -76,6 +143,7 @@ impl AppState {
             sms_push_sender,
             remote_control_push_sender,
             frontend_runtime,
+            connectivity_state,
         }
     }
 }
@@ -119,6 +187,12 @@ impl FromRef<AppState> for Arc<RemoteControlPushSender> {
 impl FromRef<AppState> for Arc<FrontendRuntime> {
     fn from_ref(state: &AppState) -> Self {
         state.frontend_runtime.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<ConnectivityState> {
+    fn from_ref(state: &AppState) -> Self {
+        state.connectivity_state.clone()
     }
 }
 
