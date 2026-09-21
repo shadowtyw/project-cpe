@@ -17,14 +17,24 @@ use chrono::FixedOffset;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// 返回东八区（UTC+8 / Asia/Shanghai）当前时间的 RFC 3339 字符串。
+/// 东八区固定偏移（UTC+8 / Asia/Shanghai）。
 ///
-/// 嵌入式设备通常未配置时区，`Local::now()` 会回落 UTC。
-/// 使用固定 +08:00 偏移，确保推送通知、日志时间戳对国内用户直观可读。
+/// 嵌入式设备通常未配置时区，`chrono::Local::now()` 会静默回落到 UTC，导致日志、
+/// 短信、通话、定时计划等所有面向用户的时刻整体慢 8 小时。后端统一用此固定偏移
+/// 生成北京时间，不再依赖系统的 TZ 环境。
+pub fn beijing_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 3600).expect("8*3600 is a valid offset")
+}
+
+/// 当前东八区时间的 `DateTime`，供需要做日期/时刻运算的代码复用
+/// （如流量按日归档、定时计划的分钟数计算），避免各处重复 `with_timezone`。
+pub fn beijing_now() -> chrono::DateTime<FixedOffset> {
+    chrono::Utc::now().with_timezone(&beijing_offset())
+}
+
+/// 返回东八区（UTC+8 / Asia/Shanghai）当前时间的 RFC 3339 字符串（带 +08:00）。
 pub fn beijing_now_rfc3339() -> String {
-    let offset = FixedOffset::east_opt(8 * 3600).expect("8*3600 is a valid offset");
-    chrono::Utc::now()
-        .with_timezone(&offset)
+    beijing_now()
         .format("%Y-%m-%dT%H:%M:%S%.3f+08:00")
         .to_string()
 }

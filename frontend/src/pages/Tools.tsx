@@ -42,6 +42,7 @@ import type {
   ScheduleAction,
   DiagnosticReport,
 } from '../api/types'
+import { formatDateTime } from '../utils/time'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -366,7 +367,7 @@ function DiagnosticsPanel() {
             <Chip label={`commit ${report.commit}`} size="small" variant="outlined" />
             <Chip label={`设备 ${report.device?.model || '未知'}`} size="small" variant="outlined" />
             <Chip label={`运营商 ${report.network?.operator_name || '未知'}`} size="small" variant="outlined" />
-            <Chip label={`创建 ${new Date(report.generated_at).toLocaleString()}`} size="small" variant="outlined" />
+            <Chip label={`创建 ${formatDateTime(report.generated_at)}`} size="small" variant="outlined" />
           </Box>
           {report.recent_logs.length > 0 && (
             <Box mt={2}>
@@ -378,7 +379,7 @@ function DiagnosticsPanel() {
                 }}
               >
                 {report.recent_logs.map((log, i) => (
-                  <div key={i}>{log.timestamp} [{log.level}] {log.module}: {log.message}</div>
+                  <div key={i}>{formatDateTime(log.timestamp)} [{log.level}] {log.module}: {log.message}</div>
                 ))}
               </Box>
             </Box>

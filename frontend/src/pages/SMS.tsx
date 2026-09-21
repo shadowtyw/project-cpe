@@ -47,6 +47,7 @@ import {
 } from '@mui/icons-material'
 import { api, type SmsMessage, type SmsStats } from '../api'
 import { useRefreshInterval } from '../contexts/RefreshContext'
+import { formatTimeSmart, formatTimeShort } from '../utils/time'
 
 interface ConversationGroup {
   phoneNumber: string
@@ -275,35 +276,11 @@ export default function SMSPage() {
     }
   }
 
-  // 格式化时间
-  const formatTime = (timestamp: string) => {
-    try {
-      const date = new Date(timestamp)
-      const now = new Date()
-      const isToday = date.toDateString() === now.toDateString()
-      if (isToday) {
-        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-      }
-      return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-    } catch {
-      return timestamp
-    }
-  }
+  // 格式化时间（统一北京时间，见 utils/time.ts）
+  const formatTime = (timestamp: string) => formatTimeSmart(timestamp)
 
   // 格式化简短时间
-  const formatShortTime = (timestamp: string) => {
-    try {
-      const date = new Date(timestamp)
-      const now = new Date()
-      const isToday = date.toDateString() === now.toDateString()
-      if (isToday) {
-        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-      }
-      return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
-    } catch {
-      return timestamp
-    }
-  }
+  const formatShortTime = (timestamp: string) => formatTimeShort(timestamp)
 
   // 对话列表 JSX
   const conversationListContent = (

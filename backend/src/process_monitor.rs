@@ -1,5 +1,4 @@
 use crate::models::{MemoryProcess, MemoryProcessesResponse};
-use chrono::Utc;
 use std::fs;
 use std::path::Path;
 
@@ -43,7 +42,7 @@ pub fn read_top_memory_processes() -> Result<MemoryProcessesResponse, String> {
     processes.truncate(TOP_PROCESS_COUNT);
 
     Ok(MemoryProcessesResponse {
-        sampled_at: Utc::now().to_rfc3339(),
+        sampled_at: crate::utils::beijing_now_rfc3339(),
         total_processes,
         total_memory_bytes,
         processes,

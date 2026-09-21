@@ -72,6 +72,7 @@ import {
 } from '@mui/icons-material'
 import { api, type CallInfo, type CallVolumeResponse, type CallForwardingResponse, type CallSettingsResponse, type CallRecord, type CallStats } from '../api'
 import { useRefreshInterval } from '../contexts/RefreshContext'
+import { formatTimeSmart } from '../utils/time'
 
 // 拨号盘按键
 const dialpadButtons = [
@@ -402,20 +403,8 @@ export default function PhonePage() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
-  // 格式化时间
-  const formatTime = (timestamp: string) => {
-    try {
-      const date = new Date(timestamp)
-      const now = new Date()
-      const isToday = date.toDateString() === now.toDateString()
-      if (isToday) {
-        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-      }
-      return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-    } catch {
-      return timestamp
-    }
-  }
+  // 格式化时间（统一北京时间，见 utils/time.ts）
+  const formatTime = (timestamp: string) => formatTimeSmart(timestamp)
 
   // 获取通话记录图标
   const getCallIcon = (direction: string, answered: boolean) => {

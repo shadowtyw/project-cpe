@@ -937,7 +937,7 @@ async fn handle_command_spawned(payload: &[u8], config: &MqttConfig, dbus_conn: 
     }
 
     MqttService::update_state_static(|state| {
-        state.last_command = Some(chrono::Utc::now().to_rfc3339());
+        state.last_command = Some(crate::utils::beijing_now_rfc3339());
     }).await;
 
     info!("Executing MQTT command: {}", cmd.action);
@@ -1019,7 +1019,7 @@ async fn publish_report(report: &DeviceReport) {
         Ok(_) => {
             // 定时状态上报成功，不记日志以降低 I/O 唤醒、拉长基带休眠窗口
             MqttService::update_state_static(|state| {
-                state.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
+                state.last_heartbeat = Some(crate::utils::beijing_now_rfc3339());
             }).await;
         }
         Err(e) => {

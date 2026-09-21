@@ -23,6 +23,7 @@ import { api } from '../api'
 import { useRefreshInterval } from '../contexts/RefreshContext'
 import { useAdaptivePolling } from '../hooks/useAdaptivePolling'
 import type { MemoryProcessesResponse } from '../api/types'
+import { formatDateTime } from '../utils/time'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -91,7 +92,7 @@ export default function MemoryProcesses() {
         <>
           <Box display="flex" gap={1} mb={2}>
             <Chip label={`可读进程 ${data.total_processes}`} />
-            <Chip label={`采样时间 ${new Date(data.sampled_at).toLocaleString()}`} variant="outlined" />
+            <Chip label={`采样时间 ${formatDateTime(data.sampled_at)}`} variant="outlined" />
           </Box>
           <TableContainer component={Paper}>
             <Table size="small">

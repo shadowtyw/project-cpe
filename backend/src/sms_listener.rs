@@ -91,7 +91,7 @@ pub async fn start_sms_listener(
                                 direction: "incoming".to_string(),
                                 phone_number: sender,
                                 content,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                timestamp: crate::utils::beijing_now_rfc3339(),
                                 status: "received".to_string(),
                                 pdu: None,
                             };
@@ -269,8 +269,8 @@ pub async fn start_call_listener(
                         if let Some(call) = active_calls.remove(&path_str) {
                             // Calculate duration
                             let duration = (Utc::now() - call.start_time).num_seconds();
-                            let end_time = Utc::now().to_rfc3339();
-                            
+                            let end_time = crate::utils::beijing_now_rfc3339();
+
                             // Determine final direction
                             let final_direction = if !call.answered && call.direction == "incoming" {
                                 // Missed call
@@ -280,14 +280,17 @@ pub async fn start_call_listener(
                                 let _ = db.update_call_end(call.db_id, duration, call.answered);
                                 call.direction.clone()
                             };
-                            
-                            // Forward to webhook
+
+                            // Forward to webhook（起始/结束时刻统一为北京时间，与入库值一致）
                             let call_record = CallRecord {
                                 id: call.db_id,
                                 direction: final_direction,
                                 phone_number: call.phone_number,
                                 duration,
-                                start_time: call.start_time.to_rfc3339(),
+                                start_time: call
+                                    .start_time
+                                    .with_timezone(&crate::utils::beijing_offset())
+                                    .to_rfc3339(),
                                 end_time: Some(end_time),
                                 answered: call.answered,
                             };

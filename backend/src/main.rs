@@ -539,6 +539,17 @@ async fn async_main() -> Result<()> {
         });
     }
 
+    // 系统状态后台采样缓存。以约 2s 周期预热完整状态，供 /api/stats 与 /api/diag/report
+    // 零阻塞读取，避免在 HTTP 请求路径上执行 2s 采样拖慢响应、放大并发时的工作量。
+    {
+        tokio::spawn(async move {
+            supervise("system_stats_cache", move || async move {
+                handlers::system_stats_cache_loop().await;
+            })
+            .await;
+        });
+    }
+
     // 数据库定期清理：短信/通话记录只保留最近 N 条。设备 flash 容量有限，
     // 若不清理，data.db 会无限增长直至占满 /data 分区，导致服务无法写库。
     {

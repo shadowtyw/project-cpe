@@ -20,6 +20,7 @@ import { api } from '../api'
 import { useRefreshInterval } from '../contexts/RefreshContext'
 import { useAdaptivePolling } from '../hooks/useAdaptivePolling'
 import type { LogEntry } from '../api/types'
+import { formatTimeHms } from '../utils/time'
 
 // 日志等级筛选：min_level 数值（0=debug 1=info 2=warn 3=error）
 const LEVEL_OPTIONS = [
@@ -36,9 +37,8 @@ const LEVEL_COLORS: Record<LogEntry['level'], string> = {
 }
 
 function formatTime(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleTimeString('zh-CN', { hour12: false })
+  // 后端时间戳为 +08:00 ISO，显式按北京时间格式化，避免落到浏览器时区。
+  return formatTimeHms(iso)
 }
 
 export default function Logs() {

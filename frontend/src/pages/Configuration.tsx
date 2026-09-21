@@ -55,6 +55,7 @@ import {
 import { api, getApiToken, setApiToken } from '../api'
 import ErrorSnackbar from '../components/ErrorSnackbar'
 import { useRefreshInterval } from '../contexts/RefreshContext'
+import { formatTimeHms } from '../utils/time'
 import type { UsbModeResponse, AirplaneModeResponse, WebhookConfig, SmsPushConfig, SmsPushProvider, RestartConfig, NetHealthConfig, HealthCheck } from '../api/types'
 import { DEFAULT_SMS_TEMPLATE, DEFAULT_CALL_TEMPLATE, DEFAULT_SMS_PUSH_TITLE_TEMPLATE, DEFAULT_SMS_PUSH_BODY_TEMPLATE } from '../api/types'
 
@@ -689,7 +690,7 @@ export default function ConfigurationPage() {
                     )}
                     {healthStatus?.timestamp && (
                       <Typography variant="caption" color="text.secondary">
-                        上次检查: {new Date(healthStatus.timestamp).toLocaleTimeString()}
+                        上次检查: {formatTimeHms(healthStatus.timestamp)}
                       </Typography>
                     )}
                   </Box>

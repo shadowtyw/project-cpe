@@ -15,7 +15,6 @@
 
 use crate::config::{ConfigManager, WebhookConfig};
 use crate::db::{CallRecord, SmsMessage};
-use chrono::Utc;
 use reqwest::Client;
 use std::sync::Arc;
 
@@ -118,7 +117,7 @@ impl WebhookSender {
             direction: "incoming".to_string(),
             phone_number: "+8613800138000".to_string(),
             content: "这是一条测试短信 (Webhook Test)".to_string(),
-            timestamp: Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            timestamp: crate::utils::beijing_now().format("%Y-%m-%d %H:%M:%S").to_string(),
             status: "received".to_string(),
             pdu: None,
         };

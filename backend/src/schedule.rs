@@ -25,8 +25,9 @@ pub async fn schedule_watchdog(conn: Arc<Connection>, config_manager: Arc<Config
         let tolerance_min = u64::from(config.tolerance_min.max(1));
 
         // 以"当日分钟数"作为窗口边界：跨到新的分钟时清空去重集合，避免上一分钟的
-        // 记录导致新窗口内的计划项被误跳过。
-        let current_minute = minute_of_day(chrono::Local::now());
+        // 记录导致新窗口内的计划项被误跳过。时刻用东八区固定偏移计算，设备系统时区
+        // 常为 UTC，`Local::now()` 会静默落到 UTC，导致定时任务整体慢 8 小时。
+        let current_minute = minute_of_day(crate::utils::beijing_now());
         if last_fired_minute != Some(current_minute) {
             fired_keys.clear();
             last_fired_minute = Some(current_minute);
@@ -83,7 +84,7 @@ fn next_wake_seconds(
     let mut nearest_diff: Option<u32> = None;
     for entry in &enabled_entries {
         // 周几过滤：只参与今天有资格的条目
-        let now = chrono::Local::now();
+        let now = crate::utils::beijing_now();
         if !entry.weekdays.is_empty()
             && !entry.weekdays.contains(&(now.weekday().num_days_from_sunday() as u8))
         {
@@ -139,8 +140,8 @@ fn parse_time_minutes(time: &str) -> Option<u32> {
     Some(hour * 60 + minute)
 }
 
-/// 当前本地时间的"当日分钟数"（0..1440）。
-fn minute_of_day(now: chrono::DateTime<chrono::Local>) -> u32 {
+/// 当前本地时间的"当日分钟数"（0..1440）。本地即东八区固定偏移。
+fn minute_of_day(now: chrono::DateTime<chrono::FixedOffset>) -> u32 {
     u32::from(now.hour()) * 60 + u32::from(now.minute())
 }
 
@@ -149,7 +150,7 @@ fn minute_of_day(now: chrono::DateTime<chrono::Local>) -> u32 {
 /// 时间差按"环形"计算（00:00 与 23:59 只差 1 分钟），避免零点前后的计划因线性
 /// 差值（1439 分钟）被错误判定为窗口外。
 fn is_within_schedule_window(time: &str, tolerance_min: u64, weekdays: &[u8]) -> bool {
-    let now = chrono::Local::now();
+    let now = crate::utils::beijing_now();
     let now_minutes = minute_of_day(now);
 
     // 解析计划时间 HH:MM
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn schedule_window_accepts_any_weekday_when_empty() {
-        let now = chrono::Local::now();
+        let now = crate::utils::beijing_now();
         let target = format!("{:02}:{:02}", now.hour(), now.minute());
         assert!(is_within_schedule_window(&target, 1, &[]));
     }

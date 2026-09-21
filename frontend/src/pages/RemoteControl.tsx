@@ -88,6 +88,9 @@ import {
   LockOpen as LockOpenIcon,
 } from '@mui/icons-material'
 import { api } from '../api'
+import { formatTimeHms } from '../utils/time'
+import { useAdaptivePolling } from '../hooks/useAdaptivePolling'
+import { useRefreshInterval } from '../contexts/RefreshContext'
 import type {
   SmsControlConfigResponse,
   CallControlConfig,
@@ -279,13 +282,17 @@ export default function RemoteControl() {
     } catch { /* ignore poll errors */ }
   }, [])
 
-  useEffect(() => {
-    if (activeTab !== 2) return
-    // 立即拉一次
-    void refreshMqttStatus()
-    const timer = setInterval(() => { void refreshMqttStatus() }, 2000)
-    return () => clearInterval(timer)
-  }, [activeTab, refreshMqttStatus])
+  const { refreshKey } = useRefreshInterval()
+
+  // 状态轮询自适应：仅在 MQTT 标签页可见时 2s 一次；标签页离开或浏览器切后台/最小化
+  // 时自动降到 60s 一次，避免休眠设备被无意义唤醒、后台标签页持续发请求。
+  useAdaptivePolling({
+    refreshInterval: activeTab === 2 ? 2_000 : 0,
+    refreshKey,
+    onTick: refreshMqttStatus,
+    immediate: activeTab === 2,
+    hiddenMinInterval: 60_000,
+  })
 
   // MQTT 独立日志：取 module 为 mqtt / mqtt_service 的记录。
   // 两个来源：log_entry! 显式写 "mqtt"，tracing::* 从 target 推导出 "mqtt_service"，
@@ -297,13 +304,14 @@ export default function RemoteControl() {
     } catch { /* ignore poll errors */ }
   }, [mqttLogsLevel])
 
-  useEffect(() => {
-    if (activeTab !== 2) return
-    void refreshMqttLogs()
-    // 日志变化频率低，5s 轮询足够，避免和状态轮询叠加请求压力
-    const timer = setInterval(() => { void refreshMqttLogs() }, 5000)
-    return () => clearInterval(timer)
-  }, [activeTab, refreshMqttLogs])
+  // 日志变化频率低，5s 轮询足够；同样受自适应回退保护，避免和状态轮询叠加请求压力。
+  useAdaptivePolling({
+    refreshInterval: activeTab === 2 ? 5_000 : 0,
+    refreshKey,
+    onTick: refreshMqttLogs,
+    immediate: activeTab === 2,
+    hiddenMinInterval: 60_000,
+  })
 
   // Load push config
   const loadPushConfig = useCallback(async () => {
@@ -1175,7 +1183,7 @@ export default function RemoteControl() {
                     mqttLogs.map((log, i) => (
                       <Box key={i} sx={{ display: 'flex', gap: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-all', py: 0.25 }}>
                         <Box component="span" sx={{ color: '#888', flexShrink: 0 }}>
-                          {log.timestamp.split('T')[1]?.slice(0, 8) ?? log.timestamp}
+                          {formatTimeHms(log.timestamp)}
                         </Box>
                         <Box
                           component="span"
