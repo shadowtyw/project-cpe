@@ -87,6 +87,7 @@ import type {
   MqttConfigResponse,
   MqttStatusResponse,
   RemoteControlPushConfig,
+  PowerHealthResponse,
 } from './types'
 
 // API 基础配置
@@ -852,6 +853,10 @@ class UDX710API {
 
   async getTrafficStats() {
     return request<ApiResponse<TrafficStatsResponse>>('/traffic/stats')
+  }
+
+  async getPowerHealth() {
+    return request<ApiResponse<PowerHealthResponse>>('/power/health')
   }
 
   async setTrafficAlert(config: TrafficAlertRequest) {

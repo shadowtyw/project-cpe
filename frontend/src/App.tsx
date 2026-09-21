@@ -27,6 +27,7 @@ const InitScript = lazy(() => import('./pages/InitScript'))
 const ATConsole = lazy(() => import('./pages/ATConsole'))
 const Terminal = lazy(() => import('./pages/Terminal'))
 const MemoryProcesses = lazy(() => import('./pages/MemoryProcesses'))
+const PowerHealth = lazy(() => import('./pages/PowerHealth'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Tools = lazy(() => import('./pages/Tools'))
 const OtaUpdate = lazy(() => import('./pages/OtaUpdate'))
@@ -63,6 +64,7 @@ const appRoutes: AppRouteConfig[] = [
   { path: 'remote/mqtt', component: RemoteControl },
   { path: 'remote/push', component: RemoteControl },
   { path: 'memory-processes', component: MemoryProcesses },
+  { path: 'power', component: PowerHealth },
   { path: 'logs', component: Logs },
   { path: 'tools', component: Tools },
   { path: 'at-console', component: ATConsole },

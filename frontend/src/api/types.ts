@@ -980,3 +980,35 @@ export interface MqttStatusResponse {
   broker_index: number
 }
 
+// /api/power/health 低功耗健康看板
+
+export interface CpuIdleInfo {
+  idle_percent: number
+  busy_percent: number
+  load_1min: number
+  core_count: number
+}
+
+export interface InterruptRate {
+  irqs_per_sec: number
+  total_interrupts: number
+  window_secs: number
+}
+
+export interface PlannedInterval {
+  key: string
+  name: string
+  interval_secs: number
+  interval_text: string
+  classification: string
+  enabled: boolean
+  note: string
+}
+
+export interface PowerHealthResponse {
+  cpu: CpuIdleInfo
+  wakeups?: InterruptRate | null
+  planned_intervals: PlannedInterval[]
+  sampled_at: string
+}
+

@@ -44,6 +44,7 @@ import {
   ExpandLess as ExpandLessIcon,
   CloudQueue as CloudQueueIcon,
   Notifications as NotificationsIcon,
+  PowerSettingsNew as PowerIcon,
 } from '@mui/icons-material'
 
 interface SidebarProps {
@@ -81,7 +82,14 @@ const menuItems: MenuItem[] = [
     ],
   },
   { path: '/memory-processes', label: '内存进程', icon: MemoryIcon },
-  { path: '/logs', label: '系统日志', icon: LogsIcon },
+  {
+    label: '系统日志',
+    icon: LogsIcon,
+    children: [
+      { path: '/logs', label: '系统日志', icon: LogsIcon },
+      { path: '/power', label: '休眠状态', icon: PowerIcon },
+    ],
+  },
   { path: '/tools', label: '高级工具', icon: ToolsIcon },
   { path: '/at-console', label: 'AT 控制台', icon: TerminalIcon },
   { path: '/terminal', label: 'Web 终端', icon: WebTerminalIcon },

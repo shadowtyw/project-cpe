@@ -418,6 +418,63 @@ pub struct SystemStatsResponse {
     pub usb_mode: UsbModeResponse,
 }
 
+/// 低功耗健康看板 - 当前 CPU 空闲度
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct CpuIdleInfo {
+    /// 空闲占比 (0.0-100.0)，= 100 - busy%
+    pub idle_percent: f64,
+    /// 忙碌占比（来源：系统状态缓存 cpu_load.load_percent）
+    pub busy_percent: f64,
+    /// 1 分钟平均负载
+    pub load_1min: f64,
+    /// CPU 核心数
+    pub core_count: u32,
+}
+
+/// 低功耗健康看板 - 中断唤醒率（首次读取 /proc/interrupts）
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct InterruptRate {
+    /// 平均每秒中断次数（自上次采样窗口折算）
+    pub irqs_per_sec: f64,
+    /// 当前累计中断总数（原始计数器）
+    pub total_interrupts: u64,
+    /// 本次采样窗口时长（秒）；0 表示无基线（首次采样）
+    pub window_secs: f64,
+}
+
+/// 低功耗健康看板 - 单个看门狗/采样循环的规划间隔
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct PlannedInterval {
+    /// 稳定 key（英文，如 "net_health"）
+    pub key: String,
+    /// 中文展示名
+    pub name: String,
+    /// 当前生效间隔（秒）；0 表示非固定速率（事件驱动/自适应/按需）
+    pub interval_secs: u64,
+    /// 人类可读间隔文本（如 "自适应 90s/2s"、"1h 低功耗休眠"）
+    pub interval_text: String,
+    /// 分类：low_power | active | adaptive | event_driven | on_demand
+    pub classification: String,
+    /// 是否启用
+    pub enabled: bool,
+    /// 中文说明
+    pub note: String,
+}
+
+/// 低功耗健康看板 - 总响应体
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct PowerHealthResponse {
+    /// CPU 空闲度
+    pub cpu: CpuIdleInfo,
+    /// 中断唤醒率；None = 暂无基线或 /proc/interrupts 不可读
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wakeups: Option<InterruptRate>,
+    /// 各看门狗/采样循环的规划间隔
+    pub planned_intervals: Vec<PlannedInterval>,
+    /// 采样时刻（北京时间 RFC3339）
+    pub sampled_at: String,
+}
+
 /// 磁盘/分区信息
 #[derive(Debug, Serialize, Clone, Default)]
 pub struct DiskInfo {

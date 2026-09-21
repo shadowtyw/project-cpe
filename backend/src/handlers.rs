@@ -893,7 +893,7 @@ static SYSTEM_STATS_CACHE: LazyLock<RwLock<Option<Arc<SystemStatsResponse>>>> =
 ///
 /// 返回 `None` 仅发生在冷启动的头 ~2s 内（采样循环尚未写入首个结果），
 /// 调用方此时可回退到同步采样（见 [`get_system_stats`]）。
-fn read_system_stats_cache() -> Option<SystemStatsResponse> {
+pub(crate) fn read_system_stats_cache() -> Option<SystemStatsResponse> {
     SYSTEM_STATS_CACHE
         .read()
         .ok()
@@ -1004,11 +1004,20 @@ async fn collect_system_stats() -> SystemStatsResponse {
     }
 }
 
-/// 后台系统状态采样循环：以约 2s 为周期采集完整状态并写入 [`SYSTEM_STATS_CACHE`]。
+/// 活跃判定窗口：前端在该时长内发过心跳即视为「有人正在使用」。
+const STATS_ACTIVE_WINDOW: Duration = Duration::from_secs(30);
+
+/// 空闲退避时长：叠加 [`collect_system_stats`] 内部约 2s 采样窗后，整体呈 ~60s 周期。
+///
+/// 空闲时唤醒率相较活跃态的 ~2s 下降约 30×，给 `core_pd` 与基带 DRX 留出低功耗窗口。
+const STATS_IDLE_SLEEP: Duration = Duration::from_secs(58);
+
+/// 后台系统状态采样循环：活跃（30s 内有前端心跳）保持 ~2s，空闲退避至 ~60s，
+/// 每轮将完整采集结果写入 [`SYSTEM_STATS_CACHE`]。
 ///
 /// 运行在独立 tokio 任务中（main.rs 用 `supervise` 守护，panic 自动重启），
 /// 与 HTTP 请求处理无争用；写锁仅在单次采集完成那一刻短暂持有，不存在跨 await 持锁。
-pub async fn system_stats_cache_loop() {
+pub async fn system_stats_cache_loop(frontend_runtime: Arc<FrontendRuntime>) {
     loop {
         let stats = collect_system_stats().await;
         match SYSTEM_STATS_CACHE.write() {
@@ -1018,6 +1027,11 @@ pub async fn system_stats_cache_loop() {
             Err(_) => {
                 crate::log_entry!(warn, "stats", "system stats cache lock poisoned; skipping write");
             }
+        }
+        // 写锁在上方 match 结束后即释放；下方 sleep 期间不持有任何锁。
+        // 活跃窗口内不额外 sleep，保持 collect 内部 2s 采样窗决定的节奏。
+        if !frontend_runtime.is_recent(STATS_ACTIVE_WINDOW) {
+            tokio::time::sleep(STATS_IDLE_SLEEP).await;
         }
     }
 }

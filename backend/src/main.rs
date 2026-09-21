@@ -52,6 +52,7 @@ mod mqtt_service;
 mod remote_control_push;
 mod net_health;
 mod ota;
+mod power_health;
 mod process_monitor;
 mod restart;
 mod schedule;
@@ -542,9 +543,13 @@ async fn async_main() -> Result<()> {
     // 系统状态后台采样缓存。以约 2s 周期预热完整状态，供 /api/stats 与 /api/diag/report
     // 零阻塞读取，避免在 HTTP 请求路径上执行 2s 采样拖慢响应、放大并发时的工作量。
     {
+        let fr = Arc::clone(&frontend_runtime);
         tokio::spawn(async move {
-            supervise("system_stats_cache", move || async move {
-                handlers::system_stats_cache_loop().await;
+            supervise("system_stats_cache", move || {
+                let fr = Arc::clone(&fr);
+                async move {
+                    handlers::system_stats_cache_loop(fr).await;
+                }
             })
             .await;
         });
@@ -716,6 +721,8 @@ async fn async_main() -> Result<()> {
         .route("/api/restart/config", get(get_restart_config_handler).post(set_restart_config_handler).options(options_handler))
         .route("/api/net-health/config", get(get_net_health_config_handler).post(set_net_health_config_handler).options(options_handler))
         .route("/api/health", get(health_check))
+        // ========== 低功耗健康看板（只读） ==========
+        .route("/api/power/health", get(power_health::get_power_health).options(options_handler))
         // ========== init.sh 管理接口 ==========
         .route("/api/init-script", get(get_init_script_handler).post(set_init_script_handler).options(options_handler))
         // ========== Webhook 配置接口 ==========
