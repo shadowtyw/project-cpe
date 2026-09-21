@@ -188,18 +188,7 @@ impl Database {
         
         Ok(conn.last_insert_rowid())
     }
-    
-    /// 更新短信状态
-    #[allow(dead_code)]
-    pub fn update_sms_status(&self, id: i64, status: &str) -> Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE sms_messages SET status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-        Ok(())
-    }
-    
+
     /// 获取所有短信（分页）
     pub fn get_sms_messages(&self, limit: i64, offset: i64) -> Result<Vec<SmsMessage>> {
         let conn = self.lock_conn();
@@ -385,42 +374,10 @@ impl Database {
         for record in records {
             result.push(record?);
         }
-        
+
         Ok(result)
     }
-    
-    /// 获取与特定号码的通话记录
-    #[allow(dead_code)]
-    pub fn get_call_history_by_number(&self, phone_number: &str, limit: i64) -> Result<Vec<CallRecord>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, direction, phone_number, duration, start_time, end_time, answered
-             FROM call_history
-             WHERE phone_number = ?1
-             ORDER BY start_time DESC
-             LIMIT ?2"
-        )?;
-        
-        let records = stmt.query_map(params![phone_number, limit], |row| {
-            Ok(CallRecord {
-                id: row.get(0)?,
-                direction: row.get(1)?,
-                phone_number: row.get(2)?,
-                duration: row.get(3)?,
-                start_time: row.get(4)?,
-                end_time: row.get(5)?,
-                answered: row.get::<_, i32>(6)? != 0,
-            })
-        })?;
-        
-        let mut result = Vec::new();
-        for record in records {
-            result.push(record?);
-        }
-        
-        Ok(result)
-    }
-    
+
     /// 获取通话统计
     pub fn get_call_stats(&self) -> Result<CallStats> {
         let conn = self.lock_conn();

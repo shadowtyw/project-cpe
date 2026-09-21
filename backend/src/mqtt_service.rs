@@ -48,6 +48,17 @@ const LOG_MODULE: &str = "mqtt";
 /// 刚好越线，导致发布状态时直接报错并断开重连（表现为「MQTT 无法连接」）。
 const MAX_PACKET_SIZE: usize = 64 * 1024;
 
+/// 配置变更通知器。当 `config_manager.set_mqtt()` 被调用时由外部触发，
+/// 替代 v3.8.4 之前每 5 秒一次的周期性轮询，消除 MQTT 已连接状态下的
+/// 无意义 CPU 唤醒——此前这是整个系统频率最高的空闲唤醒源。
+static MQTT_CONFIG_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// 由 handlers 层在 MQTT 配置更新后调用，唤醒 MQTT 事件循环立即检查
+/// enabled/config 变更，无需等待 5s 定时器周期。
+pub fn notify_config_changed() {
+    MQTT_CONFIG_NOTIFY.notify_one();
+}
+
 // ── 通知发送器 trait（由 main.rs 注入） ──────────────────────
 
 /// MQTT 远程遥控通知回调：接收 JSON 字符串推送到 Webhook 和短信推送平台。
@@ -733,13 +744,13 @@ impl MqttService {
         // 2. 收到的 Publish 消息 spawn 到独立 task 处理，因为 handle_command 里的
         //    publish 需要 EventLoop 轮询来完成网络 I/O，不能在 poll 回调中 await。
         // 3. 过滤 topic_pub 上的自回环：如果 topic_pub == topic_sub，忽略自己发布的消息。
-        // 4. disable_timer 周期性检查 enabled，使「连接中关闭开关」能在 5s 内断开。
+        // 4. v3.8.4：配置检查由 MQTT_CONFIG_NOTIFY 事件驱动。handler 层 set_mqtt
+        //    后调用 notify_config_changed()，事件循环立即醒来检查 enabled/config 变更，
+        //    无需每 5s 周期轮询。（MQTT 禁用后 reconnect 路径由上层 5s sleep 兜底）
         let heartbeat_interval = Duration::from_secs(900);
         let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
         // 第一次 tick 立即触发，跳过它
         heartbeat_timer.tick().await;
-        let mut disable_timer = tokio::time::interval(Duration::from_secs(5));
-        disable_timer.tick().await;
         // 本连接的配置指纹，用于检测「连接期间改了配置」
         let conn_sig = connection_signature(config);
 
@@ -798,7 +809,11 @@ impl MqttService {
                         publish_status(&dbus_clone).await;
                     });
                 }
-                _ = disable_timer.tick() => {
+                // v3.8.4：事件驱动配置检查。用 Notify 替代每 5s 一次的周期性轮询，
+                // 消除系统最高频的空闲唤醒源——正常运维中用户极少改 MQTT 配置，
+                // 5s 到点几乎每次都是空转。改为 handler 层 set_mqtt 时 notify_one，
+                // 事件循环仅在用户实际修改配置时才醒来检查 enabled/conn_sig。
+                _ = MQTT_CONFIG_NOTIFY.notified() => {
                     let current = self.config_manager.get_mqtt().sanitize();
                     // 连接期间被关闭 → 主动断开并清理状态
                     if !current.enabled {

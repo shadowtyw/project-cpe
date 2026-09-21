@@ -8,7 +8,7 @@
 //! （仅 warn 与 error）。进程重启后缓冲清空。
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 /// 单条日志记录
 #[derive(Debug, Clone, serde::Serialize)]
@@ -26,9 +26,8 @@ pub struct LogEntry {
 /// 缓冲容量上限，超过后丢弃最旧记录
 const MAX_LOG_ENTRIES: usize = 2000;
 
-lazy_static::lazy_static! {
-    static ref LOG_BUFFER: Mutex<VecDeque<LogEntry>> = Mutex::new(VecDeque::new());
-}
+static LOG_BUFFER: LazyLock<Mutex<VecDeque<LogEntry>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 /// 日志等级到数值的映射，用于 min_level 筛选
 fn level_rank(level: &str) -> u8 {
@@ -82,12 +81,6 @@ pub fn warn(module: &str, message: impl Into<String>) {
 #[allow(dead_code)]
 pub fn error(module: &str, message: impl Into<String>) {
     push("error", module, message.into());
-}
-
-/// 记录一条 debug 日志。仅通过 `log_entry!` 宏间接调用，直接调用点可能为零。
-#[allow(dead_code)]
-pub fn debug(module: &str, message: impl Into<String>) {
-    push("debug", module, message.into());
 }
 
 /// 读取日志快照，最新的记录在前。
@@ -276,9 +269,6 @@ macro_rules! log_entry {
     };
     (error, $module:expr, $($arg:tt)*) => {
         $crate::log_buffer::error($module, format!($($arg)*))
-    };
-    (debug, $module:expr, $($arg:tt)*) => {
-        $crate::log_buffer::debug($module, format!($($arg)*))
     };
 }
 

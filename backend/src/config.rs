@@ -1096,13 +1096,7 @@ impl ConfigManager {
 
         manager
     }
-    
-    /// 获取当前配置
-    #[allow(dead_code)]
-    pub fn get(&self) -> AppConfig {
-        self.config.read().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-    
+
     /// 获取 Webhook 配置
     pub fn get_webhook(&self) -> WebhookConfig {
         self.config.read().unwrap_or_else(|p| p.into_inner()).webhook.clone()
@@ -1314,19 +1308,15 @@ impl ConfigManager {
         self.save()
     }
 
-    #[allow(dead_code)]
+    /// 整体写入配置（配置导入使用）。
     pub fn set(&self, config: AppConfig) -> Result<(), String> {
         {
             let mut current = self.config.write().unwrap_or_else(|p| p.into_inner());
-            *current = AppConfig {
-                refresh: config.refresh.sanitize(),
-                restart: config.restart.sanitize(),
-                ..config
-            };
+            *current = config;
         }
         self.save()
     }
-    
+
     /// 保存配置到文件（原子写入：先写临时文件，再 rename 替换）。
     ///
     /// RwLock 读锁在序列化完成后立即释放，后续磁盘 I/O 不持有锁，
@@ -1353,31 +1343,6 @@ impl ConfigManager {
                 format!("Failed to publish config file: {}", e)
             })?;
 
-        Ok(())
-    }
-    
-    /// 重新加载配置
-    #[allow(dead_code)]
-    pub fn reload(&self) -> Result<(), String> {
-        if !self.config_path.exists() {
-            return Err("Config file does not exist".to_string());
-        }
-        
-        let content = fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read config file: {}", e))?;
-        
-        let new_config: AppConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse config file: {}", e))?;
-        
-        {
-            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
-            *config = AppConfig {
-                refresh: new_config.refresh.sanitize(),
-                restart: new_config.restart.sanitize(),
-                ..new_config
-            };
-        }
-        
         Ok(())
     }
 }

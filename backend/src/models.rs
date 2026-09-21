@@ -253,17 +253,6 @@ pub struct QosInfoResponse {
     pub raw_response: Option<String>,
 }
 
-/// USB模式枚举
-/// 1 = CDC-NCM, 2 = CDC-ECM, 3 = RNDIS
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum UsbMode {
-    CdcNcm = 1,
-    CdcEcm = 2,
-    Rndis = 3,
-}
-
 /// 设置USB模式请求
 #[derive(Debug, Deserialize)]
 pub struct SetUsbModeRequest {
@@ -1112,13 +1101,6 @@ fn default_limit() -> i64 {
 pub struct CallHistoryResponse {
     pub records: Vec<crate::db::CallRecord>,
     pub stats: crate::db::CallStats,
-}
-
-/// 删除通话记录请求
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct DeleteCallRequest {
-    pub id: i64,
 }
 
 // ============ init.sh 管理模型 ============

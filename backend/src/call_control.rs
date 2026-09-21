@@ -56,8 +56,6 @@ struct PendingCommand {
     number: String,
     action: ScheduleAction,
     action_label: String,
-    #[allow(dead_code)]
-    duration_secs: u64,
     expires_at: Instant,
 }
 
@@ -282,7 +280,6 @@ pub async fn on_call_removed(_conn: &Connection, config: &CallControlConfig, pat
         number: active.number,
         action: cmd.action,
         action_label: label,
-        duration_secs: duration,
         expires_at: Instant::now() + Duration::from_secs(10),
     });
     let expires_at = state.pending.as_ref().unwrap().expires_at;

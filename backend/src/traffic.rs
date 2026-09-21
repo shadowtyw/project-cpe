@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::config::ConfigManager;
 use crate::db::Database;
@@ -18,10 +18,8 @@ const SAMPLE_INTERVAL_SECONDS: u64 = 300;
 const ALERT_RESET_MINUTES: i64 = 24 * 60;
 
 // 上次采样的接口计数缓存（进程内）
-lazy_static::lazy_static! {
-    static ref LAST_COUNTERS: std::sync::Mutex<HashMap<String, (u64, u64)>> =
-        std::sync::Mutex::new(HashMap::new());
-}
+static LAST_COUNTERS: LazyLock<Mutex<HashMap<String, (u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 上次预警时间戳（Unix 秒）
 static LAST_ALERT_AT: AtomicI64 = AtomicI64::new(0);

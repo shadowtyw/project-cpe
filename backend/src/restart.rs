@@ -7,6 +7,10 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 const CHECK_INTERVAL_SECONDS: u64 = 60;
+/// 周期重启与低内存重启都关闭时的长休眠间隔（秒）。两项功能默认均关闭，
+/// 旧实现仍每 60s 读一次 /proc/uptime 属无意义唤醒；改为 1h 长睡眠可消除
+/// 设备空闲时最常见的看门狗唤醒之一，仅在重读配置判断功能启用时醒来。
+const IDLE_SLEEP_SECONDS: u64 = 3600;
 const STARTUP_GRACE_SECONDS: u64 = 10 * 60;
 const LOW_MEMORY_CONSECUTIVE_CHECKS: u8 = 3;
 const LOW_MEMORY_MAX_RESTARTS_PER_DAY: u8 = 1;
@@ -77,13 +81,22 @@ pub async fn restart_watchdog(config_manager: Arc<ConfigManager>) {
     let mut consecutive_low_memory_checks = 0u8;
 
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECONDS)).await;
+        // 先读配置，若周期重启与低内存重启均关闭则长休眠（避免空转 60s 读 /proc）。
+        // 任一功能启用才需要 60s 精度轮询；判断以本次配置为准，下次醒来重判，
+        // 因此用户开启功能后至多 IDLE_SLEEP_SECONDS 内即恢复 60s 轮询。
+        let config = config_manager.get_restart();
+        let any_feature_enabled = config.schedule_enabled || config.low_memory_enabled;
+        let sleep_secs = if any_feature_enabled {
+            CHECK_INTERVAL_SECONDS
+        } else {
+            IDLE_SLEEP_SECONDS
+        };
+        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
 
         if REBOOT_PENDING.load(Ordering::SeqCst) || std::path::Path::new(OTA_STAGING_DIR).exists() {
             continue;
         }
 
-        let config = config_manager.get_restart();
         let uptime_seconds = match read_uptime() {
             Ok((uptime_seconds, _)) => uptime_seconds,
             Err(error) => {

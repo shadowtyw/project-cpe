@@ -3818,7 +3818,10 @@ pub async fn set_mqtt_config_handler(
     };
 
     match config_manager.set_mqtt(sanitized) {
-        Ok(_) => Json(ApiResponse::success_with_message("MQTT configuration updated", resp)),
+        Ok(_) => {
+            crate::mqtt_service::notify_config_changed();
+            Json(ApiResponse::success_with_message("MQTT configuration updated", resp))
+        }
         Err(e) => Json(ApiResponse::error(format!("Failed to save MQTT config: {}", e))),
     }
 }
