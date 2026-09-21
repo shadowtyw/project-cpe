@@ -210,7 +210,7 @@ export default function PowerHealth() {
                       area: true,
                       showMark: false,
                       color: '#4caf50',
-                      valueFormatter: (v) => (v == null ? '' : `${v.toFixed(1)}%`),
+                      valueFormatter: (v) => (v === null || v === undefined ? '' : `${v.toFixed(1)}%`),
                     },
                   ]}
                   xAxis={[
