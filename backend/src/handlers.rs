@@ -250,17 +250,26 @@ pub async fn get_device_info(State(conn): State<Arc<Connection>>) -> impl IntoRe
 ///
 pub async fn set_data_status(
     State(conn): State<Arc<Connection>>,
+    State(config_manager): State<Arc<ConfigManager>>,
     Json(payload): Json<DataConnectionRequest>,
 ) -> impl IntoResponse {
     // Do not clear the system firewall here. Other services may own its rules.
     match set_data_connection(&conn, payload.active).await {
         Ok(_) => {
-            
+            // 持久化用户期望状态：区分「用户主动关闭」与「系统注网/切网脱落」。
+            // Always-On 看门狗据此决定是否应自动重新拨号。
+            if let Err(e) = config_manager.set_data_connection_enabled(payload.active) {
+                tracing::warn!(error = %e, "Failed to persist data connection desired state");
+            }
+
             (
                 StatusCode::OK,
                 Json(ApiResponse::success_with_message(
                     "Data connection updated successfully",
-                    DataConnectionResponse { active: payload.active },
+                    DataConnectionResponse {
+                        active: payload.active,
+                        enabled: payload.active,
+                    },
                 )),
             )
         }
@@ -282,17 +291,22 @@ pub async fn set_data_status(
 ///   "status": "ok",
 ///   "message": "Success",
 ///   "data": {
-///     "active": true
+///     "active": true,
+///     "enabled": true
 ///   }
 /// }
 /// ```
-pub async fn get_data_status(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
+pub async fn get_data_status(
+    State(conn): State<Arc<Connection>>,
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> impl IntoResponse {
+    let enabled = config_manager.get_data_connection_enabled();
     match get_data_connection_status(&conn).await {
         Ok(active) => (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
                 "Success",
-                DataConnectionResponse { active },
+                DataConnectionResponse { active, enabled },
             )),
         ),
         Err(e) => (
@@ -1373,6 +1387,18 @@ pub async fn set_radio_mode_handler(
             if let Err(e) = config_manager.set_radio_mode_cfg(mode_str) {
                 tracing::warn!(error = %e, "Failed to persist radio mode to config.json");
             }
+
+            // 制式切换会触发 Radio 重建，ofono 的 context 会被重置为关闭（Active=false）。
+            // 启动注网追踪协程（拨号追随）：待基站重新注册后自动重新拉起数据连接，
+            // 无需用户手动再次点击开启。
+            {
+                let conn_clone = Arc::clone(&conn);
+                let cm_clone = Arc::clone(&config_manager);
+                tokio::spawn(async move {
+                    crate::dbus::reengage_after_mode_switch(conn_clone, cm_clone).await;
+                });
+            }
+
             let mode_display = match payload.mode {
                 RadioMode::Auto => "4G/5G Auto",
                 RadioMode::LteOnly => "4G LTE Only",
@@ -1390,6 +1416,92 @@ pub async fn set_radio_mode_handler(
             StatusCode::OK,
             Json(ApiResponse::<serde_json::Value>::error(format!(
                 "Failed to set radio mode: {}",
+                e
+            ))),
+        ),
+    }
+}
+
+/// GET /api/network-preference - 获取智能优先选网策略
+///
+/// # 返回示例
+/// ```json
+/// {
+///   "status": "ok",
+///   "message": "Success",
+///   "data": {
+///     "mode": "prefer_lte",
+///     "failover_timeout_secs": 30,
+///     "probe_interval_mins": 30
+///   }
+/// }
+/// ```
+pub async fn get_network_preference_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+) -> impl IntoResponse {
+    let pref = config_manager.get_network_preference();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "Success",
+            NetworkPreferenceResponse {
+                mode: pref.mode,
+                failover_timeout_secs: pref.failover_timeout_secs,
+                probe_interval_mins: pref.probe_interval_mins,
+            },
+        )),
+    )
+}
+
+/// POST /api/network-preference - 设置智能优先选网策略
+///
+/// # 请求体
+/// ```json
+/// {
+///   "mode": "prefer_lte",
+///   "failover_timeout_secs": 30,
+///   "probe_interval_mins": 30
+/// }
+/// ```
+///
+/// `mode` 必填（prefer_lte | prefer_5g | lte_only | auto）；两个时间参数可选——
+/// 缺省时沿用当前已持久化值，方便前端仅切换模式而不回传时间配置。
+pub async fn set_network_preference_handler(
+    State(config_manager): State<Arc<ConfigManager>>,
+    Json(payload): Json<NetworkPreferenceRequest>,
+) -> impl IntoResponse {
+    // 合并：时间参数缺省时沿用当前已持久化值。
+    let mut pref = config_manager.get_network_preference();
+    pref.mode = payload.mode;
+    if let Some(v) = payload.failover_timeout_secs {
+        pref.failover_timeout_secs = v;
+    }
+    if let Some(v) = payload.probe_interval_mins {
+        pref.probe_interval_mins = v;
+    }
+    // 统一做一次 sanitize（非法 mode 回退 auto、时间参数裁剪到合法区间），
+    // 确保返回给前端的值与最终落盘值一致。
+    let pref = pref.sanitize();
+
+    match config_manager.set_network_preference(pref.clone()) {
+        Ok(_) => {
+            tracing::info!(mode = %pref.mode, "network_preference updated (engine will apply within 5s)");
+            (
+                StatusCode::OK,
+                Json(ApiResponse::success_with_message(
+                    "Network preference updated",
+                    NetworkPreferenceResponse {
+                        mode: pref.mode,
+                        failover_timeout_secs: pref.failover_timeout_secs,
+                        probe_interval_mins: pref.probe_interval_mins,
+                    },
+                )),
+            )
+        }
+        Err(e) => (
+            StatusCode::OK,
+            Json(ApiResponse::<NetworkPreferenceResponse>::error(format!(
+                "Failed to save network preference: {}",
                 e
             ))),
         ),

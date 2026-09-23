@@ -130,8 +130,10 @@ pub struct DataConnectionRequest {
 /// 数据连接状态响应
 #[derive(Debug, Serialize, Default)]
 pub struct DataConnectionResponse {
-    /// 是否激活
+    /// 是否激活（底层真实状态）
     pub active: bool,
+    /// 数据连接期望状态（config.json 中的 `data_connection_enabled`）
+    pub enabled: bool,
 }
 
 /// 漫游设置请求
@@ -708,6 +710,30 @@ pub struct RadioModeResponse {
 pub struct RadioModeRequest {
     /// 目标射频模式: auto, lte, nr
     pub mode: RadioMode,
+}
+
+/// 智能优先选网策略响应（v3.8.10 新增）
+#[derive(Debug, Serialize, Default)]
+pub struct NetworkPreferenceResponse {
+    /// 策略模式: prefer_lte | prefer_5g | lte_only | auto
+    pub mode: String,
+    /// 连续脱网触发备用制式的秒数
+    pub failover_timeout_secs: u64,
+    /// 降级期间探测首选网络的间隔（分钟）
+    pub probe_interval_mins: u64,
+}
+
+/// 智能优先选网策略请求（v3.8.10 新增）
+///
+/// `mode` 必填；两个时间参数可选——缺省时沿用当前已持久化值，
+/// 方便前端只切换模式而不必回传时间配置。
+#[derive(Debug, Deserialize)]
+pub struct NetworkPreferenceRequest {
+    pub mode: String,
+    #[serde(default)]
+    pub failover_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub probe_interval_mins: Option<u64>,
 }
 
 /// 频段锁定状态（4G/5G 统一结构）

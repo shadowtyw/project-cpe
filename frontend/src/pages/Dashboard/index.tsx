@@ -48,7 +48,6 @@ export default function Dashboard() {
         airplaneMode={data.airplaneMode}
         imsStatus={data.imsStatus}
         roaming={data.roaming}
-        radioMode={data.radioMode}
       />
 
       {/* 主体内容区，PC 端采用多列布局 */}
@@ -57,14 +56,18 @@ export default function Dashboard() {
         <Grid size={{ xs: 12, sm: 6, md: 3 }}>
           <QuickControls
             dataStatus={data.dataStatus}
+            dataEnabled={data.dataEnabled}
             airplaneMode={data.airplaneMode}
             roaming={data.roaming}
             radioMode={data.radioMode}
             radioModePending={data.radioModePending}
+            networkPreference={data.networkPreference}
+            networkPreferencePending={data.networkPreferencePending}
             onToggleData={() => void actions.toggleData()}
             onToggleAirplaneMode={() => void actions.toggleAirplaneMode()}
             onToggleRoaming={() => void actions.toggleRoaming()}
             onToggle5g={() => void actions.toggle5g()}
+            onNetworkPreferenceChange={(mode) => void actions.setNetworkPreference(mode)}
           />
         </Grid>
 

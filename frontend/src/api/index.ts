@@ -32,6 +32,8 @@ import type {
   RadioMode,
   RadioModeRequest,
   RadioModeResponse,
+  NetworkPreferenceRequest,
+  NetworkPreferenceResponse,
   BandLockStatus,
   BandLockRequest,
   CellLockStatusResponse,
@@ -355,6 +357,19 @@ class UDX710API {
     return request<ApiResponse<Record<string, never>>>('/radio-mode', {
       method: 'POST',
       body: JSON.stringify(body),
+    })
+  }
+
+  // 获取智能优先选网策略
+  async getNetworkPreference() {
+    return request<ApiResponse<NetworkPreferenceResponse>>('/network-preference')
+  }
+
+  // 设置智能优先选网策略
+  async setNetworkPreference(pref: NetworkPreferenceRequest) {
+    return request<ApiResponse<NetworkPreferenceResponse>>('/network-preference', {
+      method: 'POST',
+      body: JSON.stringify(pref),
     })
   }
 

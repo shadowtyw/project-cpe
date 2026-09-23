@@ -528,16 +528,26 @@ pub async fn wait_for_ofono(conn: &Connection, timeout: Duration) -> bool {
 pub async fn init_data_connection(conn: &Connection) -> String {
     // ofono 名字就绪后，其内部 RIL / ConnectionManager 仍可能处于初始化窗口，
     // 此时调用 GetContexts 会瞬时失败。对这类错误做有限重试，避免启动即丢连接。
-    const MAX_ATTEMPTS: usize = 5;
+    //
+    // 更重要的是：开机时基站往往还在搜网（searching）。此时不能轻言放弃——
+    // 持续轮询等待注册，一旦 registered/roaming 立即激活，实现开机 Always-On
+    // 首次拨号（无需人工干预）。
+    const MAX_ATTEMPTS: usize = 30; // 30 × 2s ≈ 60s，覆盖慢搜网场景
     let mut last = String::new();
     for attempt in 0..MAX_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         last = init_data_connection_attempt(conn).await;
-        if !is_ofono_transient_error(&last) {
-            return last;
+        // ofono 尚未就绪（ServiceUnknown 等）：重试
+        if is_ofono_transient_error(&last) {
+            continue;
         }
+        // 基站仍在搜网：不要放弃，等待注册后再次尝试激活
+        if last.starts_with("Network not registered") {
+            continue;
+        }
+        return last;
     }
     last
 }
@@ -720,6 +730,9 @@ pub async fn get_registration_status(conn: &Connection) -> Option<String> {
 /// 蜂窝数据网卡接口名。
 const SIPA_ETH0_IFACE: &str = "sipa_eth0";
 
+/// 数据连接被用户主动关闭时的守候日志（用于状态变化去重）。
+const DATA_CONN_DISABLED_MSG: &str = "Data connection disabled (desired off)";
+
 /// 蜂窝网卡 sipa_eth0 是否已具备有效 IPv4（接口存在且地址非 0.0.0.0 / 127.*）。
 ///
 /// 通过读取 `/sys/class/net/sipa_eth0/`（接口存在 + operstate）并解析
@@ -882,6 +895,50 @@ async fn check_and_restore_data_connection(conn: &Connection) -> String {
     format!("Connected (APN: {})", apn)
 }
 
+/// 制式/射频切换后的「拨号追随」：等待基站重新注册后自动重新拉起数据连接。
+///
+/// Radio Cycle 会把 ofono 的 context 重置为未激活，若切换后不主动追随，
+/// 用户会看到数据连接停留在关闭态、必须手动再点一次开启。本函数轮询注册状态
+/// （最长 15s），一旦恢复 `registered`/`roaming` 且用户期望开启
+/// （data_connection_enabled == true），立即重新激活拨号。
+pub async fn reengage_after_mode_switch(conn: Arc<Connection>, config_manager: Arc<ConfigManager>) {
+    // 用户主动关闭时不打扰，交由开关状态守候。
+    if !config_manager.get_data_connection_enabled() {
+        return;
+    }
+
+    const WAIT_REGISTER_SECS: u64 = 15;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(WAIT_REGISTER_SECS);
+    let mut registered = false;
+    loop {
+        if let Some(status) = get_registration_status(&conn).await {
+            if status == "registered" || status == "roaming" {
+                registered = true;
+                break;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    if !registered {
+        tracing::warn!(
+            "Mode switch: network not re-registered within {}s; Always-On watchdog will keep retrying",
+            WAIT_REGISTER_SECS
+        );
+        return;
+    }
+
+    // 注册已恢复，立即重新激活数据连接；sipa_eth0 的地址下发由 watchdog 二次校验兜底。
+    match set_data_connection(&conn, true).await {
+        Ok(_) => info!("Mode switch: data connection re-engaged after radio cycle (Always-On)"),
+        Err(e) => tracing::warn!(error = %e, "Mode switch: failed to re-activate data connection"),
+    }
+}
+
 /// 数据连接 Watchdog - 后台轮询监控并自动恢复
 ///
 /// 持续监控数据连接状态，在断开时自动尝试恢复（指数退避 3s→6s→15s，封顶 15s）。
@@ -895,11 +952,24 @@ pub async fn data_connection_watchdog(
     config_manager: Arc<ConfigManager>,
 ) {
     let mut last_data_log = String::new();
-    // 连续「未连接」次数，用于指数退避（3s→6s→15s），避免断网时 2s 高频重拨
+    // 连续「未连接」次数，用于指数退避（3s→6s→15s），避免断网时高频重拨
     // 把 modem / 网卡打死而形成断流震荡。
     let mut reconnect_attempts: u32 = 0;
 
     loop {
+        // Always-On 期望状态：用户主动关闭时守候不拨号，等待其再次开启。
+        let enabled = config_manager.get_data_connection_enabled();
+        if !enabled {
+            if last_data_log != DATA_CONN_DISABLED_MSG {
+                info!("Watchdog: data connection disabled by user (desired off), standing by");
+                last_data_log = DATA_CONN_DISABLED_MSG.to_string();
+            }
+            reconnect_attempts = 0;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+
+        // 每轮检查：enabled && registered && !active 时由 check_and_restore 立即激活。
         let result = check_and_restore_data_connection(&conn).await;
         let connected =
             result.starts_with("Connection restored") || result.starts_with("Connected");
@@ -919,9 +989,9 @@ pub async fn data_connection_watchdog(
         }
 
         if connected {
-            // 已连接：重置退避计数，90s 一次轻量检查。
+            // 已连接：重置退避计数，约 15s 一次轻量检查，及时感知断流并自愈。
             reconnect_attempts = 0;
-            tokio::time::sleep(Duration::from_secs(90)).await;
+            tokio::time::sleep(Duration::from_secs(15)).await;
         } else {
             // 未连接：指数退避 3s→6s→15s（封顶），防止高频重拨。
             reconnect_attempts = reconnect_attempts.saturating_add(1);

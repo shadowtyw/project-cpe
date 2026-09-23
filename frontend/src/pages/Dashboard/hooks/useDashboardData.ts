@@ -26,6 +26,7 @@ import type {
   ImsStatusResponse,
   RoamingResponse,
   RadioMode,
+  NetworkPreferenceMode,
 } from '@/api/types'
 
 export const SPEED_HISTORY_MAX_POINTS = 30
@@ -48,6 +49,7 @@ export interface DashboardData {
   systemStats: SystemStatsResponse | null
   networkInfo: NetworkInfo | null
   dataStatus: boolean | null
+  dataEnabled: boolean | null
   cellsInfo: CellsResponse | null
   qosInfo: QosInfo | null
   airplaneMode: AirplaneModeResponse | null
@@ -57,6 +59,8 @@ export interface DashboardData {
   roaming: RoamingResponse | null
   radioMode: RadioMode | null
   radioModePending: boolean
+  networkPreference: NetworkPreferenceMode | null
+  networkPreferencePending: boolean
 }
 
 export interface DashboardActions {
@@ -64,6 +68,7 @@ export interface DashboardActions {
   toggleAirplaneMode: () => Promise<void>
   toggleRoaming: () => Promise<void>
   toggle5g: () => Promise<void>
+  setNetworkPreference: (mode: NetworkPreferenceMode) => Promise<void>
   loadData: () => Promise<void>
 }
 
@@ -79,6 +84,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [systemStats, setSystemStats] = useState<SystemStatsResponse | null>(null)
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null)
   const [dataStatus, setDataStatus] = useState<boolean | null>(null)
+  const [dataEnabled, setDataEnabled] = useState<boolean | null>(null)
   const [cellsInfo, setCellsInfo] = useState<CellsResponse | null>(null)
   const [qosInfo, setQosInfo] = useState<QosInfo | null>(null)
   const [airplaneMode, setAirplaneMode] = useState<AirplaneModeResponse | null>(null)
@@ -87,6 +93,8 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [roaming, setRoaming] = useState<RoamingResponse | null>(null)
   const [radioMode, setRadioModeState] = useState<RadioMode | null>(null)
   const [radioModePending, setRadioModePending] = useState(false)
+  const [networkPreference, setNetworkPreferenceState] = useState<NetworkPreferenceMode | null>(null)
+  const [networkPreferencePending, setNetworkPreferencePending] = useState(false)
 
   const [speedHistory, setSpeedHistory] = useState<Record<string, InterfaceSpeedHistory>>({})
   const speedHistoryRef = useRef<Record<string, InterfaceSpeedHistory>>({})
@@ -152,6 +160,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       api.getQosInfo(),
       api.getAirplaneMode(),
       api.getRadioMode(),
+      api.getNetworkPreference(),
     ])
 
     if (requestId !== requestIdRef.current) {
@@ -193,7 +202,10 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
 
     const dataStatusResult = baseResults[4]
     if (dataStatusResult.status === 'fulfilled') {
-      if (dataStatusResult.value.data) setDataStatus(dataStatusResult.value.data.active)
+      if (dataStatusResult.value.data) {
+        setDataStatus(dataStatusResult.value.data.active)
+        setDataEnabled(dataStatusResult.value.data.enabled ?? null)
+      }
     } else {
       baseErrors.push(formatRequestError('数据连接状态', dataStatusResult.reason))
     }
@@ -231,6 +243,20 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       }
     } else {
       baseErrors.push(formatRequestError('射频模式', radioModeResult.reason))
+    }
+
+    const networkPreferenceResult = baseResults[9]
+    if (networkPreferenceResult.status === 'fulfilled') {
+      if (networkPreferenceResult.value.data) {
+        const pref = networkPreferenceResult.value.data.mode
+        if (pref === 'prefer_lte' || pref === 'prefer_5g' || pref === 'lte_only' || pref === 'auto') {
+          setNetworkPreferenceState(pref)
+        } else {
+          setNetworkPreferenceState(null)
+        }
+      }
+    } else {
+      baseErrors.push(formatRequestError('网络偏好', networkPreferenceResult.reason))
     }
 
     setInitialLoading(false)
@@ -276,16 +302,17 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   }, [formatRequestError])
 
   const toggleData = useCallback(async () => {
-    if (dataStatus === null) return
+    if (dataEnabled === null) return
 
     try {
-      const newStatus = !dataStatus
-      await api.setDataStatus(newStatus)
-      setDataStatus(newStatus)
+      const newEnabled = !dataEnabled
+      await api.setDataStatus(newEnabled)
+      // 立即反映「期望状态」；底层真实 active 由下一轮轮询同步。
+      setDataEnabled(newEnabled)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [dataStatus])
+  }, [dataEnabled])
 
   const toggleAirplaneMode = useCallback(async () => {
     if (!airplaneMode) return
@@ -332,6 +359,22 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     }
   }, [radioMode, radioModePending, loadData, setError])
 
+  const setNetworkPreference = useCallback(async (mode: NetworkPreferenceMode) => {
+    // 选择期间禁用 Select，防止连续切换导致基带指令冲突
+    if (networkPreference === null || networkPreferencePending) return
+    setNetworkPreferencePending(true)
+    try {
+      await api.setNetworkPreference({ mode })
+      // 乐观更新选择器；底层制式由后端引擎在轮询周期（≤5s）内应用
+      setNetworkPreferenceState(mode)
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setNetworkPreferencePending(false)
+    }
+  }, [networkPreference, networkPreferencePending, loadData, setError])
+
   useAdaptivePolling({
     refreshInterval,
     refreshKey,
@@ -354,6 +397,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       systemStats,
       networkInfo,
       dataStatus,
+      dataEnabled,
       cellsInfo,
       qosInfo,
       airplaneMode,
@@ -363,12 +407,15 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       roaming,
       radioMode,
       radioModePending,
+      networkPreference,
+      networkPreferencePending,
     } as DashboardData,
     actions: {
       toggleData,
       toggleAirplaneMode,
       toggleRoaming,
       toggle5g,
+      setNetworkPreference,
       loadData,
     } as DashboardActions,
   }

@@ -51,6 +51,7 @@ mod models;
 mod mqtt_service;
 mod remote_control_push;
 mod net_health;
+mod network_pref;
 mod ota;
 mod power_health;
 mod process_monitor;
@@ -446,10 +447,12 @@ async fn async_main() -> Result<()> {
             // ofono 服务可能晚于后端进程启动；等待其就绪后再自动连接，
             // 避免在 ofono 未注册时发起注定失败的连接（见 dbus::wait_for_ofono）。
             if dbus::wait_for_ofono(&conn_clone, std::time::Duration::from_secs(60)).await {
+                // 先重套持久化的射频模式 / 频段锁 / 小区锁（此步会触发 Radio 重建并
+                // 留出注网静默窗口），再等待注网完成并激活数据连接——避免「先激活
+                // 后射频重启」造成的断流与手动重连。
+                band_manager::apply_persisted_locks(&conn_clone, &config_manager_clone).await;
                 let result = init_data_connection(&conn_clone).await;
                 tracing::info!("Auto-connect completed: {}", result);
-                // 网络就绪后重套持久化的射频模式 / 频段锁 / 小区锁
-                band_manager::apply_persisted_locks(&conn_clone, &config_manager_clone).await;
             } else {
                 tracing::warn!("Auto-connect skipped: ofono not ready within 60s; watchdog will retry");
             }
@@ -471,6 +474,29 @@ async fn async_main() -> Result<()> {
                     tracing::info!("Watchdog started");
                     log_entry!(info, "app", "Data connection watchdog started");
                     dbus::data_connection_watchdog(conn_clone, config_manager).await;
+                }
+            })
+            .await;
+        });
+    }
+
+    // 启动智能优先选网引擎 — 把 network_preference.mode 映射为 TechnologyPreference，
+    // 并为「优先 4G / 优先 5G」实现脱网应急切换 + 闲时静默回切。
+    // mode 为 auto 时引擎被动（保持旧 radio_mode / 5G 开关等机制不变）。
+    {
+        let conn_clone = Arc::clone(&dbus_conn);
+        let config_manager = Arc::clone(&config_manager);
+        tokio::spawn(async move {
+            supervise("network_preference_engine", move || {
+                let conn_clone = Arc::clone(&conn_clone);
+                let config_manager = Arc::clone(&config_manager);
+                async move {
+                    // 初始延迟 8 秒，等待 ofono 与开机自动连接流程（Auto-connect）先落地；
+                    // 之后引擎通过「读后写」的自愈 ensure 与 apply_persisted_locks 收敛一致。
+                    tokio::time::sleep(tokio::time::Duration::from_secs(8)).await;
+                    tracing::info!("Network preference engine started");
+                    log_entry!(info, "app", "Network preference engine started");
+                    network_pref::network_preference_engine(conn_clone, config_manager).await;
                 }
             })
             .await;
@@ -683,6 +709,8 @@ async fn async_main() -> Result<()> {
         .route("/api/airplane-mode", get(get_airplane_mode_handler).post(set_airplane_mode_handler).options(options_handler))
         // ========== 射频模式接口 ==========
         .route("/api/radio-mode", get(get_radio_mode_handler).post(set_radio_mode_handler).options(options_handler))
+        // ========== 智能优先选网接口 ==========
+        .route("/api/network-preference", get(get_network_preference_handler).post(set_network_preference_handler).options(options_handler))
         .route("/api/band-lock", get(get_band_lock_handler).post(set_band_lock_handler).options(options_handler))
         .route("/api/cell-lock", get(get_cell_lock_handler).post(set_cell_lock_handler).options(options_handler))
         .route("/api/cell-lock/unlock-all", post(unlock_all_cells_handler).options(options_handler))

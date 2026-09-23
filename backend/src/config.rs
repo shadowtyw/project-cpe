@@ -574,6 +574,11 @@ fn default_radio_mode() -> String {
     "auto".to_string()
 }
 
+/// 数据连接期望状态默认值：默认开启（Always-On）。
+fn default_data_conn_enabled() -> bool {
+    true
+}
+
 impl Default for RadioModeConfig {
     fn default() -> Self {
         Self {
@@ -587,6 +592,68 @@ impl RadioModeConfig {
         if !matches!(self.mode.as_str(), "auto" | "lte" | "nr") {
             self.mode = "auto".to_string();
         }
+        self
+    }
+
+    pub fn is_auto(&self) -> bool {
+        self.mode == "auto"
+    }
+}
+
+/// 智能优先选网策略默认制式：默认「原生策略」（不干预底层制式选择）。
+fn default_network_pref_mode() -> String {
+    "auto".to_string()
+}
+
+/// 首选制式连续脱网达到该秒数后，自动升级/降级到备用制式保活。
+fn default_failover_timeout_secs() -> u64 {
+    30
+}
+
+/// 降级保活期间，每隔该分钟数静默探测一次首选制式，有信号则切回。
+fn default_probe_interval_mins() -> u64 {
+    30
+}
+
+/// 智能优先选网策略持久化。
+///
+/// 这是「核心重构」新增的策略层：用户不再只是设置一个静态的 TechnologyPreference，
+/// 而是选择一个「优先网络」偏好，由后台引擎（`network_pref.rs`）负责：
+///   - `prefer_lte`（4G 优先 / 低功耗低温设备）：常驻 4G；连续脱网超时后升级 5G 应急保活；
+///     每隔 probe_interval_mins 分钟静默探测 4G，有信号则切回。
+///   - `prefer_5g`（5G 优先 / 主力性能设备）：常驻 5G；5G 盲区/异常脱网自动下沉 4G 保活。
+///   - `lte_only`（仅 4G）：强行锁定 4G，绝不回落 5G（等同旧 `radio_mode == "lte"`，但由引擎自愈）。
+///   - `auto`（原生策略）：不干预，遵循展锐原生调制解调器策略（引擎被动，保持旧行为兼容）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkPreferenceConfig {
+    /// "prefer_lte" | "prefer_5g" | "lte_only" | "auto"
+    #[serde(default = "default_network_pref_mode")]
+    pub mode: String,
+    /// 连续脱网多少秒触发备用制式切换（10 ~ 300 秒，默认 30）。
+    #[serde(default = "default_failover_timeout_secs")]
+    pub failover_timeout_secs: u64,
+    /// 降级期间每隔多少分钟探测首选网络（5 ~ 1440 分钟，默认 30）。
+    #[serde(default = "default_probe_interval_mins")]
+    pub probe_interval_mins: u64,
+}
+
+impl Default for NetworkPreferenceConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_network_pref_mode(),
+            failover_timeout_secs: default_failover_timeout_secs(),
+            probe_interval_mins: default_probe_interval_mins(),
+        }
+    }
+}
+
+impl NetworkPreferenceConfig {
+    pub fn sanitize(mut self) -> Self {
+        if !matches!(self.mode.as_str(), "prefer_lte" | "prefer_5g" | "lte_only" | "auto") {
+            self.mode = "auto".to_string();
+        }
+        self.failover_timeout_secs = self.failover_timeout_secs.clamp(10, 300);
+        self.probe_interval_mins = self.probe_interval_mins.clamp(5, 1440);
         self
     }
 
@@ -1024,10 +1091,16 @@ pub struct AppConfig {
     pub sms_control: SmsControlConfig,
     #[serde(default)]
     pub traffic_alert: TrafficAlertConfig,
+    /// 数据连接期望状态（Always-On）：区分「用户主动关闭」与「系统注网/切网脱落」。
+    #[serde(default = "default_data_conn_enabled")]
+    pub data_connection_enabled: bool,
     #[serde(default)]
     pub net_health: NetHealthConfig,
     #[serde(default)]
     pub radio_mode: RadioModeConfig,
+    /// 智能优先选网策略（v3.8.10 新增；老版本配置无此字段时自动取默认 `auto`）。
+    #[serde(default)]
+    pub network_preference: NetworkPreferenceConfig,
     #[serde(default)]
     pub band_lock: BandLockConfig,
     #[serde(default)]
@@ -1065,6 +1138,7 @@ impl ConfigManager {
                             traffic_alert: cfg.traffic_alert.sanitize(),
                             net_health: cfg.net_health.sanitize(),
                             radio_mode: cfg.radio_mode.sanitize(),
+                            network_preference: cfg.network_preference.sanitize(),
                             mqtt: cfg.mqtt.sanitize(),
                             ..cfg
                         },
@@ -1240,6 +1314,34 @@ impl ConfigManager {
         {
             let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
             config.radio_mode = cfg;
+        }
+        self.save()
+    }
+
+    /// 智能优先选网策略（v3.8.10 新增）。
+    pub fn get_network_preference(&self) -> NetworkPreferenceConfig {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).network_preference.clone().sanitize()
+    }
+
+    pub fn set_network_preference(&self, pref: NetworkPreferenceConfig) -> Result<(), String> {
+        let pref = pref.sanitize();
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.network_preference = pref;
+        }
+        self.save()
+    }
+
+    /// 数据连接期望状态（Always-On）：true 表示系统应保证数据连接常驻并及时自愈，
+    /// false 表示用户主动关闭，watchdog 不得自动重新拨号。
+    pub fn get_data_connection_enabled(&self) -> bool {
+        self.config.read().unwrap_or_else(|p| p.into_inner()).data_connection_enabled
+    }
+
+    pub fn set_data_connection_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap_or_else(|p| p.into_inner());
+            config.data_connection_enabled = enabled;
         }
         self.save()
     }

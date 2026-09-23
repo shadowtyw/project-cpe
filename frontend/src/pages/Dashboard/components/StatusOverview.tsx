@@ -20,7 +20,7 @@ import {
 } from '@mui/icons-material'
 import { formatCarrierName, getCarrierColor, getCarrierLogo } from '@/utils/carriers'
 import { getSignalColor } from '../utils'
-import type { DeviceInfo, NetworkInfo, CellsResponse, AirplaneModeResponse, ImsStatusResponse, RoamingResponse, RadioMode } from '@/api/types'
+import type { DeviceInfo, NetworkInfo, CellsResponse, AirplaneModeResponse, ImsStatusResponse, RoamingResponse } from '@/api/types'
 
 interface StatusOverviewProps {
   deviceInfo: DeviceInfo | null
@@ -29,7 +29,6 @@ interface StatusOverviewProps {
   airplaneMode: AirplaneModeResponse | null
   imsStatus: ImsStatusResponse | null
   roaming?: RoamingResponse | null
-  radioMode: RadioMode | null
 }
 
 export function StatusOverview({
@@ -39,7 +38,6 @@ export function StatusOverview({
   airplaneMode,
   imsStatus,
   roaming,
-  radioMode,
 }: StatusOverviewProps) {
   const theme = useTheme<Theme>()
 
@@ -52,6 +50,17 @@ export function StatusOverview({
       if (networkInfo.technology_preference.includes('LTE')) return 'LTE'
     }
     return 'N/A'
+  })()
+
+  // 物理链路实际驻留制式徽标（v3.9.0）：仅以小区下行实际制式（serving_cell.tech）为准，
+  // 不依赖用户「技术偏好」，避免把偏好误当作实况；非 4G/5G 或未知制式不显示徽标。
+  const servingRat = (() => {
+    const tech = cellsInfo?.serving_cell?.tech
+    if (!tech) return null
+    const t = tech.toLowerCase()
+    if (t === 'nr' || t === '5g') return '5G'
+    if (t === 'lte' || t === '4g') return '4G'
+    return null
   })()
 
   const signalStrength = networkInfo?.signal_strength
@@ -110,11 +119,11 @@ export function StatusOverview({
               {signalStrength === undefined ? '--' : `${signalStrength}%`}
             </Typography>
           </Box>
-          {radioMode !== null && (
+          {servingRat !== null && (
             <Box
               sx={{
-                bgcolor: radioMode === 'lte' ? 'info.main' : 'success.main',
-                color: radioMode === 'lte' ? 'info.contrastText' : 'success.contrastText',
+                bgcolor: servingRat === '4G' ? 'info.main' : 'success.main',
+                color: servingRat === '4G' ? 'info.contrastText' : 'success.contrastText',
                 px: 1,
                 py: 0.25,
                 borderRadius: 1,
@@ -125,7 +134,7 @@ export function StatusOverview({
                 userSelect: 'none',
               }}
             >
-              {radioMode === 'lte' ? '4G' : '5G'}
+              {servingRat}
             </Box>
           )}
         </Box>

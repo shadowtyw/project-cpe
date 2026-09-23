@@ -116,6 +116,7 @@ export interface ThermalZone {
 // 数据连接状态
 export interface DataConnectionStatus {
   active: boolean
+  enabled?: boolean // 数据连接期望状态（config.json 的 data_connection_enabled）
 }
 
 // 漫游状态响应
@@ -357,6 +358,23 @@ export interface RadioModeResponse {
 // 射频模式请求
 export interface RadioModeRequest {
   mode: RadioMode // auto: 4G/5G 自动, lte: 仅 4G, nr: 仅 5G
+}
+
+// 智能优先选网模式（v3.9.0）
+export type NetworkPreferenceMode = 'prefer_lte' | 'prefer_5g' | 'lte_only' | 'auto'
+
+// 智能优先选网策略响应
+export interface NetworkPreferenceResponse {
+  mode: string // prefer_lte | prefer_5g | lte_only | auto
+  failover_timeout_secs: number // 连续脱网触发备用制式的秒数
+  probe_interval_mins: number // 降级期间探测首选网络的间隔（分钟）
+}
+
+// 智能优先选网策略请求
+export interface NetworkPreferenceRequest {
+  mode: NetworkPreferenceMode
+  failover_timeout_secs?: number
+  probe_interval_mins?: number
 }
 
 // 频段锁定状态

@@ -2,7 +2,7 @@
 
 面向成品 5G CPE / 通讯壳的 Web 管理系统。后端采用 Rust + Axum + zbus，通过 ofono D-Bus 管理 5G/LTE 调制解调器；前端基于 React + Vite + @tanstack/react-query，提供网络、短信、电话、频段、小区、USB、OTA、Webhook 和系统状态管理界面。
 
-> 当前版本：`3.8.5`  
+> 当前版本：`3.9.0`  
 > 目标平台：`aarch64-unknown-linux-musl`（展锐 UDX710 SoC）  
 > 授权协议：[GNU GPLv3](LICENSE)
 
@@ -326,6 +326,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 | `/api/roaming` | GET/POST | 漫游开关 |
 | `/api/airplane-mode` | GET/POST | 飞行模式开关 |
 | `/api/radio-mode` | GET/POST | 射频模式（4G/5G/自动） |
+| `/api/network-preference` | GET/POST | 智能优先选网策略（优先4G/优先5G/仅4G/自动，含脱网应急与闲时回切参数） |
 | `/api/band-lock` | GET/POST | 频段锁定 |
 | `/api/cell-lock` | GET/POST | 小区锁定 |
 | `/api/cell-lock/unlock-all` | POST | 解锁所有小区 |
@@ -409,6 +410,7 @@ sh /home/root/init.sh &       # 用户自定义启动脚本
 - APN 配置管理
 - 运营商手动/自动注册
 - **频段/小区锁持久化**：设置后自动写入 config.json，开机和断网重连后自动重套
+- **智能优先选网策略**：`prefer_lte`（常驻4G，脱网30s升级5G应急，30min探测回4G）、`prefer_5g`（常驻5G，盲区下沉4G保活）、`lte_only`（强行锁定4G自愈）、`auto`（原生被动）。后台引擎以「读后写」方式管理 `TechnologyPreference`，脱网应急切换与闲时静默回切全自动，且不干预旧版 5G 开关机制
 
 ### 电话与短信
 
@@ -628,6 +630,30 @@ Dashboard 的 IPv4/IPv6 连通性指示来自每次 ping 的原始结果。单�
 - **建连 5s 硬超时**：`ConnAck` 握手用 `tokio::time::timeout` 包裹（v3.8.1 由 4s 提升至 5s），超时立即失败进入退避，不长时间挂起 MQTT 任务
 - **数据连接恢复即时唤醒**：数据连接 watchdog 检测到恢复时立即通知 MQTT 模块中断退避 sleep 尝试重连，无需等待整个退避周期
 - **配置向后兼容**：旧版 `broker_list` + 全局 `port`/`tls`/`active_broker` 会在加载时自动迁移为节点列表；保存时同步回写旧字段镜像，OTA 回滚到旧版本二进制仍可读取。迁移在反序列化层完成且不抛错——单个字段残缺不会导致整份配置被重置为默认值
+
+### 14. 智能优先选网与 Always-On 常驻
+
+「核心重构」：把「射频模式」从单一静态 `TechnologyPreference` 提升为「用户可自主选择的智能优先选网策略」，并与数据连接常驻自愈（Always-On）协同，彻底消除人工干预。
+
+- **数据连接总开关 `data_connection_enabled`**（默认 `true`）：区分「用户主动关闭」与「系统注网/切网脱落」。只要用户在界面未点击「关闭数据连接」，开机搜网/切网震荡中一旦基站注网成功（registered），后台 watchdog 自动、强制拉起数据连接，无需人工干预；断线重拨采用指数退避 3s→6s→15s，避免高频重拨打死 modem。
+- **智能优先选网 `network_preference`**（写入 `config.json`）：
+  - `prefer_lte`（优先 4G，低功耗低温设备）：常驻 4G（LTE only）；连续脱网达 `failover_timeout_secs`（默认 30s）自动升级 5G 应急保活；之后每隔 `probe_interval_mins`（默认 30min）静默切回 4G 探测，有信号则常驻回 4G。
+  - `prefer_5g`（优先 5G，主力性能设备）：常驻 5G（NR only）；5G 盲区/异常脱网自动下沉 4G（LTE only）保活；每隔 30min 静默探测 5G 回切。
+  - `lte_only`（仅 4G）：强行锁定 4G，引擎每轮自愈抵抗定时/短信/手动切换造成的制式漂移。
+  - `auto`（自动）：遵循展锐原生调制解调器策略，引擎被动不干预，保持旧版 5G 开关等机制不变。
+- **引擎自愈**：后台任务 `network_preference_engine` 以「读后写」方式管理 `TechnologyPreference`——先读当前制式，不一致才 `SetProperty`，避免每次轮询触发无谓射频重建；脱网判定仅认 `searching/unregistered/denied`，`unknown`/ofono 未就绪不误判。
+- **配置平滑升级**：老版本 `config.json` 无 `network_preference` 字段时自动取默认 `auto`，不触发整份配置重置。
+
+```json
+{
+  "data_connection_enabled": true,
+  "network_preference": {
+    "mode": "prefer_lte",
+    "failover_timeout_secs": 30,
+    "probe_interval_mins": 30
+  }
+}
+```
 
 ---
 
