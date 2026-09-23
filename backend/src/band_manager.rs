@@ -24,6 +24,41 @@ use crate::config::{BandLockConfig, CellLockConfig, ConfigManager};
 /// 「重连→重启射频→断流」震荡。
 const BAND_QUIET_WINDOW_SECS: u64 = 6;
 
+/// 开机初期 `/ril_0` 的 RadioSettings 接口导出延迟的重试参数。
+///
+/// `wait_for_ofono` 只确认 ofono 服务名字已注册，但 `/ril_0` 上的 RadioSettings
+/// 接口通常还要再延迟 1~3 秒才导出。若在此窗口内下发 SetProperty 会瞬时失败并
+/// 打出 `Failed to apply radio mode` 的 warning。以 1 秒间隔重试几次即可静默覆盖。
+const RADIO_READY_RETRIES: usize = 3;
+const RADIO_READY_RETRY_INTERVAL_SECS: u64 = 1;
+
+/// 带开机就绪等待与重试地应用持久化射频模式。
+///
+/// 沿用 `init_data_connection` 同款「瞬时错误有限重试」思路：就绪窗口内的失败
+/// 静默重试，只有重试耗尽仍失败才打 warning（真正的配置错误才值得上报）。
+async fn apply_radio_mode_retry(conn: &Connection, target: crate::models::RadioMode, mode: &str) {
+    let mut last_error = String::new();
+    for attempt in 0..=RADIO_READY_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(RADIO_READY_RETRY_INTERVAL_SECS)).await;
+        }
+        match crate::dbus::set_radio_mode(conn, target.clone()).await {
+            Ok(()) => {
+                if attempt > 0 {
+                    info!(
+                        mode = %mode,
+                        retries = ?attempt,
+                        "Persisted radio mode applied after readiness retry"
+                    );
+                }
+                return;
+            }
+            Err(e) => last_error = e.to_string(),
+        }
+    }
+    warn!(error = %last_error, mode = %mode, "Failed to apply radio mode");
+}
+
 /// 一次性套用所有持久化锁频/锁网配置（仅开机调用一次）。
 ///
 /// 应在 ofono 已就绪后调用。每个步骤的失败只打日志，不阻断后续步骤。
@@ -41,9 +76,7 @@ pub async fn apply_persisted_locks(conn: &Connection, config_manager: &ConfigMan
             "nr" => crate::models::RadioMode::NrOnly,
             _ => crate::models::RadioMode::Auto,
         };
-        if let Err(e) = crate::dbus::set_radio_mode(conn, target).await {
-            warn!(error = %e, mode = %radio_mode.mode, "Failed to apply radio mode");
-        }
+        apply_radio_mode_retry(conn, target, &radio_mode.mode).await;
     }
 
     // 2. 频段锁定（AT+SPLBAND）

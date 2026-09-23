@@ -31,6 +31,9 @@ import type {
 
 export const SPEED_HISTORY_MAX_POINTS = 30
 
+// 切换网络偏好模式后的点击防抖窗口（2 秒），防止短时间内连续下发多个 updates。
+const NETWORK_PREFERENCE_DEBOUNCE_MS = 2000
+
 export interface InterfaceSpeedHistory {
   rx: number[]
   tx: number[]
@@ -99,6 +102,8 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [speedHistory, setSpeedHistory] = useState<Record<string, InterfaceSpeedHistory>>({})
   const speedHistoryRef = useRef<Record<string, InterfaceSpeedHistory>>({})
   const requestIdRef = useRef(0)
+  // 网络偏好模式最近一次成功切换的时间戳，用于 2 秒防抖（冷启时间戳 0，首次可立即切换）
+  const networkPreferenceCooldownRef = useRef(0)
 
   const updateSpeedHistory = useCallback((stats: SystemStatsResponse | null) => {
     if (!stats?.network_speed?.interfaces) return
@@ -362,6 +367,12 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const setNetworkPreference = useCallback(async (mode: NetworkPreferenceMode) => {
     // 选择期间禁用 Select，防止连续切换导致基带指令冲突
     if (networkPreference === null || networkPreferencePending) return
+    const now = Date.now()
+    // 2 秒防抖：上次切换后短时间内忽略再次点击，避免连续下发多个 updates
+    if (now - networkPreferenceCooldownRef.current < NETWORK_PREFERENCE_DEBOUNCE_MS) {
+      return
+    }
+    networkPreferenceCooldownRef.current = now
     setNetworkPreferencePending(true)
     try {
       await api.setNetworkPreference({ mode })
