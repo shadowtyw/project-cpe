@@ -20,7 +20,7 @@ import {
 } from '@mui/icons-material'
 import { formatCarrierName, getCarrierColor, getCarrierLogo } from '@/utils/carriers'
 import { getSignalColor } from '../utils'
-import type { DeviceInfo, NetworkInfo, CellsResponse, AirplaneModeResponse, ImsStatusResponse, RoamingResponse } from '@/api/types'
+import type { DeviceInfo, NetworkInfo, CellsResponse, AirplaneModeResponse, ImsStatusResponse, RoamingResponse, RadioMode } from '@/api/types'
 
 interface StatusOverviewProps {
   deviceInfo: DeviceInfo | null
@@ -29,6 +29,7 @@ interface StatusOverviewProps {
   airplaneMode: AirplaneModeResponse | null
   imsStatus: ImsStatusResponse | null
   roaming?: RoamingResponse | null
+  radioMode: RadioMode | null
 }
 
 export function StatusOverview({
@@ -38,6 +39,7 @@ export function StatusOverview({
   airplaneMode,
   imsStatus,
   roaming,
+  radioMode,
 }: StatusOverviewProps) {
   const theme = useTheme<Theme>()
 
@@ -108,6 +110,24 @@ export function StatusOverview({
               {signalStrength === undefined ? '--' : `${signalStrength}%`}
             </Typography>
           </Box>
+          {radioMode !== null && (
+            <Box
+              sx={{
+                bgcolor: radioMode === 'lte' ? 'info.main' : 'success.main',
+                color: radioMode === 'lte' ? 'info.contrastText' : 'success.contrastText',
+                px: 1,
+                py: 0.25,
+                borderRadius: 1,
+                fontWeight: 800,
+                fontSize: '0.78rem',
+                lineHeight: 1.5,
+                letterSpacing: '0.03em',
+                userSelect: 'none',
+              }}
+            >
+              {radioMode === 'lte' ? '4G' : '5G'}
+            </Box>
+          )}
         </Box>
 
         <Chip

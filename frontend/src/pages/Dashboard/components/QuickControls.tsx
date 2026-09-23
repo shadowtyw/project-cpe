@@ -8,26 +8,32 @@
  *
  * Copyright (c) 2025 by 1orz, All Rights Reserved.
  */
-import { Box, Card, CardContent, Typography, Stack, Switch, Chip } from '@mui/material'
-import { NetworkCheck, FlightTakeoff, TravelExplore } from '@mui/icons-material'
-import type { AirplaneModeResponse, RoamingResponse } from '@/api/types'
+import { Box, Card, CardContent, Typography, Stack, Switch, Chip, CircularProgress } from '@mui/material'
+import { NetworkCheck, FlightTakeoff, TravelExplore, CellTower } from '@mui/icons-material'
+import type { AirplaneModeResponse, RoamingResponse, RadioMode } from '@/api/types'
 
 interface QuickControlsProps {
   dataStatus: boolean | null
   airplaneMode: AirplaneModeResponse | null
   roaming: RoamingResponse | null
+  radioMode: RadioMode | null
+  radioModePending: boolean
   onToggleData: () => void
   onToggleAirplaneMode: () => void
   onToggleRoaming: () => void
+  onToggle5g: () => void
 }
 
 export function QuickControls({
   dataStatus,
   airplaneMode,
   roaming,
+  radioMode,
+  radioModePending,
   onToggleData,
   onToggleAirplaneMode,
   onToggleRoaming,
+  onToggle5g,
 }: QuickControlsProps) {
   return (
     <Card sx={{ height: '100%' }}>
@@ -47,6 +53,26 @@ export function QuickControls({
               color="success"
               size="small"
               disabled={dataStatus === null}
+            />
+          </Box>
+
+          <Box display="flex" alignItems="center" justifyContent="space-between">
+            <Box display="flex" alignItems="center" gap={1}>
+              {radioModePending ? (
+                <CircularProgress size={16} />
+              ) : (
+                <CellTower
+                  color={radioMode === null ? 'disabled' : radioMode === 'lte' ? 'info' : 'success'}
+                />
+              )}
+              <Typography variant="body2">5G 移动网络</Typography>
+            </Box>
+            <Switch
+              checked={radioMode !== null && radioMode !== 'lte'}
+              onChange={onToggle5g}
+              color="success"
+              size="small"
+              disabled={radioMode === null || radioModePending}
             />
           </Box>
 

@@ -48,6 +48,7 @@ export default function Dashboard() {
         airplaneMode={data.airplaneMode}
         imsStatus={data.imsStatus}
         roaming={data.roaming}
+        radioMode={data.radioMode}
       />
 
       {/* 主体内容区，PC 端采用多列布局 */}
@@ -58,9 +59,12 @@ export default function Dashboard() {
             dataStatus={data.dataStatus}
             airplaneMode={data.airplaneMode}
             roaming={data.roaming}
+            radioMode={data.radioMode}
+            radioModePending={data.radioModePending}
             onToggleData={() => void actions.toggleData()}
             onToggleAirplaneMode={() => void actions.toggleAirplaneMode()}
             onToggleRoaming={() => void actions.toggleRoaming()}
+            onToggle5g={() => void actions.toggle5g()}
           />
         </Grid>
 

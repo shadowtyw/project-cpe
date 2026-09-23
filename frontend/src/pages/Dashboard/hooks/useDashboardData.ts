@@ -25,6 +25,7 @@ import type {
   AirplaneModeResponse,
   ImsStatusResponse,
   RoamingResponse,
+  RadioMode,
 } from '@/api/types'
 
 export const SPEED_HISTORY_MAX_POINTS = 30
@@ -54,12 +55,15 @@ export interface DashboardData {
   connectivity: ConnectivityResult | null
   speedHistory: Record<string, InterfaceSpeedHistory>
   roaming: RoamingResponse | null
+  radioMode: RadioMode | null
+  radioModePending: boolean
 }
 
 export interface DashboardActions {
   toggleData: () => Promise<void>
   toggleAirplaneMode: () => Promise<void>
   toggleRoaming: () => Promise<void>
+  toggle5g: () => Promise<void>
   loadData: () => Promise<void>
 }
 
@@ -81,6 +85,8 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [imsStatus, setImsStatus] = useState<ImsStatusResponse | null>(null)
   const [connectivity, setConnectivity] = useState<ConnectivityResult | null>(null)
   const [roaming, setRoaming] = useState<RoamingResponse | null>(null)
+  const [radioMode, setRadioModeState] = useState<RadioMode | null>(null)
+  const [radioModePending, setRadioModePending] = useState(false)
 
   const [speedHistory, setSpeedHistory] = useState<Record<string, InterfaceSpeedHistory>>({})
   const speedHistoryRef = useRef<Record<string, InterfaceSpeedHistory>>({})
@@ -145,6 +151,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       api.getCellsInfo(),
       api.getQosInfo(),
       api.getAirplaneMode(),
+      api.getRadioMode(),
     ])
 
     if (requestId !== requestIdRef.current) {
@@ -210,6 +217,20 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       if (airplaneModeResult.value.data) setAirplaneMode(airplaneModeResult.value.data)
     } else {
       baseErrors.push(formatRequestError('飞行模式状态', airplaneModeResult.reason))
+    }
+
+    const radioModeResult = baseResults[8]
+    if (radioModeResult.status === 'fulfilled') {
+      if (radioModeResult.value.data) {
+        const mode = radioModeResult.value.data.mode
+        if (mode === 'auto' || mode === 'nr' || mode === 'lte') {
+          setRadioModeState(mode)
+        } else {
+          setRadioModeState(null)
+        }
+      }
+    } else {
+      baseErrors.push(formatRequestError('射频模式', radioModeResult.reason))
     }
 
     setInitialLoading(false)
@@ -294,6 +315,23 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     }
   }, [roaming])
 
+  const toggle5g = useCallback(async () => {
+    // 拨动期间禁用 Switch，防止连续快速点击导致基带指令冲突
+    if (radioMode === null || radioModePending) return
+
+    const target: RadioMode = radioMode === 'lte' ? 'auto' : 'lte'
+    setRadioModePending(true)
+    try {
+      await api.setRadioMode(target)
+      // 请求成功后立即全量刷新，让 Switch 与顶栏 4G/5G 徽标瞬间同步
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRadioModePending(false)
+    }
+  }, [radioMode, radioModePending, loadData, setError])
+
   useAdaptivePolling({
     refreshInterval,
     refreshKey,
@@ -323,11 +361,14 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       connectivity,
       speedHistory,
       roaming,
+      radioMode,
+      radioModePending,
     } as DashboardData,
     actions: {
       toggleData,
       toggleAirplaneMode,
       toggleRoaming,
+      toggle5g,
       loadData,
     } as DashboardActions,
   }
