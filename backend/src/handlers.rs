@@ -38,7 +38,8 @@ use crate::{
     usb_switch,
     utils::{
         bands_to_bitmask, bitmask_to_bands, build_splband_lte_command, build_splband_nr_command,
-        format_uptime, get_active_interfaces, get_cell_command_config,
+        build_splband_lte_full_command, build_splband_nr_full_command, format_uptime,
+        get_active_interfaces, get_cell_command_config, LTE_FDD_ALL, LTE_TDD_ALL, NR_FDD_ALL, NR_TDD_ALL,
         parse_at_response_to_2d_vec, parse_neighbor_cells, parse_primary_cell,
         parse_splband_lte_response, parse_splband_nr_response, read_cpu_info, read_cpu_load_sync,
         read_disk_info, read_interface_stats, read_memory_info, read_network_interfaces, read_system_info,
@@ -1432,14 +1433,9 @@ pub async fn get_band_lock_handler(State(conn): State<Arc<Connection>>) -> impl 
         Err(e) => (0, 0, Some(format!("Error: {}", e))),
     };
 
-    // UDX710 设备支持的全部频段掩码
-    // LTE: FDD=149 (B1+B3+B5+B8), TDD=320 (B39+B41)
-    // NR: FDD=517 (N1+N3+N28), TDD=912 (N41+N77+N78+N79)
-    const LTE_FDD_ALL: u16 = 149;
-    const LTE_TDD_ALL: u16 = 320;
-    const NR_FDD_ALL: u16 = 517;
-    const NR_TDD_ALL: u16 = 912;
-    
+    // 全频段掩码常量（LTE_FDD_ALL / LTE_TDD_ALL / NR_FDD_ALL / NR_TDD_ALL）
+    // 统一定义于 utils.rs，此处据此判断「全频段」或「零频段」均视为未锁定。
+
     // 判断是否有频段锁定
     // 如果返回的频段等于设备支持的全部频段，则认为"未锁定"（全部可用）
     // 如果返回 0 或小于全部，则认为"已锁定"（限制了可用频段）
@@ -1673,48 +1669,28 @@ pub async fn set_band_lock_handler(
         && payload.nr_fdd_bands.is_empty()
         && payload.nr_tdd_bands.is_empty()
     {
-        let mut lte_unlocked = false;
-        let mut nr_unlocked = false;
-
-        // 先读取当前 LTE 锁定状态
-        let lte_result = send_at_command(&conn, "AT+SPLBAND=0").await;
-        if let Ok(lte_response) = lte_result {
-            let (lte_fdd_mask, lte_tdd_mask) = parse_splband_lte_response(&lte_response);
-
-            // 只有当前有 LTE 锁定时才执行解锁
-            if lte_fdd_mask != 0 || lte_tdd_mask != 0 {
-                // 格式: AT+SPLBAND=1,0,<TDD>,0,<FDD>,0 (6 参数)
-                if let Err(e) = send_at_command(&conn, "AT+SPLBAND=1,0,0,0,0,0").await {
-                    return (
-                        StatusCode::OK,
-                        Json(ApiResponse::<serde_json::Value>::error(format!(
-                            "Failed to unlock LTE bands: {}",
-                            e
-                        ))),
-                    );
-                }
-                lte_unlocked = true;
-            }
+        // 清空频段锁必须恢复到「出厂全频段」掩码，而不是下发 0：
+        // 下发 0 会令 modem 锁到零频段导致脱网。
+        // 这里无条件恢复 LTE + NR 全频段，即使用户此前曾写入过零掩码、
+        // 或 modem 已处于零掩码脱网态，也能被正确救回。
+        if let Err(e) = send_at_command(&conn, &build_splband_lte_full_command()).await {
+            return (
+                StatusCode::OK,
+                Json(ApiResponse::<serde_json::Value>::error(format!(
+                    "Failed to restore LTE full band: {}",
+                    e
+                ))),
+            );
         }
 
-        // 先读取当前 NR 锁定状态
-        let nr_result = send_at_command(&conn, "AT+SPLBAND=3").await;
-        if let Ok(nr_response) = nr_result {
-            let (nr_fdd_mask, nr_tdd_mask) = parse_splband_nr_response(&nr_response);
-
-            // 只有当前有 NR 锁定时才执行解锁
-            if nr_fdd_mask != 0 || nr_tdd_mask != 0 {
-                if let Err(e) = send_at_command(&conn, "AT+SPLBAND=2,0,0,0,0").await {
-                    return (
-                        StatusCode::OK,
-                        Json(ApiResponse::<serde_json::Value>::error(format!(
-                            "Failed to unlock NR bands: {}",
-                            e
-                        ))),
-                    );
-                }
-                nr_unlocked = true;
-            }
+        if let Err(e) = send_at_command(&conn, &build_splband_nr_full_command()).await {
+            return (
+                StatusCode::OK,
+                Json(ApiResponse::<serde_json::Value>::error(format!(
+                    "Failed to restore NR full band: {}",
+                    e
+                ))),
+            );
         }
 
         // 持久化空配置到 config.json
@@ -1723,23 +1699,10 @@ pub async fn set_band_lock_handler(
             tracing::warn!(error = %e, "Failed to persist band unlock to config.json");
         }
 
-        // 根据实际执行的解锁操作返回友好的提示信息
-        let message = if lte_unlocked || nr_unlocked {
-            if lte_unlocked && nr_unlocked {
-                "已解除所有频段锁定（LTE + NR），配置已持久化"
-            } else if lte_unlocked {
-                "已解除 LTE 频段锁定（NR 未锁定），配置已持久化"
-            } else {
-                "已解除 NR 频段锁定（LTE 未锁定），配置已持久化"
-            }
-        } else {
-            "当前没有锁定的频段，无需解锁"
-        };
-
         return (
             StatusCode::OK,
             Json(ApiResponse::success_with_message(
-                message,
+                "已解除所有频段锁定并恢复出厂全频段，配置已持久化",
                 json!({}),
             )),
         );

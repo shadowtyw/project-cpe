@@ -717,6 +717,78 @@ pub async fn get_registration_status(conn: &Connection) -> Option<String> {
         .or_else(|| Some("unknown".to_string()))
 }
 
+/// 蜂窝数据网卡接口名。
+const SIPA_ETH0_IFACE: &str = "sipa_eth0";
+
+/// 蜂窝网卡 sipa_eth0 是否已具备有效 IPv4（接口存在且地址非 0.0.0.0 / 127.*）。
+///
+/// 通过读取 `/sys/class/net/sipa_eth0/`（接口存在 + operstate）并解析
+/// `ip addr show` 判断，不发起任何网络连接。用于在 ofono Active=true 后做
+/// 「数据链路确已就绪」的二次校验，避免把「ofono 已激活但内核网卡尚未枚举 /
+/// 尚未获得地址」误判为已连接。
+fn sipa_eth0_has_ipv4() -> bool {
+    let base = std::path::Path::new("/sys/class/net").join(SIPA_ETH0_IFACE);
+
+    // 1. 接口必须存在且状态为 up / unknown
+    let operstate = match std::fs::read_to_string(base.join("operstate")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let operstate = operstate.trim();
+    if operstate != "up" && operstate != "unknown" {
+        return false;
+    }
+
+    // 2. 解析 ip addr，查找有效 IPv4
+    let output = match std::process::Command::new("ip")
+        .args(["addr", "show", "dev", SIPA_ETH0_IFACE])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("inet ") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let ip_str = match parts[1].split_once('/') {
+            Some((ip, _)) => ip,
+            None => parts[1],
+        };
+        if ip_str.is_empty() || ip_str == "0.0.0.0" || ip_str == "127.0.0.1" {
+            continue;
+        }
+        if ip_str.parse::<std::net::Ipv4Addr>().is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 等待 sipa_eth0 获得有效 IPv4，最多 `timeout_secs` 秒；就绪返回 true。
+///
+/// 基带执行 SPLBAND / 制式切换后会触发 Radio 重启，网卡重新枚举与 PDN 地址下发
+/// 需要数秒；这里给出静默等待，避免在网卡尚未就绪时就把「激活成功」上报为已连接。
+async fn wait_sipa_eth0_ready(timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if sipa_eth0_has_ipv4() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
+}
+
 /// 检查并恢复数据连接
 ///
 /// 这个函数被 watchdog 调用，检查数据连接状态并在需要时恢复
@@ -787,65 +859,78 @@ async fn check_and_restore_data_connection(conn: &Connection) -> String {
     // 5. 如果连接未激活，尝试激活
     if !active {
         match set_data_connection(conn, true).await {
-            Ok(_) => return format!("Connection restored (APN: {})", apn),
+            Ok(_) => {
+                // 激活后等待 sipa_eth0 真正获得 IPv4；网卡未就绪时不得上报
+                // 「已连接」，否则 watchdog 会误判为连接恢复并立即进入下一轮，
+                // 形成「恢复→失联→恢复」断流震荡。
+                if wait_sipa_eth0_ready(8).await {
+                    return format!("Connection restored (APN: {})", apn);
+                }
+                return "Waiting for sipa_eth0 (data link not ready)".to_string();
+            }
             Err(e) => return format!("Activation failed: {}", e),
         }
     }
-    
-    // 6. 连接正常
+
+    // 6. ofono Active=true 但内核网卡未就绪（网卡丢失/地址未下发）时，
+    //    不得上报「Connected」，交由 watchdog 退避重试与 net_health 分级自愈处理。
+    if !sipa_eth0_has_ipv4() {
+        return "Waiting for sipa_eth0 (interface not ready)".to_string();
+    }
+
+    // 7. 连接正常
     format!("Connected (APN: {})", apn)
 }
 
 /// 数据连接 Watchdog - 后台轮询监控并自动恢复
 ///
-/// 持续监控数据连接状态，在断开时自动尝试恢复。
+/// 持续监控数据连接状态，在断开时自动尝试恢复（指数退避 3s→6s→15s，封顶 15s）。
 /// 支持自动识别运营商并配置 APN。
 ///
 /// # Arguments
 /// * `conn` - D-Bus 连接
-/// * `interval_secs` - 检查间隔（秒）
+/// * `config_manager` - 配置管理器（用于重套 RAM 态小区锁）
 pub async fn data_connection_watchdog(
     conn: Arc<Connection>,
     config_manager: Arc<ConfigManager>,
 ) {
     let mut last_data_log = String::new();
-    // 首次进入循环前先检查一次，避免设备刚启动、连接已断时还要再等满一个 interval。
-    let mut first_round = true;
+    // 连续「未连接」次数，用于指数退避（3s→6s→15s），避免断网时 2s 高频重拨
+    // 把 modem / 网卡打死而形成断流震荡。
+    let mut reconnect_attempts: u32 = 0;
 
     loop {
-        if !first_round {
-            let result = check_and_restore_data_connection(&conn).await;
-            if result != last_data_log {
-                info!("Watchdog: data connection: {}", result);
-                last_data_log = result.clone();
-                // 重连成功后重套持久化的射频模式 / 频段锁 / 小区锁
-                if result.starts_with("Connection restored") || result.starts_with("Connected") {
-                    crate::band_manager::apply_persisted_locks(&conn, &config_manager).await;
-                    // 解除退避中的 MQTT 重连循环。
-                    // "Connected" 覆盖开机首轮（init_data_connection 已激活）的场景，
-                    // 避免 MQTT 因 DNS 未就绪进入退避后空等整个 backoff 窗口。
-                    crate::mqtt_service::notify_data_connection_restored();
-                }
-            }
+        let result = check_and_restore_data_connection(&conn).await;
+        let connected =
+            result.starts_with("Connection restored") || result.starts_with("Connected");
 
-            // 自适应休眠：已连接时 90s 一次轻量检查，断线时 2s 高频恢复重试。
-            // 不再依赖前端心跳节奏——空闲设备也能在断网后快速自愈。
-            let connected = result.starts_with("Connected");
-            let sleep_secs = if connected { 90u64 } else { 2u64 };
-            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-        } else {
-            first_round = false;
-            // 首次检查：立刻执行一次，避免启动阶段空等。
-            let result = check_and_restore_data_connection(&conn).await;
-            let connected = result.starts_with("Connection restored") || result.starts_with("Connected");
-            if result != last_data_log {
-                info!("Watchdog: data connection (initial): {}", result);
-                last_data_log = result;
-            }
+        if result != last_data_log {
+            info!("Watchdog: data connection: {}", result);
+            last_data_log = result.clone();
             if connected {
-                crate::band_manager::apply_persisted_locks(&conn, &config_manager).await;
+                // 重连成功后仅重套 RAM 态小区锁；频段锁/制式为持久态，重发会触发
+                // Radio 重启，故只在开机重套，避免每次重连都重启射频造成断流震荡。
+                crate::band_manager::reapply_runtime_locks(&conn, &config_manager).await;
+                // 解除退避中的 MQTT 重连循环。
+                // "Connected" 覆盖开机首轮（init_data_connection 已激活）的场景，
+                // 避免 MQTT 因 DNS 未就绪进入退避后空等整个 backoff 窗口。
                 crate::mqtt_service::notify_data_connection_restored();
             }
+        }
+
+        if connected {
+            // 已连接：重置退避计数，90s 一次轻量检查。
+            reconnect_attempts = 0;
+            tokio::time::sleep(Duration::from_secs(90)).await;
+        } else {
+            // 未连接：指数退避 3s→6s→15s（封顶），防止高频重拨。
+            reconnect_attempts = reconnect_attempts.saturating_add(1);
+            let backoff_secs = match reconnect_attempts {
+                0 | 1 => 3,
+                2 => 6,
+                _ => 15,
+            };
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         }
     }
 }

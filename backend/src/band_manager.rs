@@ -6,47 +6,71 @@
 //! 2. **Band-lock NVRAM 不可靠**：AT+SPLBAND 虽然通常写入 NVRAM 但不同固件行为不一致。
 //! 3. **Cell-lock RAM 态丢失**：AT+SPFORCEFRQ 掉电/去附着必然丢失。
 //!
-//! 本模块在每次开机（init_data_connection 成功后）和每次 Watchdog 重连成功后自动调用，
-//! 将 config.json 中保存的射频模式、频段锁、小区锁配置重新下发到 modem。
+//! 本模块在开机（init_data_connection 成功后）将 config.json 中保存的射频模式、
+//! 频段锁、小区锁配置重新下发到 modem；Watchdog 重连成功后仅重套 RAM 态小区锁，
+//! 避免每次重连都重发频段锁/制式而触发 Radio 重启造成断流震荡。
+
+use std::time::Duration;
 
 use tracing::{info, warn};
 use zbus::Connection;
 
 use crate::config::{BandLockConfig, CellLockConfig, ConfigManager};
 
-/// 一次性套用所有持久化锁频/锁网配置。
+/// 频段/射频操作后的注网静默窗口（秒）。
 ///
-/// 应在 ofono 已就绪、网络已注册后调用。
-/// 每个步骤的失败只打日志，不阻断后续步骤。
+/// 展锐基带执行 SPLBAND / 制式切换会触发 Radio 重启，必须给射频留出足够时间
+/// 重新搜网注网；若紧接着就发起数据连接激活，会因射频尚未注网而失败并引发
+/// 「重连→重启射频→断流」震荡。
+const BAND_QUIET_WINDOW_SECS: u64 = 6;
+
+/// 一次性套用所有持久化锁频/锁网配置（仅开机调用一次）。
+///
+/// 应在 ofono 已就绪后调用。每个步骤的失败只打日志，不阻断后续步骤。
+///
+/// 频段锁（SPLBAND）与制式（TechnologyPreference）均为持久态，且重发会触发
+/// Radio 重启，因此只在开机重套；小区锁（SPFORCEFRQ）为 RAM 态，见
+/// [`reapply_runtime_locks`] 在重连后另行重套。
 pub async fn apply_persisted_locks(conn: &Connection, config_manager: &ConfigManager) {
     // 1. 射频模式：仅 LTE / 仅 NR / auto
     let radio_mode = config_manager.get_radio_mode_cfg();
     if !radio_mode.is_auto() {
-        info!("Re-applying persisted radio mode: {}", radio_mode.mode);
+        info!("Applying persisted radio mode: {}", radio_mode.mode);
         let target = match radio_mode.mode.as_str() {
             "lte" => crate::models::RadioMode::LteOnly,
             "nr" => crate::models::RadioMode::NrOnly,
             _ => crate::models::RadioMode::Auto,
         };
         if let Err(e) = crate::dbus::set_radio_mode(conn, target).await {
-            warn!(error = %e, mode = %radio_mode.mode, "Failed to re-apply radio mode");
+            warn!(error = %e, mode = %radio_mode.mode, "Failed to apply radio mode");
         }
     }
 
     // 2. 频段锁定（AT+SPLBAND）
     let band_lock = config_manager.get_band_lock();
-    if !band_lock.is_empty() {
+    if band_lock.is_empty() {
+        // 容错：四个数组均为空时，强制将 modem 恢复为出厂全频段。
+        // 历史上「清空锁」曾下发过零掩码导致脱网；启动时无条件刷新全频段
+        // 可清除任何残留锁，保证设备以全频段可用状态开机。
+        info!("Band lock config empty, restoring modem to factory full-band");
+        if let Err(e) = apply_band_unlock(conn).await {
+            warn!(error = %e, "Failed to restore modem to factory full-band");
+        }
+    } else {
         info!(
             lte_fdd = ?band_lock.lte_fdd_bands,
             lte_tdd = ?band_lock.lte_tdd_bands,
             nr_fdd = ?band_lock.nr_fdd_bands,
             nr_tdd = ?band_lock.nr_tdd_bands,
-            "Re-applying persisted band lock"
+            "Applying persisted band lock"
         );
         if let Err(e) = apply_band_lock(conn, &band_lock).await {
-            warn!(error = %e, "Failed to re-apply band lock");
+            warn!(error = %e, "Failed to apply band lock");
         }
     }
+
+    // 射频操作后留出注网静默窗口，避免立即激活数据导致断流震荡。
+    tokio::time::sleep(Duration::from_secs(BAND_QUIET_WINDOW_SECS)).await;
 
     // 3. 小区锁定（AT+SPFORCEFRQ）
     let cell_lock = config_manager.get_cell_lock();
@@ -56,7 +80,28 @@ pub async fn apply_persisted_locks(conn: &Connection, config_manager: &ConfigMan
             lte_pci = ?cell_lock.lte_pci,
             nr_arfcn = ?cell_lock.nr_arfcn,
             nr_pci = ?cell_lock.nr_pci,
-            "Re-applying persisted cell lock"
+            "Applying persisted cell lock"
+        );
+        if let Err(e) = apply_cell_lock(conn, &cell_lock).await {
+            warn!(error = %e, "Failed to apply cell lock");
+        }
+    }
+}
+
+/// Watchdog 重连成功后仅重套 RAM 态的小区锁。
+///
+/// 频段锁（SPLBAND）与制式（TechnologyPreference）重发会触发 Radio 重启，若每次
+/// 重连都重新下发，会导致「重连→重启射频→断流→再重连」震荡，因此它们只在开机由
+/// [`apply_persisted_locks`] 重套。小区锁为 RAM 态，去附着/掉电必然丢失，必须重套。
+pub async fn reapply_runtime_locks(conn: &Connection, config_manager: &ConfigManager) {
+    let cell_lock = config_manager.get_cell_lock();
+    if !cell_lock.is_empty() {
+        info!(
+            lte_arfcn = ?cell_lock.lte_arfcn,
+            lte_pci = ?cell_lock.lte_pci,
+            nr_arfcn = ?cell_lock.nr_arfcn,
+            nr_pci = ?cell_lock.nr_pci,
+            "Re-applying persisted cell lock (runtime)"
         );
         if let Err(e) = apply_cell_lock(conn, &cell_lock).await {
             warn!(error = %e, "Failed to re-apply cell lock");
@@ -89,6 +134,15 @@ async fn apply_band_lock(conn: &Connection, config: &BandLockConfig) -> Result<(
         send_at(conn, &cmd).await?;
     }
 
+    Ok(())
+}
+
+/// 恢复 LTE + NR 出厂全频段（解除频段锁的正确方式）。
+///
+/// 必须下发全频段掩码而非 0：下发 0 会令 modem 锁到零频段导致脱网。
+async fn apply_band_unlock(conn: &Connection) -> Result<(), String> {
+    send_at(conn, &crate::utils::build_splband_lte_full_command()).await?;
+    send_at(conn, &crate::utils::build_splband_nr_full_command()).await?;
     Ok(())
 }
 

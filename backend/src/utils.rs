@@ -1579,3 +1579,24 @@ pub fn build_splband_nr_command(fdd_mask: u16, tdd_mask: u16) -> String {
     format!("AT+SPLBAND=2,{},0,{},0", fdd_mask, tdd_mask)
 }
 
+// UDX710 设备支持的全部频段掩码（出厂全频段）
+// LTE: FDD=149 (B1+B3+B5+B8), TDD=320 (B39+B41)
+// NR: FDD=517 (N1+N3+N28), TDD=912 (N41+N77+N78+N79)
+pub const LTE_FDD_ALL: u16 = 149;
+pub const LTE_TDD_ALL: u16 = 320;
+pub const NR_FDD_ALL: u16 = 517;
+pub const NR_TDD_ALL: u16 = 912;
+
+/// 构造「恢复 LTE 出厂全频段」的 SPLBAND 指令。
+///
+/// 清空频段锁时必须下发全频段掩码，不能下发 0：下发 0 会令 modem 锁到
+/// 零频段导致脱网。
+pub fn build_splband_lte_full_command() -> String {
+    build_splband_lte_command(LTE_FDD_ALL, LTE_TDD_ALL)
+}
+
+/// 构造「恢复 NR 出厂全频段」的 SPLBAND 指令。
+pub fn build_splband_nr_full_command() -> String {
+    build_splband_nr_command(NR_FDD_ALL, NR_TDD_ALL)
+}
+
